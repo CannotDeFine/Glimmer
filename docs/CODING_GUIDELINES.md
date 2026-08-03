@@ -34,6 +34,17 @@ from a prototype into a shared-GPU scheduler.
 - Add a dependency only when the standard library or existing project code is
   insufficient. Do not modify `3rdparty/` except for an explicit dependency
   update.
+- Follow [DEPENDENCY_MANAGEMENT.md](DEPENDENCY_MANAGEMENT.md) before adding,
+  updating, or removing a dependency.
+
+## Build quality
+
+- Resolve all compiler warnings in Glimmer-owned code. CI enables warnings as
+  errors for the project targets.
+- Run the appropriate CMake preset for the requested configuration. Use the
+  `asan-ubsan` preset when changing ownership, lifetime, or asynchronous code.
+- Run the `lint` preset when clang-tidy is available and resolve findings in
+  Glimmer-owned code before merging.
 
 ## Resource ownership and errors
 

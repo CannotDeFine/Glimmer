@@ -44,15 +44,24 @@ replace it.
 Build and run the standard suite with:
 
 ```sh
-cmake -S . -B build
-cmake --build build
-ctest --test-dir build --output-on-failure
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug --output-on-failure
 ```
 
 Run formatting verification alongside tests:
 
 ```sh
-cmake --build build --target format-check
+cmake --build --preset debug --target format-check
+```
+
+Run the sanitizer suite when changing memory ownership, lifetime, or
+asynchronous behavior:
+
+```sh
+cmake --preset asan-ubsan
+cmake --build --preset asan-ubsan
+ctest --preset asan-ubsan --output-on-failure
 ```
 
 If a required test cannot run, state the missing dependency or hardware

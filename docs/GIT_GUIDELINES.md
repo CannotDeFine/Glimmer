@@ -20,9 +20,10 @@ primary way to identify the kind, area, and intent of each change.
 Before committing, run the applicable checks:
 
 ```sh
-cmake --build build
-cmake --build build --target format-check
-ctest --test-dir build --output-on-failure
+cmake --preset debug
+cmake --build --preset debug
+cmake --build --preset debug --target format-check
+ctest --preset debug --output-on-failure
 ```
 
 ## Commit message format
