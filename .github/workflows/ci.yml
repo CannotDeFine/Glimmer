@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Configure
+        run: cmake --preset debug -DGLIMMER_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build --preset debug
+      - name: Test
+        run: ctest --preset debug --output-on-failure
+      - name: Check formatting
+        run: cmake --build --preset debug --target format-check
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Configure
+        run: cmake --preset asan-ubsan -DGLIMMER_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build --preset asan-ubsan
+      - name: Test
+        run: ctest --preset asan-ubsan --output-on-failure
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install clang-tidy
+        run: sudo apt-get update && sudo apt-get install --yes clang-tidy
+      - name: Configure
+        run: cmake --preset lint -DGLIMMER_WARNINGS_AS_ERRORS=ON
+      - name: Run clang-tidy
+        run: cmake --build --preset lint

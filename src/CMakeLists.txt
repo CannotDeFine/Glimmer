@@ -9,3 +9,12 @@ target_link_libraries(glimmer
         Glimmer::project_options
         spdlog::spdlog
 )
+
+glimmer_enable_clang_tidy(glimmer)
+
+if(BUILD_TESTING)
+    add_test(NAME glimmer_starts COMMAND glimmer)
+    set_tests_properties(glimmer_starts PROPERTIES
+        PASS_REGULAR_EXPRESSION "Glimmer started"
+    )
+endif()

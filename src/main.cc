@@ -1,6 +1,6 @@
-#include <iostream>
+#include <spdlog/spdlog.h>
 
 int main() {
-    std::cout << "Glimmer started\n";
+    spdlog::info("Glimmer started");
     return 0;
 }

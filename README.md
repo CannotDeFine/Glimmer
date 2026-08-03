@@ -31,25 +31,31 @@ git submodule update --init --recursive
 
 ### Build
 
+Use the `debug` preset for day-to-day development:
+
+```sh
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug --output-on-failure
+```
+
+The build script runs the configure and build steps:
+
 ```sh
 ./scripts/build.sh
 ```
 
-The equivalent CMake commands are:
+Additional presets are available for optimized builds, runtime sanitizers, and
+static analysis:
 
 ```sh
-cmake -S . -B build
-cmake --build build
+cmake --preset release
+cmake --preset asan-ubsan
+cmake --preset lint
 ```
 
-An out-of-tree build directory can also be placed anywhere:
-
-```sh
-cmake -S /path/to/Glimmer -B /path/to/build/glimmer
-cmake --build /path/to/build/glimmer
-```
-
-The executable is written to `bin/` inside the selected build directory.
+The `lint` preset requires `clang-tidy`. The executable is written to `bin/`
+inside the selected build directory.
 
 ## Contributing
 

@@ -3,7 +3,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_DIR="${ROOT_DIR}/build"
+BUILD_DIR="${ROOT_DIR}/build/debug"
+
+cd "${ROOT_DIR}"
 
 if [[ ! -f "${ROOT_DIR}/3rdparty/spdlog/CMakeLists.txt" ]]; then
     if command -v git >/dev/null 2>&1 && [[ -e "${ROOT_DIR}/.git" ]]; then
@@ -14,8 +16,8 @@ if [[ ! -f "${ROOT_DIR}/3rdparty/spdlog/CMakeLists.txt" ]]; then
     fi
 fi
 
-cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}"
-cmake --build "${BUILD_DIR}"
+cmake --preset debug
+cmake --build --preset debug
 
 # clangd usually looks for compile_commands.json in the project root.  Copying
 # instead of creating a symbolic link keeps this script usable on more systems.
