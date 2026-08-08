@@ -9,8 +9,33 @@ endif()
 include(cmake/ProjectOptions.cmake)
 include(cmake/ProjectTesting.cmake)
 
+option(GLIMMER_BUILD_CUDA_INTERCEPTOR "Build the optional CUDA Driver API preload library" OFF)
+option(GLIMMER_ENABLE_CUDA_GPU_TESTS "Enable tests that require a CUDA-capable GPU" OFF)
+
+find_package(Threads REQUIRED)
+
+if(CMAKE_EXPORT_COMPILE_COMMANDS)
+    add_custom_target(glimmer_compile_commands ALL
+        COMMAND ${CMAKE_COMMAND} -E rm -f "${PROJECT_SOURCE_DIR}/compile_commands.json"
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+            "${CMAKE_BINARY_DIR}/compile_commands.json"
+            "${PROJECT_SOURCE_DIR}/compile_commands.json"
+        COMMENT "Updating root compile_commands.json link"
+        VERBATIM
+    )
+endif()
+
 add_subdirectory(3rdparty)
 add_subdirectory(src)
+
+if(GLIMMER_BUILD_CUDA_INTERCEPTOR)
+    find_package(CUDAToolkit REQUIRED)
+    add_subdirectory(src/interceptor)
+endif()
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
 
 find_program(GLIMMER_CLANG_FORMAT NAMES clang-format)
 

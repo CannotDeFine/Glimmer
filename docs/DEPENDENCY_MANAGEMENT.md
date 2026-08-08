@@ -19,6 +19,19 @@ existing project code cannot meet a concrete requirement.
 Use it only after an explicit decision records why a pinned submodule or system
 package is unsuitable.
 
+## CUDA interceptor SDK dependency
+
+The optional CUDA interceptor requires NVIDIA CUDA Toolkit headers for the
+CUDA Driver API ABI declarations. The toolkit is a vendor SDK dependency; it
+is discovered with `find_package(CUDAToolkit)` only when
+`GLIMMER_BUILD_CUDA_INTERCEPTOR=ON`. CUDA headers and binaries are not vendored
+in this repository.
+
+The interceptor resolves `libcuda.so.1` at runtime with the Linux dynamic
+loader rather than linking directly to the NVIDIA Driver. This keeps the
+standard build and no-GPU tests independent of a CUDA installation. CUDA
+integration tests must state the Toolkit and Driver versions they exercise.
+
 ## Introducing a dependency
 
 Before adding one, document:

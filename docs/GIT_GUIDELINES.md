@@ -20,11 +20,14 @@ primary way to identify the kind, area, and intent of each change.
 Before committing, run the applicable checks:
 
 ```sh
-cmake --preset debug
-cmake --build --preset debug
-cmake --build --preset debug --target format-check
-ctest --preset debug --output-on-failure
+./scripts/check.sh
 ```
+
+The check script runs the standard, sanitizer, lint, and CUDA lint presets
+when their toolchains are available. It also checks repository whitespace.
+If clang-tidy or the CUDA Toolkit is unavailable, the script reports the
+skipped checks explicitly; install the missing toolchain before a release or
+CUDA-related commit.
 
 ## Commit message format
 

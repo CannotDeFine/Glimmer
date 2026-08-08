@@ -57,6 +57,28 @@ cmake --preset lint
 The `lint` preset requires `clang-tidy`. The executable is written to `bin/`
 inside the selected build directory.
 
+When developing the CUDA interceptor, use its dedicated presets. They use
+separate build directories so CUDA-enabled and non-CUDA artifacts cannot share
+stale CMake cache state:
+
+```sh
+cmake --preset cuda-debug
+cmake --build --preset cuda-debug
+ctest --preset cuda-debug --output-on-failure
+```
+
+The CUDA GPU test preset requires a compatible NVIDIA driver and GPU:
+
+```sh
+cmake --preset cuda-gpu
+cmake --build --preset cuda-gpu
+ctest --preset cuda-gpu --output-on-failure
+```
+
+The root `compile_commands.json` link follows the most recently built preset.
+Use `cuda-debug` last when editor diagnostics must include CUDA interceptor
+files and Toolkit include paths.
+
 ## Contributing
 
 Follow the project's [Git guidelines](docs/GIT_GUIDELINES.md) when contributing.

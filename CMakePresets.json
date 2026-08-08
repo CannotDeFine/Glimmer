@@ -42,6 +42,31 @@
       "cacheVariables": {
         "GLIMMER_ENABLE_CLANG_TIDY": "ON"
       }
+    },
+    {
+      "name": "cuda-debug",
+      "displayName": "CUDA interceptor Debug",
+      "inherits": "debug",
+      "cacheVariables": {
+        "GLIMMER_BUILD_CUDA_INTERCEPTOR": "ON",
+        "GLIMMER_ENABLE_CUDA_GPU_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "cuda-lint",
+      "displayName": "CUDA interceptor clang-tidy",
+      "inherits": "cuda-debug",
+      "cacheVariables": {
+        "GLIMMER_ENABLE_CLANG_TIDY": "ON"
+      }
+    },
+    {
+      "name": "cuda-gpu",
+      "displayName": "CUDA interceptor with GPU tests",
+      "inherits": "cuda-debug",
+      "cacheVariables": {
+        "GLIMMER_ENABLE_CUDA_GPU_TESTS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -60,6 +85,18 @@
     {
       "name": "lint",
       "configurePreset": "lint"
+    },
+    {
+      "name": "cuda-debug",
+      "configurePreset": "cuda-debug"
+    },
+    {
+      "name": "cuda-lint",
+      "configurePreset": "cuda-lint"
+    },
+    {
+      "name": "cuda-gpu",
+      "configurePreset": "cuda-gpu"
     }
   ],
   "testPresets": [
@@ -70,6 +107,22 @@
     {
       "name": "asan-ubsan",
       "configurePreset": "asan-ubsan"
+    },
+    {
+      "name": "lint",
+      "configurePreset": "lint"
+    },
+    {
+      "name": "cuda-debug",
+      "configurePreset": "cuda-debug"
+    },
+    {
+      "name": "cuda-lint",
+      "configurePreset": "cuda-lint"
+    },
+    {
+      "name": "cuda-gpu",
+      "configurePreset": "cuda-gpu"
     }
   ]
 }

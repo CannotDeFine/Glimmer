@@ -31,6 +31,13 @@ concrete responsibility and a testable interface.
 | `metrics` | Exposes measurements and health information gathered from other modules. | Ownership of scheduler or backend state. |
 | `app` | Parses process configuration, initializes modules, and manages process lifetime. | Domain policy or resource-accounting decisions. |
 
+## Implemented modules
+
+| Module | Location | Current responsibility |
+| --- | --- | --- |
+| `core` | `include/glimmer/core/`, `src/core/` | Provides a thread-safe in-process quota ledger with explicit reservation, commit, cancellation, and release transitions. It has no CUDA, dynamic-linker, transport, or process-global dependencies. |
+| `control` | `include/glimmer/control/`, `src/control/` | Adapts quota requests to `core` and computes tenant-visible memory information. It has no CUDA or dynamic-linker dependencies. |
+
 ## Dependency direction
 
 ```text

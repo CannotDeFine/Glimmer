@@ -18,3 +18,6 @@ if(BUILD_TESTING)
         PASS_REGULAR_EXPRESSION "Glimmer started"
     )
 endif()
+
+add_subdirectory(core)
+add_subdirectory(control)

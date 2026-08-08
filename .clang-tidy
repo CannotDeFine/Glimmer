@@ -21,4 +21,22 @@ CheckOptions:
     value: CamelCase
   - key: readability-identifier-naming.ConstantPrefix
     value: k
+  - key: readability-identifier-naming.LocalVariableCase
+    value: lower_case
+  - key: readability-identifier-naming.LocalConstantCase
+    value: lower_case
+  - key: readability-identifier-naming.LocalConstantPrefix
+    value: ''
+  - key: readability-identifier-naming.ClassMemberCase
+    value: lower_case
+  - key: readability-identifier-naming.ClassMemberPrefix
+    value: ''
+  - key: readability-identifier-naming.ClassConstantCase
+    value: lower_case
+  - key: readability-identifier-naming.ClassConstantPrefix
+    value: ''
+  - key: readability-identifier-naming.ConstantMemberCase
+    value: lower_case
+  - key: readability-identifier-naming.ConstantMemberPrefix
+    value: ''
 ...

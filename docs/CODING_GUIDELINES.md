@@ -99,6 +99,25 @@ from a prototype into a shared-GPU scheduler.
 - Resolve dynamically loaded symbols once in a thread-safe manner, then retain
   the resolved function pointer for later calls.
 
+## Failure containment
+
+- Validate externally supplied pointers, sizes, handles, environment values,
+  and symbol-resolution results before dereferencing or using them.
+- Do not allow C++ exceptions to cross a C, CUDA, POSIX, or dynamic-loader ABI
+  boundary. Convert them to a documented error result at that boundary.
+- Return the original external error unchanged whenever Glimmer has not made a
+  policy decision. Return a Glimmer-specific error only for a documented
+  rejection or an unrecoverable internal consistency failure.
+- If allocation accounting or rollback cannot be completed after a real GPU
+  allocation succeeds, retain the reservation and reject later allocations.
+  Do not release or undercount quota merely to keep the process running.
+- Treat unknown or duplicate release requests as non-accounting events. A
+  release must never reduce usage unless it matches a successful, recorded
+  allocation.
+- Guard all arithmetic used for memory sizes, quotas, and counters against
+  overflow and underflow. Saturate diagnostic values or reject requests rather
+  than wrapping.
+
 ## Scheduling semantics
 
 - Attribute every task, reservation, and metric to a tenant before it enters a
