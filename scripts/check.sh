@@ -5,25 +5,70 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    COLOR_BOLD=$'\033[1m'
+    COLOR_CYAN=$'\033[1;36m'
+    COLOR_GREEN=$'\033[1;32m'
+    COLOR_YELLOW=$'\033[1;33m'
+    COLOR_RESET=$'\033[0m'
+else
+    COLOR_BOLD=''
+    COLOR_CYAN=''
+    COLOR_GREEN=''
+    COLOR_YELLOW=''
+    COLOR_RESET=''
+fi
+
+section() {
+    local title="$1"
+    local title_length=${#title}
+    local index
+    local content_width=50
+    local left_padding=$(( (content_width - title_length - 2) / 2 ))
+    local right_padding=$(( content_width - title_length - 2 - left_padding ))
+
+    printf '\n%s%s╭' "${COLOR_BOLD}" "${COLOR_CYAN}"
+    for ((index = 0; index < content_width; index++)); do
+        printf '─'
+    done
+    printf '╮%s\n' "${COLOR_RESET}"
+
+    printf '%s%s│' "${COLOR_BOLD}" "${COLOR_CYAN}"
+    for ((index = 0; index < left_padding; index++)); do
+        printf ' '
+    done
+    printf ' %s ' "${title}"
+    for ((index = 0; index < right_padding; index++)); do
+        printf ' '
+    done
+    printf '│%s\n' "${COLOR_RESET}"
+
+    printf '%s%s╰' "${COLOR_BOLD}" "${COLOR_CYAN}"
+    for ((index = 0; index < content_width; index++)); do
+        printf '─'
+    done
+    printf '╯%s\n' "${COLOR_RESET}"
+}
+
 run_preset() {
     local preset="$1"
 
-    echo "==> Configuring ${preset}"
+    section "${preset}: configure"
     cmake --preset "${preset}"
-    echo "==> Building ${preset}"
+    section "${preset}: build"
     cmake --build --preset "${preset}"
-    echo "==> Checking formatting (${preset})"
+    section "${preset}: format check"
     cmake --build --preset "${preset}" --target format-check
-    echo "==> Running tests (${preset})"
+    section "${preset}: tests"
     ctest --preset "${preset}" --output-on-failure
 }
 
-echo "==> Checking repository whitespace"
+section "repository: whitespace check"
 git diff --check
 
 run_preset debug
 
-echo "==> Running sanitizer checks"
+section "asan-ubsan: configure and build"
 cmake --preset asan-ubsan
 cmake --build --preset asan-ubsan
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" \
@@ -32,13 +77,16 @@ ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" \
 if command -v clang-tidy >/dev/null 2>&1; then
     run_preset lint
 else
-    echo "WARNING: clang-tidy is not installed; skipping lint preset." >&2
+    printf '%sWARNING: clang-tidy is not installed; skipping lint preset.%s\n' \
+        "${COLOR_YELLOW}" "${COLOR_RESET}" >&2
 fi
 
 if command -v nvcc >/dev/null 2>&1 && [[ -f /usr/local/cuda/include/cuda.h ]]; then
     run_preset cuda-lint
 else
-    echo "WARNING: CUDA Toolkit is unavailable; skipping cuda-lint preset." >&2
+    printf '%sWARNING: CUDA Toolkit is unavailable; skipping cuda-lint preset.%s\n' \
+        "${COLOR_YELLOW}" "${COLOR_RESET}" >&2
 fi
 
-echo "All available checks passed."
+printf '\n%s%sAll available checks passed.%s\n' \
+    "${COLOR_BOLD}" "${COLOR_GREEN}" "${COLOR_RESET}"
