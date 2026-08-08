@@ -14,7 +14,11 @@
 namespace {
 
 using DriverAllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes);
+using DriverAllocAsyncFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes,
+                                              CUstream stream);
 using DriverFreeFunction = CUresult (*)(CUdeviceptr device_pointer);
+using DriverFreeAsyncFunction = CUresult (*)(CUdeviceptr device_pointer, CUstream stream);
+using DriverContextSynchronizeFunction = CUresult (*)();
 using DriverMemGetInfoFunction = CUresult (*)(std::size_t* free_bytes, std::size_t* total_bytes);
 
 template <typename Function>
@@ -66,6 +70,45 @@ extern "C" cudaError_t CUDARTAPI cudaFree(void* device_pointer) {
     }
     const CUresult result = release(to_device_pointer(device_pointer));
     return result == CUDA_SUCCESS ? cudaSuccess : cudaErrorInvalidValue;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMallocAsync(void** device_pointer, std::size_t memory_bytes,
+                                                 cudaStream_t stream) {
+    if (device_pointer == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    const DriverAllocAsyncFunction allocate =
+        resolve_driver_function<DriverAllocAsyncFunction>("cuMemAllocAsync");
+    if (allocate == nullptr) {
+        return cudaErrorNotSupported;
+    }
+
+    CUdeviceptr driver_pointer = 0;
+    const CUresult result = allocate(&driver_pointer, memory_bytes, stream);
+    if (result != CUDA_SUCCESS) {
+        return cudaErrorMemoryAllocation;
+    }
+    *device_pointer = to_runtime_pointer(driver_pointer);
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaFreeAsync(void* device_pointer, cudaStream_t stream) {
+    const DriverFreeAsyncFunction release =
+        resolve_driver_function<DriverFreeAsyncFunction>("cuMemFreeAsync");
+    if (release == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    const CUresult result = release(to_device_pointer(device_pointer), stream);
+    return result == CUDA_SUCCESS ? cudaSuccess : cudaErrorInvalidValue;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaDeviceSynchronize() {
+    const DriverContextSynchronizeFunction synchronize =
+        resolve_driver_function<DriverContextSynchronizeFunction>("cuCtxSynchronize");
+    if (synchronize == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    return synchronize() == CUDA_SUCCESS ? cudaSuccess : cudaErrorUnknown;
 }
 
 extern "C" cudaError_t CUDARTAPI cudaMemGetInfo(std::size_t* free_bytes, std::size_t* total_bytes) {

@@ -23,6 +23,7 @@ constexpr std::size_t kPhysicalMemoryBytes = std::size_t{64} * 1024 * 1024;
 constexpr std::size_t kForcedAllocationFailureBytes = 1536;
 std::mutex g_mutex;
 std::unordered_map<CUdeviceptr, std::size_t> g_allocations;
+std::unordered_map<CUdeviceptr, CUstream> g_pending_frees;
 std::size_t g_used_bytes = 0;
 CUdeviceptr g_next_pointer = 0x100000U;
 bool g_context_alive = true;
@@ -57,6 +58,9 @@ CUresult reserve_memory(CUdeviceptr* device_pointer, std::size_t memory_bytes) {
 
 CUresult fake_mem_free(CUdeviceptr device_pointer) {
     std::scoped_lock lock(g_mutex);
+    if (g_pending_frees.contains(device_pointer)) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
     const auto allocation = g_allocations.find(device_pointer);
     if (allocation == g_allocations.end()) {
         return CUDA_ERROR_INVALID_VALUE;
@@ -64,6 +68,31 @@ CUresult fake_mem_free(CUdeviceptr device_pointer) {
     g_used_bytes -= allocation->second;
     g_allocations.erase(allocation);
     return CUDA_SUCCESS;
+}
+
+CUresult fake_mem_free_async(CUdeviceptr device_pointer, CUstream stream) {
+    std::scoped_lock lock(g_mutex);
+    if (!g_allocations.contains(device_pointer) || g_pending_frees.contains(device_pointer)) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    g_pending_frees.emplace(device_pointer, stream);
+    return CUDA_SUCCESS;
+}
+
+void complete_pending_frees(CUstream stream, bool match_stream) {
+    std::scoped_lock lock(g_mutex);
+    for (auto pending = g_pending_frees.begin(); pending != g_pending_frees.end();) {
+        if (match_stream && pending->second != stream) {
+            ++pending;
+            continue;
+        }
+        const auto allocation = g_allocations.find(pending->first);
+        if (allocation != g_allocations.end()) {
+            g_used_bytes -= allocation->second;
+            g_allocations.erase(allocation);
+        }
+        pending = g_pending_frees.erase(pending);
+    }
 }
 
 void* lookup_symbol(const char* symbol);
@@ -106,6 +135,87 @@ extern "C" CUresult CUDAAPI cuMemAllocPitch_v2(CUdeviceptr* device_pointer, std:
 
 extern "C" CUresult CUDAAPI cuMemFree_v2(CUdeviceptr device_pointer) {
     return fake_mem_free(device_pointer);
+}
+
+extern "C" CUresult CUDAAPI cuMemAllocAsync(CUdeviceptr* device_pointer, std::size_t memory_bytes,
+                                            CUstream) {
+    return reserve_memory(device_pointer, memory_bytes);
+}
+
+extern "C" CUresult CUDAAPI cuMemAllocAsync_ptsz(CUdeviceptr* device_pointer,
+                                                 std::size_t memory_bytes, CUstream stream) {
+    return cuMemAllocAsync(device_pointer, memory_bytes, stream);
+}
+
+extern "C" CUresult CUDAAPI cuMemAllocFromPoolAsync(CUdeviceptr* device_pointer,
+                                                    std::size_t memory_bytes, CUmemoryPool,
+                                                    CUstream) {
+    return reserve_memory(device_pointer, memory_bytes);
+}
+
+extern "C" CUresult CUDAAPI cuMemAllocFromPoolAsync_ptsz(CUdeviceptr* device_pointer,
+                                                         std::size_t memory_bytes,
+                                                         CUmemoryPool pool, CUstream stream) {
+    return cuMemAllocFromPoolAsync(device_pointer, memory_bytes, pool, stream);
+}
+
+extern "C" CUresult CUDAAPI cuMemFreeAsync(CUdeviceptr device_pointer, CUstream stream) {
+    return fake_mem_free_async(device_pointer, stream);
+}
+
+extern "C" CUresult CUDAAPI cuMemFreeAsync_ptsz(CUdeviceptr device_pointer, CUstream stream) {
+    return cuMemFreeAsync(device_pointer, stream);
+}
+
+extern "C" CUresult CUDAAPI cuStreamGetDevice(CUstream, CUdevice* device) {
+    if (device == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *device = 0;
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuStreamGetDevice_ptsz(CUstream stream, CUdevice* device) {
+    return cuStreamGetDevice(stream, device);
+}
+
+extern "C" CUresult CUDAAPI cuStreamGetCtx(CUstream, CUcontext* context) {
+    if (context == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    std::scoped_lock lock(g_mutex);
+    if (!g_context_alive) {
+        return CUDA_ERROR_INVALID_CONTEXT;
+    }
+    *context = fake_context();
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuStreamGetCtx_ptsz(CUstream stream, CUcontext* context) {
+    return cuStreamGetCtx(stream, context);
+}
+
+extern "C" CUresult CUDAAPI cuStreamQuery(CUstream stream) {
+    complete_pending_frees(stream, true);
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuStreamQuery_ptsz(CUstream stream) {
+    return cuStreamQuery(stream);
+}
+
+extern "C" CUresult CUDAAPI cuStreamSynchronize(CUstream stream) {
+    complete_pending_frees(stream, true);
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuStreamSynchronize_ptsz(CUstream stream) {
+    return cuStreamSynchronize(stream);
+}
+
+extern "C" CUresult CUDAAPI cuCtxSynchronize() {
+    complete_pending_frees(nullptr, false);
+    return CUDA_SUCCESS;
 }
 
 extern "C" CUresult CUDAAPI cuMemGetInfo_v2(std::size_t* free_bytes, std::size_t* total_bytes) {
@@ -152,8 +262,6 @@ extern "C" CUresult CUDAAPI cuCtxDestroy_v2(CUcontext context) {
         return CUDA_ERROR_INVALID_CONTEXT;
     }
     std::scoped_lock lock(g_mutex);
-    g_allocations.clear();
-    g_used_bytes = 0;
     g_context_alive = false;
     return CUDA_SUCCESS;
 }
@@ -197,8 +305,26 @@ void* lookup_symbol(const char* symbol) {
         std::string_view(symbol) == "cuMemAllocPitch_v2") {
         return reinterpret_cast<void*>(&cuMemAllocPitch_v2);
     }
+    if (std::string_view(symbol) == "cuMemAllocAsync") {
+        return reinterpret_cast<void*>(&cuMemAllocAsync);
+    }
+    if (std::string_view(symbol) == "cuMemAllocAsync_ptsz") {
+        return reinterpret_cast<void*>(&cuMemAllocAsync_ptsz);
+    }
+    if (std::string_view(symbol) == "cuMemAllocFromPoolAsync") {
+        return reinterpret_cast<void*>(&cuMemAllocFromPoolAsync);
+    }
+    if (std::string_view(symbol) == "cuMemAllocFromPoolAsync_ptsz") {
+        return reinterpret_cast<void*>(&cuMemAllocFromPoolAsync_ptsz);
+    }
     if (std::string_view(symbol) == "cuMemFree" || std::string_view(symbol) == "cuMemFree_v2") {
         return reinterpret_cast<void*>(&cuMemFree_v2);
+    }
+    if (std::string_view(symbol) == "cuMemFreeAsync") {
+        return reinterpret_cast<void*>(&cuMemFreeAsync);
+    }
+    if (std::string_view(symbol) == "cuMemFreeAsync_ptsz") {
+        return reinterpret_cast<void*>(&cuMemFreeAsync_ptsz);
     }
     if (std::string_view(symbol) == "cuMemGetInfo" ||
         std::string_view(symbol) == "cuMemGetInfo_v2") {
@@ -217,6 +343,33 @@ void* lookup_symbol(const char* symbol) {
     if (std::string_view(symbol) == "cuCtxDestroy" ||
         std::string_view(symbol) == "cuCtxDestroy_v2") {
         return reinterpret_cast<void*>(&cuCtxDestroy_v2);
+    }
+    if (std::string_view(symbol) == "cuStreamGetDevice") {
+        return reinterpret_cast<void*>(&cuStreamGetDevice);
+    }
+    if (std::string_view(symbol) == "cuStreamGetDevice_ptsz") {
+        return reinterpret_cast<void*>(&cuStreamGetDevice_ptsz);
+    }
+    if (std::string_view(symbol) == "cuStreamGetCtx") {
+        return reinterpret_cast<void*>(&cuStreamGetCtx);
+    }
+    if (std::string_view(symbol) == "cuStreamGetCtx_ptsz") {
+        return reinterpret_cast<void*>(&cuStreamGetCtx_ptsz);
+    }
+    if (std::string_view(symbol) == "cuStreamQuery") {
+        return reinterpret_cast<void*>(&cuStreamQuery);
+    }
+    if (std::string_view(symbol) == "cuStreamQuery_ptsz") {
+        return reinterpret_cast<void*>(&cuStreamQuery_ptsz);
+    }
+    if (std::string_view(symbol) == "cuStreamSynchronize") {
+        return reinterpret_cast<void*>(&cuStreamSynchronize);
+    }
+    if (std::string_view(symbol) == "cuStreamSynchronize_ptsz") {
+        return reinterpret_cast<void*>(&cuStreamSynchronize_ptsz);
+    }
+    if (std::string_view(symbol) == "cuCtxSynchronize") {
+        return reinterpret_cast<void*>(&cuCtxSynchronize);
     }
     if (std::string_view(symbol) == "cuGetProcAddress") {
         return reinterpret_cast<void*>(&cuGetProcAddress);

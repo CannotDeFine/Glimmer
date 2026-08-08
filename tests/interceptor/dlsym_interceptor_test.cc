@@ -32,11 +32,39 @@ bool is_not_from_interceptor(void* symbol) {
 
 int main() {
     const char* const intercepted_names[] = {
-        "cuInit",           "cuMemAlloc",          "cuMemAlloc_v2",    "cuMemAllocManaged",
-        "cuMemAllocPitch",  "cuMemAllocPitch_v2",  "cuMemFree",        "cuMemFree_v2",
-        "cuMemGetInfo",     "cuMemGetInfo_v2",     "cuDeviceTotalMem", "cuDeviceTotalMem_v2",
-        "cuCtxGetCurrent",  "cuCtxGetDevice",      "cuCtxDestroy",     "cuCtxDestroy_v2",
-        "cuGetProcAddress", "cuGetProcAddress_v2",
+        "cuInit",
+        "cuMemAlloc",
+        "cuMemAlloc_v2",
+        "cuMemAllocManaged",
+        "cuMemAllocPitch",
+        "cuMemAllocPitch_v2",
+        "cuMemFree",
+        "cuMemFree_v2",
+        "cuMemGetInfo",
+        "cuMemGetInfo_v2",
+        "cuDeviceTotalMem",
+        "cuDeviceTotalMem_v2",
+        "cuCtxGetCurrent",
+        "cuCtxGetDevice",
+        "cuCtxDestroy",
+        "cuCtxDestroy_v2",
+        "cuMemAllocAsync",
+        "cuMemAllocAsync_ptsz",
+        "cuMemAllocFromPoolAsync",
+        "cuMemAllocFromPoolAsync_ptsz",
+        "cuMemFreeAsync",
+        "cuMemFreeAsync_ptsz",
+        "cuStreamGetDevice",
+        "cuStreamGetDevice_ptsz",
+        "cuStreamGetCtx",
+        "cuStreamGetCtx_ptsz",
+        "cuStreamQuery",
+        "cuStreamQuery_ptsz",
+        "cuStreamSynchronize",
+        "cuStreamSynchronize_ptsz",
+        "cuCtxSynchronize",
+        "cuGetProcAddress",
+        "cuGetProcAddress_v2",
     };
 
     for (const char* name : intercepted_names) {
@@ -46,7 +74,9 @@ int main() {
         }
     }
 
-    const char* const runtime_names[] = {"cudaMalloc", "cudaFree", "cudaMemGetInfo"};
+    const char* const runtime_names[] = {"cudaMalloc",     "cudaMallocAsync",
+                                         "cudaFree",       "cudaFreeAsync",
+                                         "cudaMemGetInfo", "cudaDeviceSynchronize"};
     for (const char* name : runtime_names) {
         if (!is_from_interceptor(dlsym(RTLD_DEFAULT, name))) {
             std::cerr << "dlsym did not return the Runtime interceptor for " << name << '\n';

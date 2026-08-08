@@ -6,7 +6,10 @@ add_library(glimmer_cuda_interceptor SHARED
     driver_dispatch.cc
     internal/driver_dispatch.h
     driver_api_interceptor.cc
+    internal/driver_api_interceptor.h
+    driver_api_wrappers.cc
     runtime_api_interceptor.cc
+    symbol_interceptor.cc
     internal/runtime_api_bridge.h
     symbol_registry.cc
     internal/symbol_registry.h

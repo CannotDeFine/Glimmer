@@ -33,10 +33,12 @@ replace it.
 | --- | --- | --- |
 | `core` | Reservation admission, rejection, commit, cancellation, release failures, concurrent reservations, lifetime safety, and counter overflow protection. | No |
 | `control` | Quota-visible memory information, physical-memory bounds, and rejected reservations. | No |
-| `interceptor` | Driver/Runtime preload coverage through a fake CUDA Driver and Runtime, `cuInit`, `dlsym`, both `cuGetProcAddress` forms, legacy and versioned allocation/query aliases, context-aware allocation records, context cleanup, `cuDeviceTotalMem_v2`, `cuMemAllocManaged`, `cuMemAllocPitch_v2`, synchronous Runtime `cudaMalloc`/`cudaFree`/`cudaMemGetInfo`, deterministic allocation-registry tests, and injectable Driver dispatch tests. | GPU test for real CUDA routing; no GPU for symbol, fake preload, registry, dispatch, and core tests |
+| `interceptor` | Driver/Runtime preload coverage through a fake CUDA Driver and Runtime, `cuInit`, `dlsym`, both `cuGetProcAddress` forms, legacy/versioned and PTDS allocation/query aliases, stream identity queries, context-aware allocation records, context cleanup, `cuDeviceTotalMem_v2`, `cuMemAllocManaged`, `cuMemAllocPitch_v2`, stream-ordered Driver allocation/free and completion accounting, Runtime `cudaMalloc`/`cudaFree`/`cudaMemGetInfo` plus async Runtime forwarding, deterministic allocation-registry tests, and injectable Driver dispatch tests. | GPU test for real CUDA routing; no GPU for symbol, fake preload, registry, dispatch, and core tests |
 
-The current interceptor milestone does not claim coverage for async allocation,
-memory pools, VMM, NVML, or multi-process shared accounting. Those remain governed by
+The current interceptor milestone covers the Driver stream-ordered allocation
+path, its PTDS aliases, Runtime async forwarding, and its explicit completion
+boundaries. It does not claim coverage for CUDA memory-pool management and
+trim, VMM, NVML, or multi-process shared accounting. Those remain governed by
 [CUDA_API_COVERAGE.md](CUDA_API_COVERAGE.md).
 
 ## Test design

@@ -12,6 +12,15 @@
 #ifdef cuCtxDestroy
 #undef cuCtxDestroy
 #endif
+#ifdef cuStreamGetDevice
+#undef cuStreamGetDevice
+#endif
+#ifdef cuStreamGetCtx
+#undef cuStreamGetCtx
+#endif
+#ifdef cuStreamGetCtx_v2
+#undef cuStreamGetCtx_v2
+#endif
 
 extern "C" CUresult CUDAAPI cuMemAlloc_v2(CUdeviceptr* device_pointer, std::size_t memory_bytes);
 extern "C" CUresult CUDAAPI cuInit(unsigned int flags);
@@ -27,14 +36,39 @@ extern "C" CUresult CUDAAPI cuCtxGetCurrent(CUcontext* context);
 extern "C" CUresult CUDAAPI cuCtxGetDevice(CUdevice* device);
 extern "C" CUresult CUDAAPI cuCtxDestroy(CUcontext context);
 extern "C" CUresult CUDAAPI cuCtxDestroy_v2(CUcontext context);
+extern "C" CUresult CUDAAPI cuMemAllocAsync(CUdeviceptr* device_pointer, std::size_t memory_bytes,
+                                            CUstream stream);
+extern "C" CUresult CUDAAPI cuMemAllocAsync_ptsz(CUdeviceptr* device_pointer,
+                                                 std::size_t memory_bytes, CUstream stream);
+extern "C" CUresult CUDAAPI cuMemAllocFromPoolAsync(CUdeviceptr* device_pointer,
+                                                    std::size_t memory_bytes, CUmemoryPool pool,
+                                                    CUstream stream);
+extern "C" CUresult CUDAAPI cuMemAllocFromPoolAsync_ptsz(CUdeviceptr* device_pointer,
+                                                         std::size_t memory_bytes,
+                                                         CUmemoryPool pool, CUstream stream);
+extern "C" CUresult CUDAAPI cuMemFreeAsync(CUdeviceptr device_pointer, CUstream stream);
+extern "C" CUresult CUDAAPI cuMemFreeAsync_ptsz(CUdeviceptr device_pointer, CUstream stream);
+extern "C" CUresult CUDAAPI cuStreamGetDevice(CUstream stream, CUdevice* device);
+extern "C" CUresult CUDAAPI cuStreamGetDevice_ptsz(CUstream stream, CUdevice* device);
+extern "C" CUresult CUDAAPI cuStreamGetCtx(CUstream stream, CUcontext* context);
+extern "C" CUresult CUDAAPI cuStreamGetCtx_ptsz(CUstream stream, CUcontext* context);
+extern "C" CUresult CUDAAPI cuStreamQuery(CUstream stream);
+extern "C" CUresult CUDAAPI cuStreamQuery_ptsz(CUstream stream);
+extern "C" CUresult CUDAAPI cuStreamSynchronize(CUstream stream);
+extern "C" CUresult CUDAAPI cuStreamSynchronize_ptsz(CUstream stream);
+extern "C" CUresult CUDAAPI cuCtxSynchronize();
 extern "C" CUresult CUDAAPI cuGetProcAddress(const char* symbol, void** function_pointer,
                                              int cuda_version, cuuint64_t flags);
 extern "C" CUresult CUDAAPI cuGetProcAddress_v2(const char* symbol, void** function_pointer,
                                                 int cuda_version, cuuint64_t flags,
                                                 CUdriverProcAddressQueryResult* symbol_status);
 extern "C" cudaError_t CUDARTAPI cudaMalloc(void** device_pointer, std::size_t memory_bytes);
+extern "C" cudaError_t CUDARTAPI cudaMallocAsync(void** device_pointer, std::size_t memory_bytes,
+                                                 cudaStream_t stream);
 extern "C" cudaError_t CUDARTAPI cudaFree(void* device_pointer);
+extern "C" cudaError_t CUDARTAPI cudaFreeAsync(void* device_pointer, cudaStream_t stream);
 extern "C" cudaError_t CUDARTAPI cudaMemGetInfo(std::size_t* free_bytes, std::size_t* total_bytes);
+extern "C" cudaError_t CUDARTAPI cudaDeviceSynchronize();
 
 namespace glimmer::interceptor {
 
@@ -45,7 +79,7 @@ struct InterceptorSymbol {
     void* wrapper;
 };
 
-const std::array<InterceptorSymbol, 21> kInterceptorSymbols{{
+const std::array<InterceptorSymbol, 39> kInterceptorSymbols{{
     {"cuInit", reinterpret_cast<void*>(&cuInit)},
     {"cuMemAlloc", reinterpret_cast<void*>(&cuMemAlloc_v2)},
     {"cuMemAlloc_v2", reinterpret_cast<void*>(&cuMemAlloc_v2)},
@@ -62,11 +96,29 @@ const std::array<InterceptorSymbol, 21> kInterceptorSymbols{{
     {"cuCtxGetDevice", reinterpret_cast<void*>(&cuCtxGetDevice)},
     {"cuCtxDestroy", reinterpret_cast<void*>(&cuCtxDestroy_v2)},
     {"cuCtxDestroy_v2", reinterpret_cast<void*>(&cuCtxDestroy_v2)},
+    {"cuMemAllocAsync", reinterpret_cast<void*>(&cuMemAllocAsync)},
+    {"cuMemAllocAsync_ptsz", reinterpret_cast<void*>(&cuMemAllocAsync_ptsz)},
+    {"cuMemAllocFromPoolAsync", reinterpret_cast<void*>(&cuMemAllocFromPoolAsync)},
+    {"cuMemAllocFromPoolAsync_ptsz", reinterpret_cast<void*>(&cuMemAllocFromPoolAsync_ptsz)},
+    {"cuMemFreeAsync", reinterpret_cast<void*>(&cuMemFreeAsync)},
+    {"cuMemFreeAsync_ptsz", reinterpret_cast<void*>(&cuMemFreeAsync_ptsz)},
+    {"cuStreamGetDevice", reinterpret_cast<void*>(&cuStreamGetDevice)},
+    {"cuStreamGetDevice_ptsz", reinterpret_cast<void*>(&cuStreamGetDevice_ptsz)},
+    {"cuStreamGetCtx", reinterpret_cast<void*>(&cuStreamGetCtx)},
+    {"cuStreamGetCtx_ptsz", reinterpret_cast<void*>(&cuStreamGetCtx_ptsz)},
+    {"cuStreamQuery", reinterpret_cast<void*>(&cuStreamQuery)},
+    {"cuStreamQuery_ptsz", reinterpret_cast<void*>(&cuStreamQuery_ptsz)},
+    {"cuStreamSynchronize", reinterpret_cast<void*>(&cuStreamSynchronize)},
+    {"cuStreamSynchronize_ptsz", reinterpret_cast<void*>(&cuStreamSynchronize_ptsz)},
+    {"cuCtxSynchronize", reinterpret_cast<void*>(&cuCtxSynchronize)},
     {"cuGetProcAddress", reinterpret_cast<void*>(&cuGetProcAddress)},
     {"cuGetProcAddress_v2", reinterpret_cast<void*>(&cuGetProcAddress_v2)},
     {"cudaMalloc", reinterpret_cast<void*>(&cudaMalloc)},
+    {"cudaMallocAsync", reinterpret_cast<void*>(&cudaMallocAsync)},
     {"cudaFree", reinterpret_cast<void*>(&cudaFree)},
+    {"cudaFreeAsync", reinterpret_cast<void*>(&cudaFreeAsync)},
     {"cudaMemGetInfo", reinterpret_cast<void*>(&cudaMemGetInfo)},
+    {"cudaDeviceSynchronize", reinterpret_cast<void*>(&cudaDeviceSynchronize)},
 }};
 
 }  // namespace

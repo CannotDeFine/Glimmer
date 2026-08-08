@@ -24,7 +24,10 @@ class RuntimeCallScope {
 };
 
 using glimmer::interceptor::DlsymFunction;
+using glimmer::interceptor::RuntimeDeviceSynchronizeFunction;
+using glimmer::interceptor::RuntimeFreeAsyncFunction;
 using glimmer::interceptor::RuntimeFreeFunction;
+using glimmer::interceptor::RuntimeMallocAsyncFunction;
 using glimmer::interceptor::RuntimeMallocFunction;
 using glimmer::interceptor::RuntimeMemGetInfoFunction;
 
@@ -54,6 +57,36 @@ using glimmer::interceptor::RuntimeMemGetInfoFunction;
         return real_dlsym == nullptr ? nullptr
                                      : reinterpret_cast<RuntimeMemGetInfoFunction>(
                                            real_dlsym(RTLD_NEXT, "cudaMemGetInfo"));
+    }();
+    return function;
+}
+
+[[nodiscard]] RuntimeMallocAsyncFunction resolve_runtime_malloc_async() noexcept {
+    static RuntimeMallocAsyncFunction function = []() noexcept {
+        const DlsymFunction real_dlsym = glimmer::interceptor::resolve_real_dlsym();
+        return real_dlsym == nullptr ? nullptr
+                                     : reinterpret_cast<RuntimeMallocAsyncFunction>(
+                                           real_dlsym(RTLD_NEXT, "cudaMallocAsync"));
+    }();
+    return function;
+}
+
+[[nodiscard]] RuntimeFreeAsyncFunction resolve_runtime_free_async() noexcept {
+    static RuntimeFreeAsyncFunction function = []() noexcept {
+        const DlsymFunction real_dlsym = glimmer::interceptor::resolve_real_dlsym();
+        return real_dlsym == nullptr ? nullptr
+                                     : reinterpret_cast<RuntimeFreeAsyncFunction>(
+                                           real_dlsym(RTLD_NEXT, "cudaFreeAsync"));
+    }();
+    return function;
+}
+
+[[nodiscard]] RuntimeDeviceSynchronizeFunction resolve_runtime_device_synchronize() noexcept {
+    static RuntimeDeviceSynchronizeFunction function = []() noexcept {
+        const DlsymFunction real_dlsym = glimmer::interceptor::resolve_real_dlsym();
+        return real_dlsym == nullptr ? nullptr
+                                     : reinterpret_cast<RuntimeDeviceSynchronizeFunction>(
+                                           real_dlsym(RTLD_NEXT, "cudaDeviceSynchronize"));
     }();
     return function;
 }
@@ -109,6 +142,41 @@ extern "C" cudaError_t CUDARTAPI cudaMemGetInfo(std::size_t* free_bytes, std::si
         }
         return glimmer::interceptor::intercept_runtime_mem_get_info(free_bytes, total_bytes,
                                                                     real_query);
+    } catch (...) {
+        return cudaErrorUnknown;
+    }
+}
+
+// Runtime stream-ordered allocation is deliberately forwarded without the
+// synchronous Runtime-call guard.  libcudart normally lowers these calls to
+// the covered Driver stream-ordered APIs; leaving the Driver guard available
+// lets the Driver interceptor perform the single authoritative accounting.
+extern "C" cudaError_t CUDARTAPI cudaMallocAsync(void** device_pointer, std::size_t memory_bytes,
+                                                 cudaStream_t stream) {
+    try {
+        const RuntimeMallocAsyncFunction real_allocate = resolve_runtime_malloc_async();
+        return real_allocate == nullptr ? cudaErrorNotSupported
+                                        : real_allocate(device_pointer, memory_bytes, stream);
+    } catch (...) {
+        return cudaErrorUnknown;
+    }
+}
+
+extern "C" cudaError_t CUDARTAPI cudaFreeAsync(void* device_pointer, cudaStream_t stream) {
+    try {
+        const RuntimeFreeAsyncFunction real_release = resolve_runtime_free_async();
+        return real_release == nullptr ? cudaErrorNotSupported
+                                       : real_release(device_pointer, stream);
+    } catch (...) {
+        return cudaErrorUnknown;
+    }
+}
+
+extern "C" cudaError_t CUDARTAPI cudaDeviceSynchronize() {
+    try {
+        const RuntimeDeviceSynchronizeFunction real_synchronize =
+            resolve_runtime_device_synchronize();
+        return real_synchronize == nullptr ? cudaErrorNotSupported : real_synchronize();
     } catch (...) {
         return cudaErrorUnknown;
     }

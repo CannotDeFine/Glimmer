@@ -6,33 +6,12 @@
 
 #include "internal/allocation_registry.h"
 #include "internal/diagnostics.h"
+#include "internal/driver_api_interceptor.h"
 #include "internal/driver_dispatch.h"
 #include "internal/runtime_api_bridge.h"
 #include "internal/symbol_registry.h"
 
 #include <cuda.h>
-
-#ifdef cuGetProcAddress
-#undef cuGetProcAddress
-#endif
-#ifdef cuDeviceTotalMem
-#undef cuDeviceTotalMem
-#endif
-#ifdef cuMemAlloc
-#undef cuMemAlloc
-#endif
-#ifdef cuMemAllocPitch
-#undef cuMemAllocPitch
-#endif
-#ifdef cuMemFree
-#undef cuMemFree
-#endif
-#ifdef cuMemGetInfo
-#undef cuMemGetInfo
-#endif
-#ifdef cuCtxDestroy
-#undef cuCtxDestroy
-#endif
 
 #include <charconv>
 #include <cstddef>
@@ -40,22 +19,21 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
-#include <dlfcn.h>
-#include <link.h>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <system_error>
-#include <string_view>
 #include <utility>
+
+namespace glimmer::interceptor {
 
 namespace {
 
 using glimmer::control::ProcessMemoryQuota;
 using glimmer::core::MemoryBytes;
 using glimmer::interceptor::AllocationRegistry;
-using glimmer::interceptor::DlsymFunction;
+using glimmer::interceptor::AllocationScope;
 using glimmer::interceptor::DriverDispatch;
 
 enum class QuotaMode : std::uint8_t {
@@ -92,49 +70,6 @@ class ProcAddressV2Scope {
 [[nodiscard]] InterceptorState& get_state() {
     static InterceptorState state;
     return state;
-}
-
-[[nodiscard]] bool is_cuda_driver_handle(void* handle) noexcept {
-    if (handle == nullptr || handle == RTLD_NEXT) {
-        return false;
-    }
-
-    void* link_map_storage = nullptr;
-    if (dlinfo(handle, RTLD_DI_LINKMAP, reinterpret_cast<void*>(&link_map_storage)) != 0 ||
-        link_map_storage == nullptr) {
-        return false;
-    }
-
-    const auto* link_map = static_cast<const struct link_map*>(link_map_storage);
-    return link_map->l_name != nullptr &&
-           std::string_view(link_map->l_name).find("libcuda.so") != std::string_view::npos;
-}
-
-[[nodiscard]] bool is_called_from_cuda_driver() noexcept {
-    Dl_info caller_info{};
-    if (dladdr(__builtin_return_address(0), &caller_info) == 0 ||
-        caller_info.dli_fname == nullptr) {
-        return false;
-    }
-    return std::string_view(caller_info.dli_fname).find("libcuda.so") != std::string_view::npos;
-}
-
-[[nodiscard]] bool is_called_from_cuda_runtime() noexcept {
-    Dl_info caller_info{};
-    if (dladdr(__builtin_return_address(0), &caller_info) == 0 ||
-        caller_info.dli_fname == nullptr) {
-        return false;
-    }
-    return std::string_view(caller_info.dli_fname).find("libcudart.so") != std::string_view::npos;
-}
-
-[[nodiscard]] bool is_driver_symbol_name(const char* name) noexcept {
-    if (name == nullptr) {
-        return false;
-    }
-    const std::string_view symbol{name};
-    return symbol.size() >= 3 && symbol[0] == 'c' && symbol[1] == 'u' && symbol[2] >= 'A' &&
-           symbol[2] <= 'Z';
 }
 
 [[nodiscard]] std::optional<MemoryBytes> read_quota_limit() {
@@ -218,6 +153,34 @@ struct ContextIdentity {
     return ContextIdentity{.context = context, .device = device};
 }
 
+[[nodiscard]] std::optional<ContextIdentity> capture_stream_identity(
+    InterceptorState& state, CUstream stream, bool per_thread_default_stream) noexcept {
+    if (stream == nullptr) {
+        return capture_context_identity(state);
+    }
+    if (per_thread_default_stream ? !state.driver.has_stream_identity_ptsz()
+                                  : !state.driver.has_stream_identity()) {
+        return std::nullopt;
+    }
+
+    CUcontext context = nullptr;
+    const CUresult context_result = per_thread_default_stream
+                                        ? state.driver.stream_get_context_ptsz(stream, &context)
+                                        : state.driver.stream_get_context(stream, &context);
+    if (context_result != CUDA_SUCCESS || context == nullptr) {
+        return std::nullopt;
+    }
+
+    CUdevice device = 0;
+    const CUresult device_result = per_thread_default_stream
+                                       ? state.driver.stream_get_device_ptsz(stream, &device)
+                                       : state.driver.stream_get_device(stream, &device);
+    if (device_result != CUDA_SUCCESS) {
+        return std::nullopt;
+    }
+    return ContextIdentity{.context = context, .device = device};
+}
+
 [[nodiscard]] glimmer::interceptor::AllocationIdentity make_allocation_identity(
     CUdeviceptr device_pointer, const ContextIdentity& context) noexcept {
     return glimmer::interceptor::AllocationIdentity{
@@ -230,16 +193,9 @@ struct ContextIdentity {
         static_cast<CUdeviceptr>(reinterpret_cast<std::uintptr_t>(device_pointer)), context);
 }
 
-template <typename Function>
-CUresult guard_cuda_boundary(Function&& function) noexcept {
-    try {
-        return function();
-    } catch (...) {
-        return CUDA_ERROR_UNKNOWN;
-    }
-}
-
 }  // namespace
+
+}  // namespace glimmer::interceptor
 
 namespace glimmer::interceptor {
 
@@ -411,7 +367,7 @@ cudaError_t intercept_runtime_mem_get_info(std::size_t* free_bytes, std::size_t*
 
 }  // namespace glimmer::interceptor
 
-namespace {
+namespace glimmer::interceptor {
 
 template <typename AllocateFunction>
 CUresult intercept_tracked_allocation(CUdeviceptr* device_pointer, MemoryBytes memory_bytes,
@@ -475,6 +431,294 @@ CUresult intercept_tracked_allocation(CUdeviceptr* device_pointer, MemoryBytes m
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
     return CUDA_SUCCESS;
+}
+
+template <typename AllocateFunction>
+CUresult intercept_async_tracked_allocation(CUdeviceptr* device_pointer, MemoryBytes memory_bytes,
+                                            CUstream stream, bool per_thread_default_stream,
+                                            AllocateFunction&& allocate) {
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return std::forward<AllocateFunction>(allocate)();
+    }
+    if (!ensure_initialized(state)) {
+        return CUDA_ERROR_UNKNOWN;
+    }
+
+    if (device_pointer == nullptr || state.quota_mode == QuotaMode::kDisabled) {
+        return std::forward<AllocateFunction>(allocate)();
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    if (state.allocations.is_accounting_degraded() || state.quota == nullptr) {
+        return CUDA_ERROR_UNKNOWN;
+    }
+    if (per_thread_default_stream ? !state.driver.has_mem_free_async_ptsz()
+                                  : !state.driver.has_mem_free_async()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+
+    const std::optional<ContextIdentity> stream_identity =
+        capture_stream_identity(state, stream, per_thread_default_stream);
+    if (!stream_identity.has_value()) {
+        return CUDA_ERROR_INVALID_CONTEXT;
+    }
+
+    auto reservation = state.quota->try_reserve(memory_bytes);
+    if (!reservation.has_value()) {
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+
+    const CUresult allocation_result = std::forward<AllocateFunction>(allocate)();
+    if (allocation_result != CUDA_SUCCESS) {
+        return allocation_result;
+    }
+    if (device_pointer == nullptr || *device_pointer == 0) {
+        state.allocations.mark_accounting_degraded();
+        return CUDA_ERROR_UNKNOWN;
+    }
+
+    if (!reservation->commit()) {
+        const CUresult cleanup_result =
+            per_thread_default_stream ? state.driver.mem_free_async_ptsz(*device_pointer, stream)
+                                      : state.driver.mem_free_async(*device_pointer, stream);
+        state.allocations.mark_accounting_degraded();
+        return cleanup_result != CUDA_SUCCESS ? cleanup_result : CUDA_ERROR_UNKNOWN;
+    }
+
+    const auto identity = make_allocation_identity(*device_pointer, *stream_identity);
+    if (!state.allocations.record(identity, memory_bytes, AllocationScope::kContextIndependent)) {
+        const CUresult cleanup_result =
+            per_thread_default_stream ? state.driver.mem_free_async_ptsz(*device_pointer, stream)
+                                      : state.driver.mem_free_async(*device_pointer, stream);
+        state.allocations.mark_accounting_degraded();
+        return cleanup_result != CUDA_SUCCESS ? cleanup_result : CUDA_ERROR_UNKNOWN;
+    }
+    return CUDA_SUCCESS;
+}
+
+void finalize_async_release(InterceptorState& state, MemoryBytes released_bytes) {
+    if (released_bytes == 0 || state.allocations.is_accounting_degraded()) {
+        return;
+    }
+    if (state.quota == nullptr || !state.quota->release(released_bytes)) {
+        state.allocations.mark_accounting_degraded();
+    }
+}
+
+CUresult intercept_mem_alloc_async(CUdeviceptr* device_pointer, std::size_t memory_bytes,
+                                   CUstream stream, bool per_thread_default_stream) {
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return per_thread_default_stream
+                   ? state.driver.mem_alloc_async_ptsz(device_pointer, memory_bytes, stream)
+                   : state.driver.mem_alloc_async(device_pointer, memory_bytes, stream);
+    }
+    if (!ensure_initialized(state) ||
+        (per_thread_default_stream ? !state.driver.has_mem_alloc_async_ptsz()
+                                   : !state.driver.has_mem_alloc_async())) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return intercept_async_tracked_allocation(
+        device_pointer, memory_bytes, stream, per_thread_default_stream,
+        [&state, device_pointer, memory_bytes, stream, per_thread_default_stream] {
+            return per_thread_default_stream
+                       ? state.driver.mem_alloc_async_ptsz(device_pointer, memory_bytes, stream)
+                       : state.driver.mem_alloc_async(device_pointer, memory_bytes, stream);
+        });
+}
+
+CUresult intercept_mem_alloc_from_pool_async(CUdeviceptr* device_pointer, std::size_t memory_bytes,
+                                             CUmemoryPool pool, CUstream stream,
+                                             bool per_thread_default_stream) {
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return per_thread_default_stream ? state.driver.mem_alloc_from_pool_async_ptsz(
+                                               device_pointer, memory_bytes, pool, stream)
+                                         : state.driver.mem_alloc_from_pool_async(
+                                               device_pointer, memory_bytes, pool, stream);
+    }
+    if (!ensure_initialized(state) ||
+        (per_thread_default_stream ? !state.driver.has_mem_alloc_from_pool_async_ptsz()
+                                   : !state.driver.has_mem_alloc_from_pool_async())) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return intercept_async_tracked_allocation(
+        device_pointer, memory_bytes, stream, per_thread_default_stream,
+        [&state, device_pointer, memory_bytes, pool, stream, per_thread_default_stream] {
+            return per_thread_default_stream ? state.driver.mem_alloc_from_pool_async_ptsz(
+                                                   device_pointer, memory_bytes, pool, stream)
+                                             : state.driver.mem_alloc_from_pool_async(
+                                                   device_pointer, memory_bytes, pool, stream);
+        });
+}
+
+CUresult intercept_mem_free_async(CUdeviceptr device_pointer, CUstream stream,
+                                  bool per_thread_default_stream) {
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return per_thread_default_stream ? state.driver.mem_free_async_ptsz(device_pointer, stream)
+                                         : state.driver.mem_free_async(device_pointer, stream);
+    }
+    if (!ensure_initialized(state) ||
+        (per_thread_default_stream ? !state.driver.has_mem_free_async_ptsz()
+                                   : !state.driver.has_mem_free_async())) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode != QuotaMode::kEnabled) {
+        return per_thread_default_stream ? state.driver.mem_free_async_ptsz(device_pointer, stream)
+                                         : state.driver.mem_free_async(device_pointer, stream);
+    }
+    if (state.allocations.is_accounting_degraded()) {
+        return CUDA_ERROR_UNKNOWN;
+    }
+
+    const std::optional<ContextIdentity> stream_identity =
+        capture_stream_identity(state, stream, per_thread_default_stream);
+    if (!stream_identity.has_value()) {
+        const CUresult free_result = per_thread_default_stream
+                                         ? state.driver.mem_free_async_ptsz(device_pointer, stream)
+                                         : state.driver.mem_free_async(device_pointer, stream);
+        if (free_result == CUDA_SUCCESS) {
+            state.allocations.mark_accounting_degraded();
+            return CUDA_ERROR_UNKNOWN;
+        }
+        return free_result;
+    }
+
+    auto release_state = state.allocations.begin_async_release(
+        make_allocation_identity(device_pointer, *stream_identity), stream);
+    if (release_state.first == AllocationRegistry::ReleaseStatus::kUnknown) {
+        release_state = state.allocations.begin_async_release_by_pointer(
+            device_pointer, stream_identity->device, stream);
+    }
+    const auto [release_status, release_ticket] = release_state;
+    if (release_status == AllocationRegistry::ReleaseStatus::kInProgress) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    if (release_status == AllocationRegistry::ReleaseStatus::kUnknown ||
+        !release_ticket.has_value()) {
+        return per_thread_default_stream ? state.driver.mem_free_async_ptsz(device_pointer, stream)
+                                         : state.driver.mem_free_async(device_pointer, stream);
+    }
+
+    const CUresult free_result = per_thread_default_stream
+                                     ? state.driver.mem_free_async_ptsz(device_pointer, stream)
+                                     : state.driver.mem_free_async(device_pointer, stream);
+    if (free_result != CUDA_SUCCESS) {
+        state.allocations.cancel_release(*release_ticket);
+        return free_result;
+    }
+    if (!state.allocations.commit_async_release(*release_ticket)) {
+        state.allocations.mark_accounting_degraded();
+        return CUDA_ERROR_UNKNOWN;
+    }
+    return CUDA_SUCCESS;
+}
+
+CUresult intercept_stream_query(CUstream stream, bool per_thread_default_stream) {
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return per_thread_default_stream ? state.driver.stream_query_ptsz(stream)
+                                         : state.driver.stream_query(stream);
+    }
+    if (!ensure_initialized(state) ||
+        (per_thread_default_stream ? !state.driver.has_stream_query_ptsz()
+                                   : !state.driver.has_stream_query())) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+
+    const CUresult query_result = per_thread_default_stream ? state.driver.stream_query_ptsz(stream)
+                                                            : state.driver.stream_query(stream);
+    if (query_result == CUDA_SUCCESS && state.quota_mode == QuotaMode::kEnabled) {
+        finalize_async_release(state, state.allocations.complete_async_releases_for_stream(stream));
+    }
+    return query_result;
+}
+
+CUresult intercept_stream_synchronize(CUstream stream, bool per_thread_default_stream) {
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return per_thread_default_stream ? state.driver.stream_synchronize_ptsz(stream)
+                                         : state.driver.stream_synchronize(stream);
+    }
+    if (!ensure_initialized(state) ||
+        (per_thread_default_stream ? !state.driver.has_stream_synchronize_ptsz()
+                                   : !state.driver.has_stream_synchronize())) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+
+    const CUresult sync_result = per_thread_default_stream
+                                     ? state.driver.stream_synchronize_ptsz(stream)
+                                     : state.driver.stream_synchronize(stream);
+    if (sync_result == CUDA_SUCCESS && state.quota_mode == QuotaMode::kEnabled) {
+        finalize_async_release(state, state.allocations.complete_async_releases_for_stream(stream));
+    }
+    return sync_result;
+}
+
+CUresult intercept_stream_get_device(CUstream stream, CUdevice* device,
+                                     bool per_thread_default_stream) {
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return per_thread_default_stream ? state.driver.stream_get_device_ptsz(stream, device)
+                                         : state.driver.stream_get_device(stream, device);
+    }
+    if (!ensure_initialized(state) ||
+        (per_thread_default_stream ? !state.driver.has_stream_identity_ptsz()
+                                   : !state.driver.has_stream_identity())) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return per_thread_default_stream ? state.driver.stream_get_device_ptsz(stream, device)
+                                     : state.driver.stream_get_device(stream, device);
+}
+
+CUresult intercept_stream_get_context(CUstream stream, CUcontext* context,
+                                      bool per_thread_default_stream) {
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return per_thread_default_stream ? state.driver.stream_get_context_ptsz(stream, context)
+                                         : state.driver.stream_get_context(stream, context);
+    }
+    if (!ensure_initialized(state) ||
+        (per_thread_default_stream ? !state.driver.has_stream_identity_ptsz()
+                                   : !state.driver.has_stream_identity())) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return per_thread_default_stream ? state.driver.stream_get_context_ptsz(stream, context)
+                                     : state.driver.stream_get_context(stream, context);
+}
+
+CUresult intercept_context_synchronize() {
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return state.driver.context_synchronize();
+    }
+    if (!ensure_initialized(state) || !state.driver.has_context_synchronize()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+
+    const CUresult sync_result = state.driver.context_synchronize();
+    if (sync_result != CUDA_SUCCESS || state.quota_mode != QuotaMode::kEnabled) {
+        return sync_result;
+    }
+
+    const std::optional<ContextIdentity> context = capture_context_identity(state);
+    if (context.has_value()) {
+        finalize_async_release(state, state.allocations.complete_async_releases_for_context(
+                                          context->context, context->device));
+    }
+    return sync_result;
 }
 
 CUresult intercept_init(unsigned int flags) {
@@ -920,120 +1164,4 @@ CUresult intercept_get_proc_address_v2(const char* symbol, void** function_point
     return CUDA_SUCCESS;
 }
 
-}  // namespace
-
-extern "C" CUresult CUDAAPI cuMemAlloc_v2(CUdeviceptr* device_pointer, std::size_t memory_bytes) {
-    return guard_cuda_boundary([device_pointer, memory_bytes] {
-        return intercept_mem_alloc(device_pointer, memory_bytes);
-    });
-}
-
-extern "C" CUresult CUDAAPI cuMemAlloc(CUdeviceptr* device_pointer, std::size_t memory_bytes) {
-    return cuMemAlloc_v2(device_pointer, memory_bytes);
-}
-
-extern "C" CUresult CUDAAPI cuInit(unsigned int flags) {
-    return guard_cuda_boundary([flags] { return intercept_init(flags); });
-}
-
-extern "C" CUresult CUDAAPI cuMemAllocManaged(CUdeviceptr* device_pointer, std::size_t memory_bytes,
-                                              unsigned int flags) {
-    return guard_cuda_boundary([device_pointer, memory_bytes, flags] {
-        return intercept_mem_alloc_managed(device_pointer, memory_bytes, flags);
-    });
-}
-
-extern "C" CUresult CUDAAPI cuMemAllocPitch_v2(CUdeviceptr* device_pointer, std::size_t* pitch,
-                                               std::size_t width_bytes, std::size_t height,
-                                               unsigned int element_size_bytes) {
-    return guard_cuda_boundary([device_pointer, pitch, width_bytes, height, element_size_bytes] {
-        return intercept_mem_alloc_pitch(device_pointer, pitch, width_bytes, height,
-                                         element_size_bytes);
-    });
-}
-
-extern "C" CUresult CUDAAPI cuMemAllocPitch(CUdeviceptr* device_pointer, std::size_t* pitch,
-                                            std::size_t width_bytes, std::size_t height,
-                                            unsigned int element_size_bytes) {
-    return cuMemAllocPitch_v2(device_pointer, pitch, width_bytes, height, element_size_bytes);
-}
-
-extern "C" CUresult CUDAAPI cuMemFree_v2(CUdeviceptr device_pointer) {
-    return guard_cuda_boundary([device_pointer] { return intercept_mem_free(device_pointer); });
-}
-
-extern "C" CUresult CUDAAPI cuMemFree(CUdeviceptr device_pointer) {
-    return cuMemFree_v2(device_pointer);
-}
-
-extern "C" CUresult CUDAAPI cuMemGetInfo_v2(std::size_t* free_bytes, std::size_t* total_bytes) {
-    return guard_cuda_boundary(
-        [free_bytes, total_bytes] { return intercept_mem_get_info(free_bytes, total_bytes); });
-}
-
-extern "C" CUresult CUDAAPI cuMemGetInfo(std::size_t* free_bytes, std::size_t* total_bytes) {
-    return cuMemGetInfo_v2(free_bytes, total_bytes);
-}
-
-extern "C" CUresult CUDAAPI cuDeviceTotalMem_v2(std::size_t* total_bytes, CUdevice device) {
-    return guard_cuda_boundary(
-        [total_bytes, device] { return intercept_device_total_mem(total_bytes, device); });
-}
-
-extern "C" CUresult CUDAAPI cuDeviceTotalMem(std::size_t* total_bytes, CUdevice device) {
-    return cuDeviceTotalMem_v2(total_bytes, device);
-}
-
-extern "C" CUresult CUDAAPI cuCtxGetCurrent(CUcontext* context) {
-    return guard_cuda_boundary([context] { return intercept_context_get_current(context); });
-}
-
-extern "C" CUresult CUDAAPI cuCtxGetDevice(CUdevice* device) {
-    return guard_cuda_boundary([device] { return intercept_context_get_device(device); });
-}
-
-extern "C" CUresult CUDAAPI cuCtxDestroy_v2(CUcontext context) {
-    return guard_cuda_boundary([context] { return intercept_context_destroy(context); });
-}
-
-extern "C" CUresult CUDAAPI cuCtxDestroy(CUcontext context) {
-    return cuCtxDestroy_v2(context);
-}
-
-extern "C" CUresult CUDAAPI cuGetProcAddress(const char* symbol, void** function_pointer,
-                                             int cuda_version, cuuint64_t flags) {
-    return guard_cuda_boundary([symbol, function_pointer, cuda_version, flags] {
-        return intercept_get_proc_address(symbol, function_pointer, cuda_version, flags);
-    });
-}
-
-extern "C" CUresult CUDAAPI cuGetProcAddress_v2(const char* symbol, void** function_pointer,
-                                                int cuda_version, cuuint64_t flags,
-                                                CUdriverProcAddressQueryResult* symbol_status) {
-    return guard_cuda_boundary([symbol, function_pointer, cuda_version, flags, symbol_status] {
-        return intercept_get_proc_address_v2(symbol, function_pointer, cuda_version, flags,
-                                             symbol_status);
-    });
-}
-
-extern "C" void* dlsym(void* handle, const char* name) {
-    try {
-        const bool called_from_driver = is_called_from_cuda_driver();
-        const bool inside_driver_call = glimmer::interceptor::is_inside_driver_call();
-        const bool called_from_runtime = is_called_from_cuda_runtime();
-        if (!called_from_driver && !called_from_runtime && !inside_driver_call &&
-            !glimmer::interceptor::is_inside_runtime_call() &&
-            (handle == RTLD_DEFAULT ||
-             (is_cuda_driver_handle(handle) && is_driver_symbol_name(name)))) {
-            if (void* intercepted_symbol = glimmer::interceptor::find_interceptor_symbol(name);
-                intercepted_symbol != nullptr) {
-                return intercepted_symbol;
-            }
-        }
-
-        const DlsymFunction real_dlsym = glimmer::interceptor::resolve_real_dlsym();
-        return real_dlsym == nullptr ? nullptr : real_dlsym(handle, name);
-    } catch (...) {
-        return nullptr;
-    }
-}
+}  // namespace glimmer::interceptor

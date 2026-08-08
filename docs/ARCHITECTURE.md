@@ -37,7 +37,20 @@ concrete responsibility and a testable interface.
 | --- | --- | --- |
 | `core` | `include/glimmer/core/`, `src/core/` | Provides a thread-safe in-process quota ledger with explicit reservation, commit, cancellation, and release transitions. It has no CUDA, dynamic-linker, transport, or process-global dependencies. |
 | `control` | `include/glimmer/control/`, `src/control/` | Adapts quota requests to `core` and computes tenant-visible memory information. It has no CUDA or dynamic-linker dependencies. |
-| `interceptor` | `src/interceptor/` and `src/interceptor/internal/` | Provides ABI-compatible wrappers for covered CUDA Driver and synchronous Runtime APIs, routes supported Driver symbol lookups, and owns process-local allocation metadata while using `control` for quota decisions. The `internal/` headers are private implementation interfaces and are not public project headers. |
+| `interceptor` | `src/interceptor/` and `src/interceptor/internal/` | Provides ABI-compatible wrappers for covered CUDA Driver, PTDS stream-ordered Driver, and Runtime APIs, routes supported Driver symbol lookups, and owns process-local allocation metadata while using `control` for quota decisions. The `internal/` headers are private implementation interfaces and are not public project headers. |
+
+The interceptor is split into focused implementation units:
+
+| Unit | Responsibility |
+| --- | --- |
+| `driver_api_interceptor.cc` | CUDA Driver admission, quota accounting, context/stream completion, and symbol-resolution policy. |
+| `driver_api_wrappers.cc` | Exported C/CUDA ABI entry points. These wrappers only contain boundary exception handling and delegate to the interceptor implementation. |
+| `runtime_api_interceptor.cc` | CUDA Runtime symbol forwarding and the Runtime-call reentrancy boundary. |
+| `driver_dispatch.cc` | Dynamic loading and guarded invocation of real CUDA Driver functions, including PTDS variants. |
+| `symbol_interceptor.cc` | `dlsym` interception, caller classification, and safe delegation to the real loader. |
+| `symbol_registry.cc` | The single registry of exported aliases used by `dlsym` and `cuGetProcAddress`. |
+| `internal/allocation_registry.cc` | Process-local allocation metadata, release state, and deferred stream completion. |
+| `internal/diagnostics.cc` | Allocation-free diagnostics for loader and accounting failure paths. |
 
 ## Dependency direction
 
@@ -56,6 +69,12 @@ CUDA, NVML, `dlopen`, `dlsym`, transport libraries, and metrics exporters.
 CUDA-specific code stays in a backend or interceptor implementation. The
 interceptor communicates through a narrow control contract and does not call
 into scheduler internals directly.
+
+The small public header tree is intentional: `include/glimmer/core/` and
+`include/glimmer/control/` contain the stable project API. CUDA interceptor
+headers stay under `src/interceptor/internal/` because they are private
+implementation contracts and expose CUDA ABI details only to the preload
+library and its tests.
 
 ## Runtime boundaries
 

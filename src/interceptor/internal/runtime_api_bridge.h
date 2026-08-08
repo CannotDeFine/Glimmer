@@ -10,6 +10,10 @@ using RuntimeMallocFunction = cudaError_t (*)(void** device_pointer, std::size_t
 using RuntimeFreeFunction = cudaError_t (*)(void* device_pointer);
 using RuntimeMemGetInfoFunction = cudaError_t (*)(std::size_t* free_bytes,
                                                   std::size_t* total_bytes);
+using RuntimeMallocAsyncFunction = cudaError_t (*)(void** device_pointer, std::size_t memory_bytes,
+                                                   cudaStream_t stream);
+using RuntimeFreeAsyncFunction = cudaError_t (*)(void* device_pointer, cudaStream_t stream);
+using RuntimeDeviceSynchronizeFunction = cudaError_t (*)();
 
 [[nodiscard]] bool is_inside_runtime_call() noexcept;
 
