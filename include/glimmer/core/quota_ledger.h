@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <optional>
 
 namespace glimmer::core {

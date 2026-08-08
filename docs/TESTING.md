@@ -71,6 +71,7 @@ existing build directory; reconfigure with the intended preset instead.
 | `debug` | Standard build and no-GPU tests. | No |
 | `asan-ubsan` | Ownership, lifetime, and undefined-behavior checks. | No |
 | `cuda-debug` | Builds `libglimmer_cuda_interceptor.so` and runs no-GPU tests. | CUDA Toolkit, no GPU |
+| `cuda-lint` | Runs clang-tidy for the interceptor and CUDA test targets. | CUDA Toolkit, no GPU |
 | `cuda-gpu` | Builds the interceptor and enables CUDA integration tests. | CUDA Toolkit and GPU |
 | `lint` | Runs clang-tidy when installed. | No |
 
