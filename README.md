@@ -95,4 +95,5 @@ and Toolkit include paths.
 
 ## Contributing
 
-Follow the project's [Git guidelines](docs/GIT_GUIDELINES.md) when contributing.
+Follow the project's [development lifecycle and review rules](docs/DEVELOPMENT_LIFECYCLE.md)
+and [Git guidelines](docs/GIT_GUIDELINES.md) when contributing.

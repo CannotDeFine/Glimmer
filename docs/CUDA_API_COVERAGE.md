@@ -45,10 +45,14 @@ The interceptor must cover each supported path before claiming compatibility.
 
 | Path | Required behavior | Priority | Test |
 | --- | --- | --- | --- |
-| Direct dynamic import | Export ABI-compatible `cu*` wrapper symbols from the preload library. | M1 | A fixture directly calls `cuMemAlloc_v2`. |
-| `dlsym` | Return a supported wrapper when a CUDA Driver allocation, release, or query symbol is requested. Delegate all other symbols to the real resolver. | M2 | A fixture resolves and calls `cuMemAlloc_v2` with `dlsym`. |
-| `cuGetProcAddress` and `cuGetProcAddress_v2` | Return a supported wrapper for requested CUDA Driver APIs and versions. Delegate unsupported requests unchanged. | M2 | A fixture resolves and calls `cuMemAlloc_v2` through each API. |
-| CUDA Runtime forwarding | Verify that representative Runtime API calls reach a covered Driver allocation path, or add the needed Runtime wrapper. | M3 | CUDA integration tests for Runtime allocation and free. |
+| Direct dynamic import | Export ABI-compatible `cu*` wrapper symbols, including legacy allocation and query aliases, from the preload library. | M1/M2 | A fixture directly calls versioned and legacy allocation/query symbols. |
+| `dlsym` | Return a supported wrapper when a CUDA Driver allocation, release, or query symbol is requested. Delegate all other symbols to the real resolver. | M2 (implemented) | A preload fixture resolves supported symbols and verifies delegation for an unsupported symbol. |
+| `cuGetProcAddress` and `cuGetProcAddress_v2` | Return a supported wrapper for requested CUDA Driver APIs and versions. Delegate unsupported requests unchanged. | M2 (implemented) | A CUDA integration test resolves and calls `cuMemGetInfo` through the versioned API and verifies an unsupported request. |
+| CUDA Runtime forwarding | Wrap synchronous `cudaMalloc`, `cudaFree`, and `cudaMemGetInfo` calls with the same quota contract and a Runtime-call reentrancy guard. | M2 (implemented) | CUDA integration test for Runtime allocation, query, and free. |
+
+`cuInit` is also wrapped as an initialization safety boundary. It does not
+make an accounting decision; it establishes the Driver-call guard so that
+Driver-internal `dlsym` requests are delegated to the real resolver.
 
 The real Driver implementation is resolved from `libcuda.so.1` and cached
 outside the public wrapper path. Resolution must not recursively call an
@@ -56,19 +60,52 @@ intercepted resolver. Every wrapper must match the exact exported symbol name,
 version, calling convention, and function signature of its target CUDA
 version.
 
+The current `dlsym` implementation covers `RTLD_DEFAULT` and explicit
+`libcuda.so` handles for the supported symbols while preserving real resolution
+for `RTLD_NEXT`, non-CUDA handles, CUDA Runtime-internal calls, and
+Driver-internal calls. This prevents CUDA Driver internals from resolving their
+own private symbols back to the interceptor. The interceptor's internal
+real-symbol lookup uses the resolved loader function directly, so it cannot
+accidentally resolve back to its own wrappers.
+
+Runtime names are exposed through `RTLD_DEFAULT`; an explicit `libcuda.so`
+handle is restricted to Driver-style `cu*` names so a lookup on the wrong
+library cannot return a Runtime wrapper.
+
+The preload library also exports a small synchronous CUDA Runtime boundary for
+`cudaMalloc`, `cudaFree`, and `cudaMemGetInfo`. These wrappers resolve the real
+`libcudart` functions once, guard reentrant Runtime calls, and reuse the same
+process-local allocation ledger and quota contract as Driver API wrappers.
+Asynchronous Runtime allocation, memory pools, and Runtime APIs not listed here
+remain outside the current guarantee.
+
+The current `cuGetProcAddress` wrappers delegate version and flag validation to
+the real Driver first. The v2 wrapper prefers the real v2 resolver and uses a
+thread-local reentrancy boundary for drivers that call the legacy resolver
+during lookup. It falls back to the legacy resolver only when the v2 entry point
+is unavailable and translates its not-found result to the v2 status contract.
+When the Driver returns a valid supported function, the wrapper replaces only
+the returned address with the corresponding Glimmer wrapper; unsupported
+symbols and other Driver errors remain unchanged.
+
+The runtime symbol registry in `src/interceptor/symbol_registry.cc` is the
+single source of truth for supported names, aliases, and wrapper addresses.
+Both `dlsym` and `cuGetProcAddress` use this registry; allocation behavior and
+accounting remain implemented in the API wrappers themselves.
+
 ## Memory operation coverage
 
 | Family | APIs | Accounting event | Planned milestone | Required test |
 | --- | --- | --- | --- | --- |
 | Ordinary device allocation | `cuMemAlloc_v2`, `cuMemFree_v2` | Charge the successful allocation size; release the recorded size after a successful free. | M1 | Quota admit, quota reject, real allocation failure, double/unknown free handling. |
 | Memory information query | `cuMemGetInfo_v2` | Return a virtual total and virtual free value consistent with the tenant quota and current usage, without claiming more free memory than the physical device reports. | M1 | Query results before allocation, after allocation, and after free. |
-| Capacity query | `cuDeviceTotalMem_v2` | Return the tenant-visible capacity. | M2 | A framework-style capacity query observes the configured quota. |
-| Pitched allocation | `cuMemAllocPitch_v2`, `cuMemFree_v2` | Charge actual reserved bytes using returned pitch and requested height. | M2 | Alignment causes a charge different from requested width times height. |
-| Managed allocation | `cuMemAllocManaged`, `cuMemFree_v2` | Charge a successful managed allocation and release it by recorded pointer. | M2 | Managed allocation obeys the same quota. |
+| Capacity query | `cuDeviceTotalMem_v2` | Return the tenant-visible capacity. | M2 (implemented) | A CUDA integration test observes the configured quota. |
+| Pitched allocation | `cuMemAllocPitch_v2`, `cuMemFree_v2` | Charge actual reserved bytes using returned pitch and requested height. | M2 (implemented) | A CUDA integration test verifies pitch-based accounting and release. |
+| Managed allocation | `cuMemAllocManaged`, `cuMemFree_v2` | Charge a successful managed allocation and release it by recorded pointer. | M2 (implemented) | A CUDA integration test verifies managed allocation and release. |
 | Stream-ordered allocation | `cuMemAllocAsync`, `cuMemAllocFromPoolAsync`, `cuMemFreeAsync` | Apply a documented submission and completion policy; do not treat an enqueued free as immediately reusable unless the policy permits it. | M3 | Stream ordering and deferred-free tests. |
 | Memory pools | `cuMemPool*` allocation and trim APIs | Account physical pool reservation separately from virtual suballocation where required. | M3 | Pool growth, reuse, trim, and quota behavior. |
 | CUDA VMM | `cuMemCreate`, `cuMemRelease` | Charge physical allocation handles; do not charge address reservation or mapping alone. | M3 | Reserve, create, map, unmap, and release lifecycle. |
-| Context lifecycle | `cuDevicePrimaryCtxRetain`, `cuDevicePrimaryCtxRelease_v2`, context destroy APIs | Associate process-local metadata with the correct device and clean it up on context teardown. | M3 | Multiple contexts and cleanup after process/context exit. |
+| Context lifecycle | `cuCtxGetCurrent`, `cuCtxGetDevice`, `cuCtxDestroy_v2` (plus legacy alias) | Associate process-local metadata with the correct device and clean it up on intercepted context teardown. | M2 partial / M3 | Multiple contexts, primary-context lifecycle, and cleanup after process/context exit. |
 | NVML presentation | `nvmlDeviceGetMemoryInfo`, `nvmlDeviceGetMemoryInfo_v2` | Present tenant-visible total, used, and free values where NVML compatibility is enabled. | M4 | NVML query agrees with the CUDA query contract. |
 
 `M1` is the first implementation milestone. A workload is not considered
@@ -93,6 +130,13 @@ For the initial process-local milestone, the allocation map is local metadata.
 The authoritative tenant usage and admission decision must remain behind the
 control contract so that a later shared-memory implementation can aggregate
 multiple processes without changing wrapper semantics.
+
+The process-local registry serializes pointer release and pointer reuse and
+attaches the CUDA device and context identity to each record. The interceptor
+also removes records and releases their quota when an intercepted context is
+destroyed. Context creation/reset paths that are not represented by the
+covered Driver context APIs, asynchronous allocation lifetimes, and
+multi-process aggregation remain outside the current guarantee.
 
 ## Concurrency and failure rules
 
@@ -138,3 +182,22 @@ M1 is complete only when all of the following are true:
    integration tests run when a compatible Linux CUDA environment is present.
 6. Unsupported API paths are documented as unsupported rather than silently
    advertised as isolated.
+
+## M2 exit criteria
+
+M2 is complete only when all of the following are true:
+
+1. Driver wrappers are registered in one table and the table is used by both
+   `dlsym` and `cuGetProcAddress` routing.
+2. `cuInit` and Driver-call guards prevent symbol-resolution recursion during
+   Driver loading and Driver-internal calls.
+3. Capacity, managed-memory, and pitched-allocation paths charge and release
+   the correct bytes, including rejection and rollback behavior.
+4. Synchronous Runtime `cudaMalloc`, `cudaFree`, and `cudaMemGetInfo` share the
+   process-local ledger and have an independent Runtime-call reentrancy guard.
+5. No-GPU preload tests, including a fake Driver/Runtime fixture, static
+   analysis, formatting checks, and compatible CUDA GPU integration tests pass
+   with warnings treated as errors. GPU integration remains an environment
+   requirement and is reported separately when the host blocks GPU access.
+6. Async allocation, memory pools, VMM, NVML, and multi-process accounting
+   remain explicitly documented as future milestones.

@@ -43,6 +43,8 @@ if(GLIMMER_CLANG_FORMAT)
     file(GLOB_RECURSE GLIMMER_FORMAT_SOURCES CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/include/*.h"
         "${PROJECT_SOURCE_DIR}/include/*.hpp"
+        "${PROJECT_SOURCE_DIR}/src/*.h"
+        "${PROJECT_SOURCE_DIR}/src/*.hpp"
         "${PROJECT_SOURCE_DIR}/src/*.cc"
         "${PROJECT_SOURCE_DIR}/src/*.cpp"
         "${PROJECT_SOURCE_DIR}/src/*.cu"

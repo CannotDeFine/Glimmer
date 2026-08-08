@@ -33,11 +33,10 @@ replace it.
 | --- | --- | --- |
 | `core` | Reservation admission, rejection, commit, cancellation, release failures, concurrent reservations, lifetime safety, and counter overflow protection. | No |
 | `control` | Quota-visible memory information, physical-memory bounds, and rejected reservations. | No |
-| `interceptor` | M1 Driver API integration for `cuMemAlloc_v2`, `cuMemFree_v2`, and `cuMemGetInfo_v2`, including successful allocation, release, quota rejection, invalid arguments, and unknown release. | GPU test: yes |
+| `interceptor` | Driver/Runtime preload coverage through a fake CUDA Driver and Runtime, `cuInit`, `dlsym`, both `cuGetProcAddress` forms, legacy and versioned allocation/query aliases, context-aware allocation records, context cleanup, `cuDeviceTotalMem_v2`, `cuMemAllocManaged`, `cuMemAllocPitch_v2`, synchronous Runtime `cudaMalloc`/`cudaFree`/`cudaMemGetInfo`, deterministic allocation-registry tests, and injectable Driver dispatch tests. | GPU test for real CUDA routing; no GPU for symbol, fake preload, registry, dispatch, and core tests |
 
-The current interceptor milestone does not claim coverage for `dlsym`,
-`cuGetProcAddress`, async allocation, memory pools, VMM, NVML, or multi-process
-shared accounting. Those remain governed by
+The current interceptor milestone does not claim coverage for async allocation,
+memory pools, VMM, NVML, or multi-process shared accounting. Those remain governed by
 [CUDA_API_COVERAGE.md](CUDA_API_COVERAGE.md).
 
 ## Test design

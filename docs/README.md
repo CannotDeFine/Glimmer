@@ -10,6 +10,7 @@ update trigger.
 | [CODING_GUIDELINES.md](CODING_GUIDELINES.md) | Defines source, ownership, error-handling, logging, concurrency, and quality rules. | A project-wide coding rule changes. |
 | [CUDA_API_COVERAGE.md](CUDA_API_COVERAGE.md) | Defines planned CUDA Driver API interception coverage, quota semantics, and compatibility tests. | A covered CUDA API, symbol path, quota rule, or compatibility claim changes. |
 | [DEPENDENCY_MANAGEMENT.md](DEPENDENCY_MANAGEMENT.md) | Defines how runtime, build, and development dependencies are selected and updated. | A dependency or its integration method changes. |
+| [DEVELOPMENT_LIFECYCLE.md](DEVELOPMENT_LIFECYCLE.md) | Defines the proposal, design, implementation, verification, review, integration, and release gates. | The development or review workflow changes. |
 | [GIT_GUIDELINES.md](GIT_GUIDELINES.md) | Defines the single-branch workflow and commit-message format. | The contribution workflow changes. |
 | [TESTING.md](TESTING.md) | Defines required test coverage and test levels. | Test policy or infrastructure changes. |
 | [decisions/](decisions/) | Records accepted architecture decisions and their consequences. | A decision affects module boundaries, public behavior, dependencies, or operations. |

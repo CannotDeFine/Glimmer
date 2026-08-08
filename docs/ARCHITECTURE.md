@@ -37,6 +37,7 @@ concrete responsibility and a testable interface.
 | --- | --- | --- |
 | `core` | `include/glimmer/core/`, `src/core/` | Provides a thread-safe in-process quota ledger with explicit reservation, commit, cancellation, and release transitions. It has no CUDA, dynamic-linker, transport, or process-global dependencies. |
 | `control` | `include/glimmer/control/`, `src/control/` | Adapts quota requests to `core` and computes tenant-visible memory information. It has no CUDA or dynamic-linker dependencies. |
+| `interceptor` | `src/interceptor/` and `src/interceptor/internal/` | Provides ABI-compatible wrappers for covered CUDA Driver and synchronous Runtime APIs, routes supported Driver symbol lookups, and owns process-local allocation metadata while using `control` for quota decisions. The `internal/` headers are private implementation interfaces and are not public project headers. |
 
 ## Dependency direction
 
