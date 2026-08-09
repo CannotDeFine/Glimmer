@@ -34,7 +34,8 @@ class QuotaReservation {
     ~QuotaReservation();
 
     [[nodiscard]] bool commit();
-    void cancel();
+    void cancel() noexcept;
+    void abandon() noexcept;
 
     [[nodiscard]] bool is_active() const;
     [[nodiscard]] MemoryBytes memory_bytes() const;
@@ -67,8 +68,8 @@ class QuotaLedger {
 
     [[nodiscard]] static bool commit_reservation(
         const std::shared_ptr<detail::QuotaLedgerState>& state, MemoryBytes memory_bytes);
-    static void cancel_reservation(const std::shared_ptr<detail::QuotaLedgerState>& state,
-                                   MemoryBytes memory_bytes);
+    [[nodiscard]] static bool cancel_reservation(
+        const std::shared_ptr<detail::QuotaLedgerState>& state, MemoryBytes memory_bytes) noexcept;
 
     std::shared_ptr<detail::QuotaLedgerState> state_;
 };

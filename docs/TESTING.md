@@ -32,14 +32,15 @@ replace it.
 | Module | Current tests | Hardware required |
 | --- | --- | --- |
 | `core` | Reservation admission, rejection, commit, cancellation, release failures, concurrent reservations, lifetime safety, and counter overflow protection. | No |
-| `control` | Quota-visible memory information, physical-memory bounds, and rejected reservations. | No |
-| `interceptor` | Driver/Runtime preload coverage through a fake CUDA Driver and Runtime, `cuInit`, `dlsym`, both `cuGetProcAddress` forms, legacy/versioned and PTDS allocation/query aliases, stream identity queries, context-aware allocation records, context cleanup, `cuDeviceTotalMem_v2`, `cuMemAllocManaged`, `cuMemAllocPitch_v2`, stream-ordered Driver allocation/free and completion accounting, Runtime `cudaMalloc`/`cudaFree`/`cudaMemGetInfo` plus async Runtime forwarding, deterministic allocation-registry tests, and injectable Driver dispatch tests. | GPU test for real CUDA routing; no GPU for symbol, fake preload, registry, dispatch, and core tests |
+| `control` | Quota-visible memory information, physical-memory bounds, rejected reservations, shared-memory accounting, multi-process quota boundaries, per-device counters, fork re-registration, continuous stale-process recovery, committed-byte recovery grace, stale-process reservation/commit recovery, safe region cleanup, reservation lifecycle checks, and robust-mutex owner-death recovery. | No |
+| `interceptor` | Driver/Runtime preload coverage through a fake CUDA Driver and Runtime, `cuInit`, `dlsym` including explicit CUDA Runtime handles, both `cuGetProcAddress` forms, invalid-argument rejection, legacy/versioned and PTDS allocation/query aliases, exact PTDS availability checks, context-aware allocation records, duplicate-pointer degraded-state handling, ambiguous successful-null allocation rollback, context-bound cleanup that preserves context-independent allocations, stream cleanup, device-grouped asynchronous completion, fork reinitialization of local allocation metadata, `cuDeviceTotalMem_v2`, `cuMemAllocManaged`, `cuMemAllocPitch_v2`, stream-ordered Driver allocation/free and completion accounting, Runtime `cudaMalloc`/`cudaFree`/`cudaMemGetInfo` plus independently accounted Runtime async allocation/free, PTDS aliases, and stream/device completion, deterministic allocation-registry tests, and injectable Driver dispatch tests. | GPU test for real CUDA routing; no GPU for symbol, fake preload, registry, dispatch, and core tests |
 
 The current interceptor milestone covers the Driver stream-ordered allocation
-path, its PTDS aliases, Runtime async forwarding, and its explicit completion
-boundaries. It does not claim coverage for CUDA memory-pool management and
-trim, VMM, NVML, or multi-process shared accounting. Those remain governed by
-[CUDA_API_COVERAGE.md](CUDA_API_COVERAGE.md).
+path, its PTDS aliases, independently accounted Runtime async allocation and
+its PTDS aliases and explicit completion boundaries, and the shared-memory
+quota control path. It does not claim
+coverage for CUDA memory-pool management and trim, VMM, or NVML. Those remain
+governed by [CUDA_API_COVERAGE.md](CUDA_API_COVERAGE.md).
 
 ## Test design
 

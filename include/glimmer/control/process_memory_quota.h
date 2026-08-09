@@ -1,50 +1,29 @@
 #pragma once
 
-#include "glimmer/core/quota_ledger.h"
-
-#include <optional>
+#include "glimmer/control/quota_store.h"
 
 namespace glimmer::control {
 
-struct MemoryInfo {
-    core::MemoryBytes total_bytes;
-    core::MemoryBytes free_bytes;
-};
-
-class MemoryReservation {
+class ProcessMemoryQuota final : public QuotaStore {
    public:
-    MemoryReservation(const MemoryReservation&) = delete;
-    MemoryReservation& operator=(const MemoryReservation&) = delete;
-
-    MemoryReservation(MemoryReservation&&) noexcept = default;
-    MemoryReservation& operator=(MemoryReservation&&) noexcept = default;
-
-    ~MemoryReservation() = default;
-
-    [[nodiscard]] bool commit();
-    void cancel();
-
-    [[nodiscard]] bool is_active() const;
-    [[nodiscard]] core::MemoryBytes memory_bytes() const;
-
-   private:
-    friend class ProcessMemoryQuota;
-
-    explicit MemoryReservation(core::QuotaReservation reservation);
-
-    core::QuotaReservation reservation_;
-};
-
-class ProcessMemoryQuota {
-   public:
-    // Thread-safe. Outstanding reservations must be destroyed before this object.
+    // Thread-safe. The process-local ledger intentionally shares one quota across
+    // all non-negative devices. Outstanding reservations must be destroyed before
+    // this object.
     explicit ProcessMemoryQuota(core::MemoryBytes limit_bytes);
 
-    [[nodiscard]] std::optional<MemoryReservation> try_reserve(core::MemoryBytes memory_bytes);
-    [[nodiscard]] bool release(core::MemoryBytes memory_bytes);
-    [[nodiscard]] MemoryInfo get_memory_info(core::MemoryBytes physical_total_bytes,
-                                             core::MemoryBytes physical_free_bytes) const;
-    [[nodiscard]] core::QuotaUsage usage() const;
+    using QuotaStore::get_memory_info;
+    using QuotaStore::release;
+    using QuotaStore::try_reserve;
+    using QuotaStore::usage;
+
+    [[nodiscard]] std::optional<MemoryReservation> try_reserve(
+        DeviceId device, core::MemoryBytes memory_bytes) override;
+    [[nodiscard]] bool release(DeviceId device, core::MemoryBytes memory_bytes) override;
+    [[nodiscard]] MemoryInfo get_memory_info(DeviceId device,
+                                             core::MemoryBytes physical_total_bytes,
+                                             core::MemoryBytes physical_free_bytes) const override;
+    [[nodiscard]] core::QuotaUsage usage(DeviceId device) const override;
+    [[nodiscard]] bool is_healthy() const noexcept override;
 
    private:
     core::QuotaLedger ledger_;

@@ -35,6 +35,7 @@ namespace glimmer::interceptor {
 [[nodiscard]] CUresult intercept_stream_query(CUstream stream, bool per_thread_default_stream);
 [[nodiscard]] CUresult intercept_stream_synchronize(CUstream stream,
                                                     bool per_thread_default_stream);
+[[nodiscard]] CUresult intercept_stream_destroy(CUstream stream);
 [[nodiscard]] CUresult intercept_context_synchronize();
 [[nodiscard]] CUresult intercept_get_proc_address(const char* symbol, void** function_pointer,
                                                   int cuda_version, cuuint64_t flags);

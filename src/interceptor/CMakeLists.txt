@@ -151,6 +151,7 @@ if(BUILD_TESTING)
     target_link_libraries(glimmer_cuda_interceptor_fake_driver_test
         PRIVATE
             Glimmer::project_options
+            Glimmer::control
             "${CMAKE_DL_LIBS}"
     )
     glimmer_enable_clang_tidy(glimmer_cuda_interceptor_fake_driver_test)
@@ -165,6 +166,38 @@ if(BUILD_TESTING)
     set_tests_properties(glimmer_cuda_interceptor_fake_driver_test PROPERTIES
         ENVIRONMENT
             "GLIMMER_MEMORY_LIMIT_BYTES=4096;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
+    )
+
+    add_test(NAME glimmer_cuda_interceptor_duplicate_record_failure_test
+        COMMAND glimmer_cuda_interceptor_fake_driver_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_duplicate_record_failure_test PROPERTIES
+        ENVIRONMENT
+            "GLIMMER_MEMORY_LIMIT_BYTES=4096;GLIMMER_FAKE_DUPLICATE_POINTER=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
+    )
+
+    add_test(NAME glimmer_cuda_interceptor_driver_async_null_pointer_test
+        COMMAND glimmer_cuda_interceptor_fake_driver_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_driver_async_null_pointer_test PROPERTIES
+        ENVIRONMENT
+            "GLIMMER_QUOTA_MODE=shared;GLIMMER_QUOTA_TENANT_ID=glimmer-cuda-interceptor-driver-null;GLIMMER_MEMORY_LIMIT_BYTES=4096;GLIMMER_FAKE_NULL_SUCCESS_POINTER=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
+    )
+
+    add_test(NAME glimmer_cuda_interceptor_runtime_async_null_pointer_test
+        COMMAND glimmer_cuda_interceptor_fake_driver_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_runtime_async_null_pointer_test PROPERTIES
+        ENVIRONMENT
+            "GLIMMER_QUOTA_MODE=shared;GLIMMER_QUOTA_TENANT_ID=glimmer-cuda-interceptor-runtime-null;GLIMMER_MEMORY_LIMIT_BYTES=4096;GLIMMER_FAKE_NULL_SUCCESS_POINTER=1;GLIMMER_NULL_SUCCESS_RUNTIME=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
+    )
+
+    add_test(NAME glimmer_cuda_interceptor_shared_fake_driver_test
+        COMMAND glimmer_cuda_interceptor_fake_driver_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_shared_fake_driver_test PROPERTIES
+        ENVIRONMENT
+            "GLIMMER_QUOTA_MODE=shared;GLIMMER_QUOTA_TENANT_ID=glimmer-cuda-interceptor-shared;GLIMMER_MEMORY_LIMIT_BYTES=4096;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
     )
 
     add_executable(glimmer_cuda_interceptor_gpu_test
@@ -187,6 +220,10 @@ if(BUILD_TESTING)
         PRIVATE
             Glimmer::project_options
             CUDA::cudart
+    )
+    target_compile_definitions(glimmer_cuda_interceptor_runtime_gpu_test
+        PRIVATE
+            CUDA_API_PER_THREAD_DEFAULT_STREAM
     )
 
     glimmer_enable_clang_tidy(glimmer_cuda_interceptor_runtime_gpu_test)

@@ -54,6 +54,9 @@
 #ifdef cuStreamSynchronize
 #undef cuStreamSynchronize
 #endif
+#ifdef cuStreamDestroy
+#undef cuStreamDestroy
+#endif
 
 namespace {
 
@@ -241,6 +244,15 @@ extern "C" CUresult CUDAAPI cuStreamSynchronize(CUstream stream) {
 extern "C" CUresult CUDAAPI cuStreamSynchronize_ptsz(CUstream stream) {
     return guard_cuda_boundary(
         [stream] { return glimmer::interceptor::intercept_stream_synchronize(stream, true); });
+}
+
+extern "C" CUresult CUDAAPI cuStreamDestroy_v2(CUstream stream) {
+    return guard_cuda_boundary(
+        [stream] { return glimmer::interceptor::intercept_stream_destroy(stream); });
+}
+
+extern "C" CUresult CUDAAPI cuStreamDestroy(CUstream stream) {
+    return cuStreamDestroy_v2(stream);
 }
 
 extern "C" CUresult CUDAAPI cuCtxSynchronize() {

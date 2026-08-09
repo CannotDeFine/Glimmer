@@ -64,12 +64,19 @@ bool QuotaReservation::commit() {
     return true;
 }
 
-void QuotaReservation::cancel() {
+void QuotaReservation::cancel() noexcept {
     if (state_ == nullptr) {
         return;
     }
 
-    QuotaLedger::cancel_reservation(state_, memory_bytes_);
+    if (!QuotaLedger::cancel_reservation(state_, memory_bytes_)) {
+        return;
+    }
+    state_.reset();
+    memory_bytes_ = 0;
+}
+
+void QuotaReservation::abandon() noexcept {
     state_.reset();
     memory_bytes_ = 0;
 }
@@ -130,13 +137,21 @@ bool QuotaLedger::commit_reservation(const std::shared_ptr<detail::QuotaLedgerSt
     return true;
 }
 
-void QuotaLedger::cancel_reservation(const std::shared_ptr<detail::QuotaLedgerState>& state,
-                                     MemoryBytes memory_bytes) {
-    std::scoped_lock lock(state->mutex);
-    if (memory_bytes > state->reserved_bytes) {
-        return;
+bool QuotaLedger::cancel_reservation(const std::shared_ptr<detail::QuotaLedgerState>& state,
+                                     MemoryBytes memory_bytes) noexcept {
+    try {
+        std::scoped_lock lock(state->mutex);
+        if (memory_bytes > state->reserved_bytes) {
+            return false;
+        }
+        state->reserved_bytes -= memory_bytes;
+        return true;
+    } catch (...) {
+        // Keep the reservation state alive when the lock cannot be acquired so
+        // a cleanup failure never undercounts the quota or crosses an ABI
+        // boundary as an exception.
+        return false;
     }
-    state->reserved_bytes -= memory_bytes;
 }
 
 }  // namespace glimmer::core

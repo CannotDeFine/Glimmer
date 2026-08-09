@@ -7,11 +7,15 @@
 #ifdef cuGetProcAddress
 #undef cuGetProcAddress
 #endif
+#ifdef cuStreamDestroy
+#undef cuStreamDestroy
+#endif
 
 #include <dlfcn.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <mutex>
 #include <string_view>
@@ -46,6 +50,22 @@ CUresult reserve_memory(CUdeviceptr* device_pointer, std::size_t memory_bytes) {
     if (!g_context_alive || memory_bytes > kPhysicalMemoryBytes - g_used_bytes) {
         *device_pointer = 0;
         return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+
+    // Fault injection for the interceptor's ambiguous-success rollback path:
+    // emulate a broken external allocator that reports success without a
+    // usable pointer. No allocation is inserted into the fake driver's map.
+    if (std::getenv("GLIMMER_FAKE_NULL_SUCCESS_POINTER") != nullptr) {
+        *device_pointer = 0;
+        return CUDA_SUCCESS;
+    }
+
+    // The dedicated preload regression test uses this switch to emulate a
+    // driver returning a pointer identity that is already present in the
+    // interceptor registry. The wrapper must fail closed in that case.
+    if (std::getenv("GLIMMER_FAKE_DUPLICATE_POINTER") != nullptr && !g_allocations.empty()) {
+        *device_pointer = g_allocations.begin()->first;
+        return CUDA_SUCCESS;
     }
 
     const CUdeviceptr pointer = g_next_pointer;
@@ -213,6 +233,14 @@ extern "C" CUresult CUDAAPI cuStreamSynchronize_ptsz(CUstream stream) {
     return cuStreamSynchronize(stream);
 }
 
+extern "C" CUresult CUDAAPI cuStreamDestroy_v2(CUstream) {
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuStreamDestroy(CUstream stream) {
+    return cuStreamDestroy_v2(stream);
+}
+
 extern "C" CUresult CUDAAPI cuCtxSynchronize() {
     complete_pending_frees(nullptr, false);
     return CUDA_SUCCESS;
@@ -263,6 +291,9 @@ extern "C" CUresult CUDAAPI cuCtxDestroy_v2(CUcontext context) {
     }
     std::scoped_lock lock(g_mutex);
     g_context_alive = false;
+    g_pending_frees.clear();
+    g_allocations.clear();
+    g_used_bytes = 0;
     return CUDA_SUCCESS;
 }
 
@@ -367,6 +398,10 @@ void* lookup_symbol(const char* symbol) {
     }
     if (std::string_view(symbol) == "cuStreamSynchronize_ptsz") {
         return reinterpret_cast<void*>(&cuStreamSynchronize_ptsz);
+    }
+    if (std::string_view(symbol) == "cuStreamDestroy" ||
+        std::string_view(symbol) == "cuStreamDestroy_v2") {
+        return reinterpret_cast<void*>(&cuStreamDestroy_v2);
     }
     if (std::string_view(symbol) == "cuCtxSynchronize") {
         return reinterpret_cast<void*>(&cuCtxSynchronize);

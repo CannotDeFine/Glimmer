@@ -7,6 +7,7 @@
 namespace {
 
 using glimmer::interceptor::DriverDispatch;
+using glimmer::interceptor::DriverFunctionTable;
 using glimmer::interceptor::is_inside_driver_call;
 
 bool g_guard_failed = false;
@@ -182,6 +183,11 @@ CUresult CUDAAPI fake_stream_synchronize_ptsz(CUstream stream) {
     return fake_stream_synchronize(stream);
 }
 
+CUresult CUDAAPI fake_stream_destroy(CUstream) {
+    check_driver_guard();
+    return CUDA_SUCCESS;
+}
+
 CUresult CUDAAPI fake_get_proc_address(const char*, void** function_pointer, int, cuuint64_t) {
     check_driver_guard();
     if (function_pointer == nullptr) {
@@ -229,6 +235,7 @@ int main() {
         .stream_query_ptsz = &fake_stream_query_ptsz,
         .stream_synchronize = &fake_stream_synchronize,
         .stream_synchronize_ptsz = &fake_stream_synchronize_ptsz,
+        .stream_destroy = &fake_stream_destroy,
         .get_proc_address = &fake_get_proc_address,
         .get_proc_address_v2 = &fake_get_proc_address_v2,
     };
@@ -262,6 +269,7 @@ int main() {
         expect(dispatch.has_stream_synchronize(), "stream synchronization was not available");
     all_passed &= expect(dispatch.has_stream_synchronize_ptsz(),
                          "PTDS stream synchronization was not available");
+    all_passed &= expect(dispatch.has_stream_destroy(), "stream destruction was not available");
 
     CUdeviceptr device_pointer{};
     std::size_t pitch{};
@@ -327,6 +335,8 @@ int main() {
     all_passed &= expect(dispatch.stream_synchronize_ptsz(nullptr) == CUDA_SUCCESS,
                          "fake cuStreamSynchronize_ptsz failed");
     all_passed &=
+        expect(dispatch.stream_destroy(nullptr) == CUDA_SUCCESS, "fake cuStreamDestroy failed");
+    all_passed &=
         expect(dispatch.get_proc_address("fake", &function_pointer, 0, 0) == CUDA_SUCCESS &&
                    function_pointer != nullptr,
                "fake legacy resolver failed");
@@ -337,5 +347,39 @@ int main() {
                    function_pointer != nullptr && symbol_status == CU_GET_PROC_ADDRESS_SUCCESS,
                "fake v2 resolver failed");
     all_passed &= expect(!g_guard_failed, "Driver call guard was not active");
+
+    DriverFunctionTable legacy_only_functions = functions;
+    legacy_only_functions.mem_alloc_async_ptsz = nullptr;
+    legacy_only_functions.mem_alloc_from_pool_async_ptsz = nullptr;
+    legacy_only_functions.mem_free_async_ptsz = nullptr;
+    legacy_only_functions.stream_get_device_ptsz = nullptr;
+    legacy_only_functions.stream_get_context_ptsz = nullptr;
+    legacy_only_functions.stream_query_ptsz = nullptr;
+    legacy_only_functions.stream_synchronize_ptsz = nullptr;
+    const DriverDispatch legacy_only_dispatch(legacy_only_functions);
+    all_passed &= expect(!legacy_only_dispatch.has_mem_alloc_async_ptsz(),
+                         "legacy allocator was reported as a PTDS allocator");
+    all_passed &= expect(!legacy_only_dispatch.has_mem_alloc_from_pool_async_ptsz(),
+                         "legacy pool allocator was reported as a PTDS allocator");
+    all_passed &= expect(!legacy_only_dispatch.has_mem_free_async_ptsz(),
+                         "legacy free was reported as a PTDS free");
+    all_passed &= expect(!legacy_only_dispatch.has_stream_identity_ptsz(),
+                         "legacy stream identity was reported as PTDS identity");
+    all_passed &= expect(!legacy_only_dispatch.has_stream_query_ptsz(),
+                         "legacy stream query was reported as PTDS query");
+    all_passed &= expect(!legacy_only_dispatch.has_stream_synchronize_ptsz(),
+                         "legacy stream synchronization was reported as PTDS synchronization");
+    all_passed &= expect(legacy_only_dispatch.mem_alloc_async_ptsz(&device_pointer, 16, nullptr) ==
+                             CUDA_ERROR_NOT_SUPPORTED,
+                         "missing PTDS allocator did not fail closed");
+    all_passed &= expect(legacy_only_dispatch.mem_free_async_ptsz(device_pointer, nullptr) ==
+                             CUDA_ERROR_NOT_SUPPORTED,
+                         "missing PTDS free did not fail closed");
+    all_passed &=
+        expect(legacy_only_dispatch.stream_query_ptsz(nullptr) == CUDA_ERROR_NOT_SUPPORTED,
+               "missing PTDS query did not fail closed");
+    all_passed &=
+        expect(legacy_only_dispatch.stream_synchronize_ptsz(nullptr) == CUDA_ERROR_NOT_SUPPORTED,
+               "missing PTDS synchronization did not fail closed");
     return all_passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }

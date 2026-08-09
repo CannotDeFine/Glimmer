@@ -30,6 +30,7 @@ using StreamGetDeviceFunction = CUresult (*)(CUstream stream, CUdevice* device);
 using StreamGetContextFunction = CUresult (*)(CUstream stream, CUcontext* context);
 using StreamQueryFunction = CUresult (*)(CUstream stream);
 using StreamSynchronizeFunction = CUresult (*)(CUstream stream);
+using StreamDestroyFunction = CUresult (*)(CUstream stream);
 using DlsymFunction = void* (*)(void* handle, const char* name);
 using GetProcAddressFunction = CUresult (*)(const char* symbol, void** function_pointer,
                                             int cuda_version, cuuint64_t flags);
@@ -63,6 +64,7 @@ struct DriverFunctionTable {
     StreamQueryFunction stream_query_ptsz = nullptr;
     StreamSynchronizeFunction stream_synchronize = nullptr;
     StreamSynchronizeFunction stream_synchronize_ptsz = nullptr;
+    StreamDestroyFunction stream_destroy = nullptr;
     GetProcAddressFunction get_proc_address = nullptr;
     GetProcAddressV2Function get_proc_address_v2 = nullptr;
 };
@@ -116,6 +118,7 @@ class DriverDispatch {
     [[nodiscard]] CUresult stream_query_ptsz(CUstream stream) const;
     [[nodiscard]] CUresult stream_synchronize(CUstream stream) const;
     [[nodiscard]] CUresult stream_synchronize_ptsz(CUstream stream) const;
+    [[nodiscard]] CUresult stream_destroy(CUstream stream) const;
 
     [[nodiscard]] CUresult get_proc_address(const char* symbol, void** function_pointer,
                                             int cuda_version, cuuint64_t flags) const;
@@ -143,6 +146,7 @@ class DriverDispatch {
     [[nodiscard]] bool has_stream_query_ptsz() const;
     [[nodiscard]] bool has_stream_synchronize() const;
     [[nodiscard]] bool has_stream_synchronize_ptsz() const;
+    [[nodiscard]] bool has_stream_destroy() const;
 
    private:
     [[nodiscard]] void* load_symbol(const char* name) const;
@@ -173,6 +177,7 @@ class DriverDispatch {
     StreamQueryFunction stream_query_ptsz_ = nullptr;
     StreamSynchronizeFunction stream_synchronize_ = nullptr;
     StreamSynchronizeFunction stream_synchronize_ptsz_ = nullptr;
+    StreamDestroyFunction stream_destroy_ = nullptr;
     GetProcAddressFunction get_proc_address_ = nullptr;
     GetProcAddressV2Function get_proc_address_v2_ = nullptr;
 };

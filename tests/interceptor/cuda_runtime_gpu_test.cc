@@ -47,8 +47,33 @@ int main() {
         check(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo restored") &&
         free_bytes == kQuotaBytes;
 
+    cudaStream_t stream = nullptr;
+    const bool stream_created = check(cudaStreamCreate(&stream), "cudaStreamCreate");
+    void* async_pointer = nullptr;
+    const bool async_allocated =
+        stream_created &&
+        check(cudaMallocAsync(&async_pointer, kAllocationBytes, stream), "cudaMallocAsync");
+    const bool has_reduced_async_free =
+        async_allocated &&
+        check(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo async allocated") &&
+        free_bytes == kQuotaBytes - kAllocationBytes;
+    const bool async_released =
+        !async_allocated || check(cudaFreeAsync(async_pointer, stream), "cudaFreeAsync");
+    const bool async_synchronized =
+        !async_allocated || check(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
+    const bool async_queried =
+        !async_allocated || check(cudaStreamQuery(stream), "cudaStreamQuery");
+    const bool has_restored_async_free =
+        !async_allocated ||
+        (check(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo async restored") &&
+         free_bytes == kQuotaBytes);
+    const bool stream_destroyed =
+        !stream_created || check(cudaStreamDestroy(stream), "cudaStreamDestroy");
+
     if (!has_initial_info || !allocated || !has_reduced_free || !rejected ||
-        !has_unchanged_free_after_rejection || !released || !has_restored_free) {
+        !has_unchanged_free_after_rejection || !released || !has_restored_free || !stream_created ||
+        !async_allocated || !has_reduced_async_free || !async_released || !async_synchronized ||
+        !async_queried || !has_restored_async_free || !stream_destroyed) {
         std::cerr << "CUDA Runtime interceptor GPU test failed\n";
         return EXIT_FAILURE;
     }

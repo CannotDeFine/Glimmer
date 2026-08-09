@@ -72,6 +72,7 @@ DriverDispatch::DriverDispatch(DriverFunctionTable functions) noexcept
       stream_query_ptsz_(functions.stream_query_ptsz),
       stream_synchronize_(functions.stream_synchronize),
       stream_synchronize_ptsz_(functions.stream_synchronize_ptsz),
+      stream_destroy_(functions.stream_destroy),
       get_proc_address_(functions.get_proc_address),
       get_proc_address_v2_(functions.get_proc_address_v2) {}
 
@@ -123,6 +124,10 @@ bool DriverDispatch::initialize() {
         reinterpret_cast<StreamSynchronizeFunction>(load_symbol("cuStreamSynchronize"));
     stream_synchronize_ptsz_ =
         reinterpret_cast<StreamSynchronizeFunction>(load_symbol("cuStreamSynchronize_ptsz"));
+    stream_destroy_ = reinterpret_cast<StreamDestroyFunction>(load_symbol("cuStreamDestroy_v2"));
+    if (stream_destroy_ == nullptr) {
+        stream_destroy_ = reinterpret_cast<StreamDestroyFunction>(load_symbol("cuStreamDestroy"));
+    }
     get_proc_address_ = reinterpret_cast<GetProcAddressFunction>(load_symbol("cuGetProcAddress"));
     get_proc_address_v2_ =
         reinterpret_cast<GetProcAddressV2Function>(load_symbol("cuGetProcAddress_v2"));
@@ -183,12 +188,10 @@ CUresult DriverDispatch::mem_alloc_async(CUdeviceptr* device_pointer, std::size_
 CUresult DriverDispatch::mem_alloc_async_ptsz(CUdeviceptr* device_pointer, std::size_t memory_bytes,
                                               CUstream stream) const {
     DriverCallScope scope;
-    const MemAllocAsyncFunction function =
-        mem_alloc_async_ptsz_ == nullptr ? mem_alloc_async_ : mem_alloc_async_ptsz_;
-    if (function == nullptr) {
+    if (mem_alloc_async_ptsz_ == nullptr) {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
-    return function(device_pointer, memory_bytes, stream);
+    return mem_alloc_async_ptsz_(device_pointer, memory_bytes, stream);
 }
 
 CUresult DriverDispatch::mem_alloc_from_pool_async(CUdeviceptr* device_pointer,
@@ -205,13 +208,10 @@ CUresult DriverDispatch::mem_alloc_from_pool_async_ptsz(CUdeviceptr* device_poin
                                                         std::size_t memory_bytes, CUmemoryPool pool,
                                                         CUstream stream) const {
     DriverCallScope scope;
-    const MemAllocFromPoolAsyncFunction function = mem_alloc_from_pool_async_ptsz_ == nullptr
-                                                       ? mem_alloc_from_pool_async_
-                                                       : mem_alloc_from_pool_async_ptsz_;
-    if (function == nullptr) {
+    if (mem_alloc_from_pool_async_ptsz_ == nullptr) {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
-    return function(device_pointer, memory_bytes, pool, stream);
+    return mem_alloc_from_pool_async_ptsz_(device_pointer, memory_bytes, pool, stream);
 }
 
 CUresult DriverDispatch::mem_free(CUdeviceptr device_pointer) const {
@@ -232,12 +232,10 @@ CUresult DriverDispatch::mem_free_async(CUdeviceptr device_pointer, CUstream str
 
 CUresult DriverDispatch::mem_free_async_ptsz(CUdeviceptr device_pointer, CUstream stream) const {
     DriverCallScope scope;
-    const MemFreeAsyncFunction function =
-        mem_free_async_ptsz_ == nullptr ? mem_free_async_ : mem_free_async_ptsz_;
-    if (function == nullptr) {
+    if (mem_free_async_ptsz_ == nullptr) {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
-    return function(device_pointer, stream);
+    return mem_free_async_ptsz_(device_pointer, stream);
 }
 
 CUresult DriverDispatch::mem_get_info(std::size_t* free_bytes, std::size_t* total_bytes) const {
@@ -298,12 +296,10 @@ CUresult DriverDispatch::stream_get_device(CUstream stream, CUdevice* device) co
 
 CUresult DriverDispatch::stream_get_device_ptsz(CUstream stream, CUdevice* device) const {
     DriverCallScope scope;
-    const StreamGetDeviceFunction function =
-        stream_get_device_ptsz_ == nullptr ? stream_get_device_ : stream_get_device_ptsz_;
-    if (function == nullptr) {
+    if (stream_get_device_ptsz_ == nullptr) {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
-    return function(stream, device);
+    return stream_get_device_ptsz_(stream, device);
 }
 
 CUresult DriverDispatch::stream_get_context(CUstream stream, CUcontext* context) const {
@@ -316,12 +312,10 @@ CUresult DriverDispatch::stream_get_context(CUstream stream, CUcontext* context)
 
 CUresult DriverDispatch::stream_get_context_ptsz(CUstream stream, CUcontext* context) const {
     DriverCallScope scope;
-    const StreamGetContextFunction function =
-        stream_get_context_ptsz_ == nullptr ? stream_get_context_ : stream_get_context_ptsz_;
-    if (function == nullptr) {
+    if (stream_get_context_ptsz_ == nullptr) {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
-    return function(stream, context);
+    return stream_get_context_ptsz_(stream, context);
 }
 
 CUresult DriverDispatch::stream_query(CUstream stream) const {
@@ -334,12 +328,10 @@ CUresult DriverDispatch::stream_query(CUstream stream) const {
 
 CUresult DriverDispatch::stream_query_ptsz(CUstream stream) const {
     DriverCallScope scope;
-    const StreamQueryFunction function =
-        stream_query_ptsz_ == nullptr ? stream_query_ : stream_query_ptsz_;
-    if (function == nullptr) {
+    if (stream_query_ptsz_ == nullptr) {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
-    return function(stream);
+    return stream_query_ptsz_(stream);
 }
 
 CUresult DriverDispatch::stream_synchronize(CUstream stream) const {
@@ -352,12 +344,18 @@ CUresult DriverDispatch::stream_synchronize(CUstream stream) const {
 
 CUresult DriverDispatch::stream_synchronize_ptsz(CUstream stream) const {
     DriverCallScope scope;
-    const StreamSynchronizeFunction function =
-        stream_synchronize_ptsz_ == nullptr ? stream_synchronize_ : stream_synchronize_ptsz_;
-    if (function == nullptr) {
+    if (stream_synchronize_ptsz_ == nullptr) {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
-    return function(stream);
+    return stream_synchronize_ptsz_(stream);
+}
+
+CUresult DriverDispatch::stream_destroy(CUstream stream) const {
+    DriverCallScope scope;
+    if (stream_destroy_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return stream_destroy_(stream);
 }
 
 CUresult DriverDispatch::get_proc_address(const char* symbol, void** function_pointer,
@@ -400,7 +398,7 @@ bool DriverDispatch::has_mem_alloc_async() const {
 }
 
 bool DriverDispatch::has_mem_alloc_async_ptsz() const {
-    return mem_alloc_async_ptsz_ != nullptr || mem_alloc_async_ != nullptr;
+    return mem_alloc_async_ptsz_ != nullptr;
 }
 
 bool DriverDispatch::has_mem_alloc_from_pool_async() const {
@@ -408,7 +406,7 @@ bool DriverDispatch::has_mem_alloc_from_pool_async() const {
 }
 
 bool DriverDispatch::has_mem_alloc_from_pool_async_ptsz() const {
-    return mem_alloc_from_pool_async_ptsz_ != nullptr || mem_alloc_from_pool_async_ != nullptr;
+    return mem_alloc_from_pool_async_ptsz_ != nullptr;
 }
 
 bool DriverDispatch::has_mem_free_async() const {
@@ -416,7 +414,7 @@ bool DriverDispatch::has_mem_free_async() const {
 }
 
 bool DriverDispatch::has_mem_free_async_ptsz() const {
-    return mem_free_async_ptsz_ != nullptr || mem_free_async_ != nullptr;
+    return mem_free_async_ptsz_ != nullptr;
 }
 
 bool DriverDispatch::has_device_total_mem() const {
@@ -440,8 +438,7 @@ bool DriverDispatch::has_stream_identity() const {
 }
 
 bool DriverDispatch::has_stream_identity_ptsz() const {
-    return (stream_get_device_ptsz_ != nullptr || stream_get_device_ != nullptr) &&
-           (stream_get_context_ptsz_ != nullptr || stream_get_context_ != nullptr);
+    return stream_get_device_ptsz_ != nullptr && stream_get_context_ptsz_ != nullptr;
 }
 
 bool DriverDispatch::has_stream_query() const {
@@ -449,7 +446,7 @@ bool DriverDispatch::has_stream_query() const {
 }
 
 bool DriverDispatch::has_stream_query_ptsz() const {
-    return stream_query_ptsz_ != nullptr || stream_query_ != nullptr;
+    return stream_query_ptsz_ != nullptr;
 }
 
 bool DriverDispatch::has_stream_synchronize() const {
@@ -457,7 +454,11 @@ bool DriverDispatch::has_stream_synchronize() const {
 }
 
 bool DriverDispatch::has_stream_synchronize_ptsz() const {
-    return stream_synchronize_ptsz_ != nullptr || stream_synchronize_ != nullptr;
+    return stream_synchronize_ptsz_ != nullptr;
+}
+
+bool DriverDispatch::has_stream_destroy() const {
+    return stream_destroy_ != nullptr;
 }
 
 void* DriverDispatch::load_symbol(const char* name) const {

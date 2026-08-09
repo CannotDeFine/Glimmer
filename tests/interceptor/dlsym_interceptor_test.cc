@@ -10,6 +10,8 @@
 
 namespace {
 
+using DlsymFunction = void* (*)(void* handle, const char* name);
+
 bool is_from_interceptor(void* symbol) {
     if (symbol == nullptr) {
         return false;
@@ -62,6 +64,8 @@ int main() {
         "cuStreamQuery_ptsz",
         "cuStreamSynchronize",
         "cuStreamSynchronize_ptsz",
+        "cuStreamDestroy",
+        "cuStreamDestroy_v2",
         "cuCtxSynchronize",
         "cuGetProcAddress",
         "cuGetProcAddress_v2",
@@ -74,9 +78,19 @@ int main() {
         }
     }
 
-    const char* const runtime_names[] = {"cudaMalloc",     "cudaMallocAsync",
-                                         "cudaFree",       "cudaFreeAsync",
-                                         "cudaMemGetInfo", "cudaDeviceSynchronize"};
+    const char* const runtime_names[] = {"cudaMalloc",
+                                         "cudaMallocAsync",
+                                         "cudaMallocAsync_ptsz",
+                                         "cudaFree",
+                                         "cudaFreeAsync",
+                                         "cudaFreeAsync_ptsz",
+                                         "cudaMemGetInfo",
+                                         "cudaDeviceSynchronize",
+                                         "cudaStreamSynchronize",
+                                         "cudaStreamSynchronize_ptsz",
+                                         "cudaStreamQuery",
+                                         "cudaStreamQuery_ptsz",
+                                         "cudaStreamDestroy"};
     for (const char* name : runtime_names) {
         if (!is_from_interceptor(dlsym(RTLD_DEFAULT, name))) {
             std::cerr << "dlsym did not return the Runtime interceptor for " << name << '\n';
@@ -86,6 +100,12 @@ int main() {
 
     if (!is_not_from_interceptor(dlsym(RTLD_DEFAULT, "dlopen"))) {
         std::cerr << "dlsym did not delegate an unsupported symbol\n";
+        return EXIT_FAILURE;
+    }
+
+    const DlsymFunction dlsym_without_nonnull_attribute = reinterpret_cast<DlsymFunction>(&dlsym);
+    if (dlsym_without_nonnull_attribute(RTLD_DEFAULT, nullptr) != nullptr) {
+        std::cerr << "dlsym did not reject a null symbol name\n";
         return EXIT_FAILURE;
     }
 

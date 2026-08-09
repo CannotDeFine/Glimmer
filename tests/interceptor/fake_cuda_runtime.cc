@@ -19,6 +19,9 @@ using DriverAllocAsyncFunction = CUresult (*)(CUdeviceptr* device_pointer, std::
 using DriverFreeFunction = CUresult (*)(CUdeviceptr device_pointer);
 using DriverFreeAsyncFunction = CUresult (*)(CUdeviceptr device_pointer, CUstream stream);
 using DriverContextSynchronizeFunction = CUresult (*)();
+using DriverStreamSynchronizeFunction = CUresult (*)(CUstream stream);
+using DriverStreamQueryFunction = CUresult (*)(CUstream stream);
+using DriverStreamDestroyFunction = CUresult (*)(CUstream stream);
 using DriverMemGetInfoFunction = CUresult (*)(std::size_t* free_bytes, std::size_t* total_bytes);
 
 template <typename Function>
@@ -63,6 +66,14 @@ extern "C" cudaError_t CUDARTAPI cudaMalloc(void** device_pointer, std::size_t m
     return cudaSuccess;
 }
 
+extern "C" cudaError_t CUDARTAPI cudaGetDevice(int* device) {
+    if (device == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    *device = 0;
+    return cudaSuccess;
+}
+
 extern "C" cudaError_t CUDARTAPI cudaFree(void* device_pointer) {
     const DriverFreeFunction release = resolve_driver_function<DriverFreeFunction>("cuMemFree_v2");
     if (release == nullptr) {
@@ -92,6 +103,12 @@ extern "C" cudaError_t CUDARTAPI cudaMallocAsync(void** device_pointer, std::siz
     return cudaSuccess;
 }
 
+extern "C" cudaError_t CUDARTAPI cudaMallocAsync_ptsz(void** device_pointer,
+                                                      std::size_t memory_bytes,
+                                                      cudaStream_t stream) {
+    return cudaMallocAsync(device_pointer, memory_bytes, stream);
+}
+
 extern "C" cudaError_t CUDARTAPI cudaFreeAsync(void* device_pointer, cudaStream_t stream) {
     const DriverFreeAsyncFunction release =
         resolve_driver_function<DriverFreeAsyncFunction>("cuMemFreeAsync");
@@ -102,6 +119,10 @@ extern "C" cudaError_t CUDARTAPI cudaFreeAsync(void* device_pointer, cudaStream_
     return result == CUDA_SUCCESS ? cudaSuccess : cudaErrorInvalidValue;
 }
 
+extern "C" cudaError_t CUDARTAPI cudaFreeAsync_ptsz(void* device_pointer, cudaStream_t stream) {
+    return cudaFreeAsync(device_pointer, stream);
+}
+
 extern "C" cudaError_t CUDARTAPI cudaDeviceSynchronize() {
     const DriverContextSynchronizeFunction synchronize =
         resolve_driver_function<DriverContextSynchronizeFunction>("cuCtxSynchronize");
@@ -109,6 +130,44 @@ extern "C" cudaError_t CUDARTAPI cudaDeviceSynchronize() {
         return cudaErrorNotSupported;
     }
     return synchronize() == CUDA_SUCCESS ? cudaSuccess : cudaErrorUnknown;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaStreamSynchronize(cudaStream_t stream) {
+    const DriverStreamSynchronizeFunction synchronize =
+        resolve_driver_function<DriverStreamSynchronizeFunction>("cuStreamSynchronize");
+    if (synchronize == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    return synchronize(reinterpret_cast<CUstream>(stream)) == CUDA_SUCCESS ? cudaSuccess
+                                                                           : cudaErrorUnknown;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaStreamSynchronize_ptsz(cudaStream_t stream) {
+    return cudaStreamSynchronize(stream);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaStreamQuery(cudaStream_t stream) {
+    const DriverStreamQueryFunction query =
+        resolve_driver_function<DriverStreamQueryFunction>("cuStreamQuery");
+    if (query == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    return query(reinterpret_cast<CUstream>(stream)) == CUDA_SUCCESS ? cudaSuccess
+                                                                     : cudaErrorUnknown;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaStreamQuery_ptsz(cudaStream_t stream) {
+    return cudaStreamQuery(stream);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaStreamDestroy(cudaStream_t stream) {
+    const DriverStreamDestroyFunction destroy =
+        resolve_driver_function<DriverStreamDestroyFunction>("cuStreamDestroy");
+    if (destroy == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    return destroy(reinterpret_cast<CUstream>(stream)) == CUDA_SUCCESS ? cudaSuccess
+                                                                       : cudaErrorUnknown;
 }
 
 extern "C" cudaError_t CUDARTAPI cudaMemGetInfo(std::size_t* free_bytes, std::size_t* total_bytes) {
