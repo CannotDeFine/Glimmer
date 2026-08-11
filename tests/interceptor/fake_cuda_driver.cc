@@ -28,13 +28,32 @@ constexpr std::size_t kForcedAllocationFailureBytes = 1536;
 std::mutex g_mutex;
 std::unordered_map<CUdeviceptr, std::size_t> g_allocations;
 std::unordered_map<CUdeviceptr, CUstream> g_pending_frees;
+struct FakeVmmAllocation {
+    std::size_t memory_bytes;
+    std::size_t reference_count;
+};
+std::unordered_map<CUmemGenericAllocationHandle, FakeVmmAllocation> g_vmm_allocations;
+std::unordered_map<CUdeviceptr, CUmemGenericAllocationHandle> g_vmm_mappings;
 std::size_t g_used_bytes = 0;
 CUdeviceptr g_next_pointer = 0x100000U;
+CUmemGenericAllocationHandle g_next_vmm_handle = 1;
+CUdeviceptr g_next_virtual_address = 0x40000000U;
 bool g_context_alive = true;
 std::uint8_t g_context_token = 0;
+std::uint8_t g_default_pool_token = 0;
+std::uint8_t g_custom_pool_token = 0;
+std::uint64_t g_pool_release_threshold = 0;
 
 CUcontext fake_context() {
     return reinterpret_cast<CUcontext>(&g_context_token);
+}
+
+CUmemoryPool fake_default_pool() {
+    return reinterpret_cast<CUmemoryPool>(&g_default_pool_token);
+}
+
+CUmemoryPool fake_custom_pool() {
+    return reinterpret_cast<CUmemoryPool>(&g_custom_pool_token);
 }
 
 CUresult reserve_memory(CUdeviceptr* device_pointer, std::size_t memory_bytes) {
@@ -177,6 +196,314 @@ extern "C" CUresult CUDAAPI cuMemAllocFromPoolAsync_ptsz(CUdeviceptr* device_poi
                                                          std::size_t memory_bytes,
                                                          CUmemoryPool pool, CUstream stream) {
     return cuMemAllocFromPoolAsync(device_pointer, memory_bytes, pool, stream);
+}
+
+extern "C" CUresult CUDAAPI cuMemCreate(CUmemGenericAllocationHandle* handle,
+                                        std::size_t memory_bytes, const CUmemAllocationProp* prop,
+                                        unsigned long long) {
+    if (handle == nullptr || prop == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    std::scoped_lock lock(g_mutex);
+    if (memory_bytes == kForcedAllocationFailureBytes) {
+        *handle = 0;
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    if (!g_context_alive || memory_bytes > kPhysicalMemoryBytes - g_used_bytes) {
+        *handle = 0;
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+    const CUmemGenericAllocationHandle allocated_handle = g_next_vmm_handle++;
+    g_vmm_allocations.emplace(
+        allocated_handle, FakeVmmAllocation{.memory_bytes = memory_bytes, .reference_count = 1});
+    g_used_bytes += memory_bytes;
+    *handle = allocated_handle;
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemRelease(CUmemGenericAllocationHandle handle) {
+    std::scoped_lock lock(g_mutex);
+    const auto allocation = g_vmm_allocations.find(handle);
+    if (allocation == g_vmm_allocations.end()) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    if (allocation->second.reference_count > 1) {
+        --allocation->second.reference_count;
+        return CUDA_SUCCESS;
+    }
+    g_used_bytes -= allocation->second.memory_bytes;
+    g_vmm_allocations.erase(allocation);
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemAddressReserve(CUdeviceptr* device_pointer,
+                                                std::size_t memory_bytes, std::size_t, CUdeviceptr,
+                                                unsigned long long) {
+    if (device_pointer == nullptr || memory_bytes == 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    std::scoped_lock lock(g_mutex);
+    *device_pointer = g_next_virtual_address;
+    g_next_virtual_address += static_cast<CUdeviceptr>(memory_bytes);
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemAddressFree(CUdeviceptr device_pointer, std::size_t memory_bytes) {
+    return device_pointer == 0 || memory_bytes == 0 ? CUDA_ERROR_INVALID_VALUE : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemMap(CUdeviceptr device_pointer, std::size_t memory_bytes,
+                                     std::size_t, CUmemGenericAllocationHandle handle,
+                                     unsigned long long) {
+    if (device_pointer == 0 || memory_bytes == 0 || handle == 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    std::scoped_lock lock(g_mutex);
+    const auto allocation = g_vmm_allocations.find(handle);
+    if (allocation == g_vmm_allocations.end() || memory_bytes > allocation->second.memory_bytes) {
+        return CUDA_ERROR_INVALID_HANDLE;
+    }
+    g_vmm_mappings[device_pointer] = handle;
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemUnmap(CUdeviceptr device_pointer, std::size_t memory_bytes) {
+    if (device_pointer == 0 || memory_bytes == 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    std::scoped_lock lock(g_mutex);
+    return g_vmm_mappings.erase(device_pointer) == 1 ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
+}
+
+extern "C" CUresult CUDAAPI cuMemSetAccess(CUdeviceptr device_pointer, std::size_t memory_bytes,
+                                           const CUmemAccessDesc* access_descriptors,
+                                           std::size_t descriptor_count) {
+    return device_pointer == 0 || memory_bytes == 0 ||
+                   (descriptor_count != 0 && access_descriptors == nullptr)
+               ? CUDA_ERROR_INVALID_VALUE
+               : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemGetAddressRange_v2(CUdeviceptr* base_pointer,
+                                                    std::size_t* memory_bytes,
+                                                    CUdeviceptr device_pointer) {
+    if (base_pointer == nullptr || memory_bytes == nullptr || device_pointer == 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *base_pointer = device_pointer;
+    *memory_bytes = 4096;
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemGetAccess(unsigned long long* flags, const CUmemLocation* location,
+                                           CUdeviceptr device_pointer) {
+    if (flags == nullptr || location == nullptr || device_pointer == 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemExportToShareableHandle(void* shareable_handle,
+                                                         CUmemGenericAllocationHandle handle,
+                                                         CUmemAllocationHandleType,
+                                                         unsigned long long) {
+    if (shareable_handle == nullptr || handle == 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    std::scoped_lock lock(g_mutex);
+    return g_vmm_allocations.contains(handle) ? CUDA_SUCCESS : CUDA_ERROR_INVALID_HANDLE;
+}
+
+extern "C" CUresult CUDAAPI cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* handle,
+                                                           void* os_handle,
+                                                           CUmemAllocationHandleType handle_type) {
+    if (handle == nullptr ||
+        (os_handle == nullptr && handle_type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    std::scoped_lock lock(g_mutex);
+    *handle = g_next_vmm_handle++;
+    g_vmm_allocations.emplace(*handle, FakeVmmAllocation{.memory_bytes = 0, .reference_count = 1});
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemGetAllocationGranularity(std::size_t* granularity,
+                                                          const CUmemAllocationProp* prop,
+                                                          CUmemAllocationGranularity_flags) {
+    if (granularity == nullptr || prop == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *granularity = 65536;
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemGetAllocationPropertiesFromHandle(
+    CUmemAllocationProp* prop, CUmemGenericAllocationHandle handle) {
+    if (prop == nullptr || handle == 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    std::scoped_lock lock(g_mutex);
+    if (!g_vmm_allocations.contains(handle)) {
+        return CUDA_ERROR_INVALID_HANDLE;
+    }
+    *prop = {};
+    prop->type = CU_MEM_ALLOCATION_TYPE_PINNED;
+    prop->location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    prop->location.id = 0;
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemRetainAllocationHandle(CUmemGenericAllocationHandle* handle,
+                                                        void* device_pointer) {
+    if (handle == nullptr || device_pointer == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    std::scoped_lock lock(g_mutex);
+    const auto mapping = g_vmm_mappings.find(reinterpret_cast<CUdeviceptr>(device_pointer));
+    if (mapping == g_vmm_mappings.end()) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    auto allocation = g_vmm_allocations.find(mapping->second);
+    if (allocation == g_vmm_allocations.end()) {
+        return CUDA_ERROR_INVALID_HANDLE;
+    }
+    if (allocation->second.reference_count == std::numeric_limits<std::size_t>::max()) {
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+    ++allocation->second.reference_count;
+    *handle = mapping->second;
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolTrimTo(CUmemoryPool pool, std::size_t) {
+    return pool == nullptr ? CUDA_ERROR_INVALID_VALUE : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolSetAttribute(CUmemoryPool pool, CUmemPool_attribute attribute,
+                                                  void* value) {
+    if (pool == nullptr || value == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    if (attribute == CU_MEMPOOL_ATTR_RELEASE_THRESHOLD) {
+        g_pool_release_threshold = *static_cast<std::uint64_t*>(value);
+    }
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolGetAttribute(CUmemoryPool pool, CUmemPool_attribute attribute,
+                                                  void* value) {
+    if (pool == nullptr || value == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    if (attribute == CU_MEMPOOL_ATTR_RELEASE_THRESHOLD) {
+        *static_cast<std::uint64_t*>(value) = g_pool_release_threshold;
+    }
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolSetAccess(CUmemoryPool pool,
+                                               const CUmemAccessDesc* access_descriptors,
+                                               std::size_t descriptor_count) {
+    return pool == nullptr || (descriptor_count != 0 && access_descriptors == nullptr)
+               ? CUDA_ERROR_INVALID_VALUE
+               : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolGetAccess(CUmemAccess_flags* flags, CUmemoryPool pool,
+                                               CUmemLocation* location) {
+    if (flags == nullptr || pool == nullptr || location == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolCreate(CUmemoryPool* pool, const CUmemPoolProps* properties) {
+    if (pool == nullptr || properties == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *pool = fake_custom_pool();
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolDestroy(CUmemoryPool pool) {
+    return pool == nullptr ? CUDA_ERROR_INVALID_VALUE : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuDeviceGetMemPool(CUmemoryPool* pool, CUdevice device) {
+    if (pool == nullptr || device < 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *pool = fake_default_pool();
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuDeviceSetMemPool(CUdevice device, CUmemoryPool pool) {
+    return device < 0 || pool == nullptr ? CUDA_ERROR_INVALID_VALUE : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuDeviceGetDefaultMemPool(CUmemoryPool* pool, CUdevice device) {
+    if (pool == nullptr || device < 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *pool = fake_default_pool();
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemGetDefaultMemPool(CUmemoryPool* pool, CUmemLocation* location,
+                                                   CUmemAllocationType) {
+    if (pool == nullptr || location == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *pool = fake_default_pool();
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemGetMemPool(CUmemoryPool* pool, CUmemLocation* location,
+                                            CUmemAllocationType) {
+    if (pool == nullptr || location == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *pool = fake_default_pool();
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemSetMemPool(CUmemLocation* location, CUmemAllocationType,
+                                            CUmemoryPool pool) {
+    return location == nullptr || pool == nullptr ? CUDA_ERROR_INVALID_VALUE : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolExportToShareableHandle(void* handle_out, CUmemoryPool pool,
+                                                             CUmemAllocationHandleType,
+                                                             unsigned long long) {
+    return handle_out == nullptr || pool == nullptr ? CUDA_ERROR_INVALID_VALUE : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI
+cuMemPoolImportFromShareableHandle(CUmemoryPool* pool_out, void* handle,
+                                   CUmemAllocationHandleType handle_type, unsigned long long) {
+    if (pool_out == nullptr ||
+        (handle == nullptr && handle_type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *pool_out = fake_custom_pool();
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolExportPointer(CUmemPoolPtrExportData* share_data_out,
+                                                   CUdeviceptr device_pointer) {
+    return share_data_out == nullptr || device_pointer == 0 ? CUDA_ERROR_INVALID_VALUE
+                                                            : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolImportPointer(CUdeviceptr* pointer_out, CUmemoryPool pool,
+                                                   CUmemPoolPtrExportData* share_data) {
+    if (pointer_out == nullptr || pool == nullptr || share_data == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *pointer_out = 0x70000000U;
+    return CUDA_SUCCESS;
 }
 
 extern "C" CUresult CUDAAPI cuMemFreeAsync(CUdeviceptr device_pointer, CUstream stream) {
@@ -347,6 +674,100 @@ void* lookup_symbol(const char* symbol) {
     }
     if (std::string_view(symbol) == "cuMemAllocFromPoolAsync_ptsz") {
         return reinterpret_cast<void*>(&cuMemAllocFromPoolAsync_ptsz);
+    }
+    if (std::string_view(symbol) == "cuMemCreate") {
+        return reinterpret_cast<void*>(&cuMemCreate);
+    }
+    if (std::string_view(symbol) == "cuMemRelease") {
+        return reinterpret_cast<void*>(&cuMemRelease);
+    }
+    if (std::string_view(symbol) == "cuMemAddressReserve") {
+        return reinterpret_cast<void*>(&cuMemAddressReserve);
+    }
+    if (std::string_view(symbol) == "cuMemAddressFree") {
+        return reinterpret_cast<void*>(&cuMemAddressFree);
+    }
+    if (std::string_view(symbol) == "cuMemMap") {
+        return reinterpret_cast<void*>(&cuMemMap);
+    }
+    if (std::string_view(symbol) == "cuMemUnmap") {
+        return reinterpret_cast<void*>(&cuMemUnmap);
+    }
+    if (std::string_view(symbol) == "cuMemSetAccess") {
+        return reinterpret_cast<void*>(&cuMemSetAccess);
+    }
+    if (std::string_view(symbol) == "cuMemGetAddressRange" ||
+        std::string_view(symbol) == "cuMemGetAddressRange_v2") {
+        return reinterpret_cast<void*>(&cuMemGetAddressRange_v2);
+    }
+    if (std::string_view(symbol) == "cuMemGetAccess") {
+        return reinterpret_cast<void*>(&cuMemGetAccess);
+    }
+    if (std::string_view(symbol) == "cuMemExportToShareableHandle") {
+        return reinterpret_cast<void*>(&cuMemExportToShareableHandle);
+    }
+    if (std::string_view(symbol) == "cuMemImportFromShareableHandle") {
+        return reinterpret_cast<void*>(&cuMemImportFromShareableHandle);
+    }
+    if (std::string_view(symbol) == "cuMemGetAllocationGranularity") {
+        return reinterpret_cast<void*>(&cuMemGetAllocationGranularity);
+    }
+    if (std::string_view(symbol) == "cuMemGetAllocationPropertiesFromHandle") {
+        return reinterpret_cast<void*>(&cuMemGetAllocationPropertiesFromHandle);
+    }
+    if (std::string_view(symbol) == "cuMemRetainAllocationHandle") {
+        return reinterpret_cast<void*>(&cuMemRetainAllocationHandle);
+    }
+    if (std::string_view(symbol) == "cuMemPoolTrimTo") {
+        return reinterpret_cast<void*>(&cuMemPoolTrimTo);
+    }
+    if (std::string_view(symbol) == "cuMemPoolSetAttribute") {
+        return reinterpret_cast<void*>(&cuMemPoolSetAttribute);
+    }
+    if (std::string_view(symbol) == "cuMemPoolGetAttribute") {
+        return reinterpret_cast<void*>(&cuMemPoolGetAttribute);
+    }
+    if (std::string_view(symbol) == "cuMemPoolSetAccess") {
+        return reinterpret_cast<void*>(&cuMemPoolSetAccess);
+    }
+    if (std::string_view(symbol) == "cuMemPoolGetAccess") {
+        return reinterpret_cast<void*>(&cuMemPoolGetAccess);
+    }
+    if (std::string_view(symbol) == "cuMemPoolCreate") {
+        return reinterpret_cast<void*>(&cuMemPoolCreate);
+    }
+    if (std::string_view(symbol) == "cuMemPoolDestroy") {
+        return reinterpret_cast<void*>(&cuMemPoolDestroy);
+    }
+    if (std::string_view(symbol) == "cuDeviceGetMemPool") {
+        return reinterpret_cast<void*>(&cuDeviceGetMemPool);
+    }
+    if (std::string_view(symbol) == "cuDeviceSetMemPool") {
+        return reinterpret_cast<void*>(&cuDeviceSetMemPool);
+    }
+    if (std::string_view(symbol) == "cuDeviceGetDefaultMemPool") {
+        return reinterpret_cast<void*>(&cuDeviceGetDefaultMemPool);
+    }
+    if (std::string_view(symbol) == "cuMemGetDefaultMemPool") {
+        return reinterpret_cast<void*>(&cuMemGetDefaultMemPool);
+    }
+    if (std::string_view(symbol) == "cuMemGetMemPool") {
+        return reinterpret_cast<void*>(&cuMemGetMemPool);
+    }
+    if (std::string_view(symbol) == "cuMemSetMemPool") {
+        return reinterpret_cast<void*>(&cuMemSetMemPool);
+    }
+    if (std::string_view(symbol) == "cuMemPoolExportToShareableHandle") {
+        return reinterpret_cast<void*>(&cuMemPoolExportToShareableHandle);
+    }
+    if (std::string_view(symbol) == "cuMemPoolImportFromShareableHandle") {
+        return reinterpret_cast<void*>(&cuMemPoolImportFromShareableHandle);
+    }
+    if (std::string_view(symbol) == "cuMemPoolExportPointer") {
+        return reinterpret_cast<void*>(&cuMemPoolExportPointer);
+    }
+    if (std::string_view(symbol) == "cuMemPoolImportPointer") {
+        return reinterpret_cast<void*>(&cuMemPoolImportPointer);
     }
     if (std::string_view(symbol) == "cuMemFree" || std::string_view(symbol) == "cuMemFree_v2") {
         return reinterpret_cast<void*>(&cuMemFree_v2);

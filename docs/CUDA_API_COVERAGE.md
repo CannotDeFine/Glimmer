@@ -78,9 +78,9 @@ The interceptor must cover each supported path before claiming compatibility.
 | Path | Required behavior | Priority | Test |
 | --- | --- | --- | --- |
 | Direct dynamic import | Export ABI-compatible `cu*` wrapper symbols, including legacy, PTDS, allocation, stream identity, and query aliases, from the preload library. | M1/M2/M3 | A fixture directly calls versioned, PTDS, and legacy allocation/query symbols. |
-| `dlsym` | Return a supported wrapper when a CUDA Driver allocation, release, stream identity, or query symbol is requested. Delegate all other symbols to the real resolver. | M2/M3 (implemented) | A preload fixture resolves supported PTDS symbols and verifies delegation for an unsupported symbol. |
+| `dlsym` | Return a supported wrapper when a CUDA Driver allocation, release, VMM handle, stream identity, or query symbol is requested. Delegate all other symbols to the real resolver. | M2/M3 (implemented) | A preload fixture resolves supported PTDS and VMM symbols and verifies delegation for an unsupported symbol. |
 | `cuGetProcAddress` and `cuGetProcAddress_v2` | Return a supported wrapper for requested CUDA Driver APIs and versions. Delegate unsupported requests unchanged. | M2 (implemented) | A CUDA integration test resolves and calls `cuMemGetInfo` through the versioned API and verifies an unsupported request. |
-| CUDA Runtime interception | Wrap `cudaMalloc`, `cudaFree`, `cudaMemGetInfo`, `cudaMallocAsync`/`cudaMallocAsync_ptsz`, `cudaFreeAsync`/`cudaFreeAsync_ptsz`, `cudaDeviceSynchronize`, `cudaStreamSynchronize`/`cudaStreamSynchronize_ptsz`, `cudaStreamQuery`/`cudaStreamQuery_ptsz`, and `cudaStreamDestroy`. Runtime calls use a reentrancy guard and independently account stream-ordered allocations through the shared registry. | M2/M3 (implemented) | Fake Runtime and CUDA integration tests for synchronous, stream-ordered, and PTDS Runtime calls. |
+| CUDA Runtime interception | Wrap synchronous and stream-ordered allocation/free APIs, including `cudaMallocFromPoolAsync`/`cudaMallocFromPoolAsync_ptsz`, completion boundaries, memory-pool lifecycle/query APIs, and memory-pool import/export APIs. Runtime calls use a reentrancy guard; allocation bytes are independently accounted through the shared registry, while imported pool handles/pointers are rejected when quota mode is enabled. | M2/M3 (implemented) | Fake Runtime and CUDA integration tests for synchronous, stream-ordered, PTDS, and memory-pool Runtime calls. |
 
 `cuInit` is also wrapped as an initialization safety boundary. It does not
 make an accounting decision; it establishes the Driver-call guard so that
@@ -106,38 +106,37 @@ names so a lookup on the wrong library cannot return a Runtime wrapper.
 Versioned `dlvsym` lookups are delegated unchanged and remain outside the
 current interception guarantee.
 
-The preload library exports CUDA Runtime boundaries for `cudaMalloc`,
-`cudaFree`, `cudaMemGetInfo`, `cudaMallocAsync`/`cudaMallocAsync_ptsz`,
-`cudaFreeAsync`/`cudaFreeAsync_ptsz`, `cudaDeviceSynchronize`,
-`cudaStreamSynchronize`/`cudaStreamSynchronize_ptsz`,
-`cudaStreamQuery`/`cudaStreamQuery_ptsz`, and `cudaStreamDestroy`. Wrappers
-resolve the real `libcudart` functions once,
-guard reentrant Runtime calls, and reuse the same process-local allocation
-ledger and quota contract as Driver API wrappers. Runtime stream-ordered
-allocation and release are accounted by a dedicated Runtime adapter, so a
-`libcudart` implementation that bypasses Driver allocation symbols remains
-covered. Runtime completion boundaries use the same context-aware stream
-identity rules as Driver wrappers. Because the Runtime ABI does not expose
-whether a null stream uses legacy or per-thread default-stream semantics, null
-Runtime streams are conservatively isolated by calling thread; device or
-context synchronization remains the authoritative completion boundary for
-legacy-default-stream workloads.
+The preload library exports CUDA Runtime boundaries for synchronous and
+stream-ordered allocation/free, including `cudaMallocFromPoolAsync` and its
+PTDS alias, completion boundaries, memory-pool lifecycle/query operations, and
+memory-pool export/import operations. Wrappers resolve the real `libcudart`
+functions once, guard reentrant Runtime calls, and reuse the same process-local
+allocation ledger and quota contract as Driver API wrappers. Runtime
+stream-ordered allocation and release are accounted by a dedicated Runtime
+adapter, so a `libcudart` implementation that bypasses Driver allocation
+symbols remains covered. Imported pool handles and pointers are rejected in
+quota mode because their physical ownership cannot be safely reconstructed at
+the wrapper boundary; quota-disabled mode delegates them unchanged. Runtime
+completion boundaries use the same context-aware stream identity rules as
+Driver wrappers. Because the Runtime ABI does not expose whether a null stream
+uses legacy or per-thread default-stream semantics, null Runtime streams are
+conservatively isolated by calling thread; device or context synchronization
+remains the authoritative completion boundary for legacy-default-stream
+workloads.
 
 The current `cuGetProcAddress` wrappers reject null or empty symbols and null
 output pointers before entering the real Driver. Version and flag validation
 is still delegated to the real Driver. The v2 wrapper prefers the real v2
-resolver and uses a
-thread-local reentrancy boundary for drivers that call the legacy resolver
-during lookup. It falls back to the legacy resolver only when the v2 entry point
-is unavailable and translates its not-found result to the v2 status contract.
-When the Driver returns a valid supported function, the wrapper replaces only
-the returned address with the corresponding Glimmer wrapper; unsupported
-symbols and other Driver errors remain unchanged.
+resolver and uses a thread-local reentrancy boundary for drivers that call the
+legacy resolver during lookup. It falls back to the legacy resolver only when
+the v2 entry point is unavailable and translates its not-found result to the v2
+status contract. When the Driver returns a valid supported function, the
+wrapper replaces only the returned address with the corresponding Glimmer
+wrapper; unsupported symbols and other Driver errors remain unchanged.
 
 The runtime symbol registry in `src/interceptor/symbol_registry.cc` is the
 single source of truth for supported names, aliases, and wrapper addresses.
-Both `dlsym` and `cuGetProcAddress` use this registry;
-allocation behavior and
+Both `dlsym` and `cuGetProcAddress` use this registry; allocation behavior and
 accounting remain implemented in the API wrappers themselves.
 
 ## Memory operation coverage
@@ -150,10 +149,10 @@ accounting remain implemented in the API wrappers themselves.
 | Pitched allocation | `cuMemAllocPitch_v2`, `cuMemFree_v2` | Charge actual reserved bytes using returned pitch and requested height. | M2 (implemented) | A CUDA integration test verifies pitch-based accounting and release. |
 | Managed allocation | `cuMemAllocManaged`, `cuMemFree_v2` | Charge a successful managed allocation and release it by recorded pointer. | M2 (implemented) | A CUDA integration test verifies managed allocation and release. |
 | Stream-ordered allocation | `cuMemAllocAsync`, `cuMemAllocAsync_ptsz`, `cuMemAllocFromPoolAsync`, `cuMemAllocFromPoolAsync_ptsz`, `cuMemFreeAsync`, `cuMemFreeAsync_ptsz`, `cuStreamGetDevice[_ptsz]`, `cuStreamGetCtx[_ptsz]`, `cuStreamQuery[_ptsz]`, `cuStreamSynchronize[_ptsz]`, `cuStreamDestroy[_v2]`, `cuCtxSynchronize`, `cudaMallocAsync`, `cudaFreeAsync`, `cudaStreamQuery`, `cudaStreamSynchronize`, `cudaStreamDestroy`, `cudaDeviceSynchronize` | Charge successful allocation submission; retain an enqueued free until an explicit successful completion boundary. Context teardown does not release context-independent allocations. | M3 (implemented) | No-GPU fake Driver and CUDA tests verify Driver/PTDS and Runtime dispatch, deferred release, stream destruction, and context completion. |
-| Memory pools | `cuMemAllocFromPoolAsync` through the default/explicit pool allocation path | Charge requested stream-ordered allocations. Pool creation, reuse policy, release thresholds, and trim remain outside this milestone. | M3 partial | Pool allocation/free path and deferred completion; dedicated pool lifecycle tests remain future work. |
-| CUDA VMM | `cuMemCreate`, `cuMemRelease` | Charge physical allocation handles; do not charge address reservation or mapping alone. | M3 | Reserve, create, map, unmap, and release lifecycle. |
+| Memory pools | `cuMemAllocFromPoolAsync`, `cuMemPoolTrimTo`, `cuMemPoolSetAttribute`, `cuMemPoolGetAttribute`, `cuMemPoolSetAccess`, `cuMemPoolGetAccess`, `cuMemPoolCreate`, `cuMemPoolDestroy`, `cuDeviceGetMemPool`, `cuDeviceSetMemPool`, `cuDeviceGetDefaultMemPool`, `cuMemGetDefaultMemPool`, `cuMemGetMemPool`, `cuMemSetMemPool`, `cuMemPoolExportToShareableHandle`, `cuMemPoolImportFromShareableHandle`, `cuMemPoolExportPointer`, `cuMemPoolImportPointer` and corresponding Runtime pool APIs | Charge requested stream-ordered allocations. Pool lifecycle, attributes, access, and selection are forwarded without an additional quota charge. Imported pool handles and pointers are rejected in quota mode and delegated when quota mode is disabled, because their physical ownership cannot be reconstructed safely. Pool allocation bytes remain tracked by the existing async allocation path. | M3 (implemented) | Fake Driver/Runtime tests cover lifecycle, attribute/access/query, handle/pointer policy, and deferred allocation completion; GPU tests cover supported pool lifecycle. |
+| CUDA VMM | `cuMemAddressReserve`, `cuMemAddressFree`, `cuMemCreate`, `cuMemRelease`, `cuMemMap`, `cuMemUnmap`, `cuMemSetAccess`, `cuMemGetAddressRange_v2`, `cuMemGetAccess`, `cuMemExportToShareableHandle`, `cuMemImportFromShareableHandle`, `cuMemGetAllocationGranularity`, `cuMemGetAllocationPropertiesFromHandle`, `cuMemRetainAllocationHandle` | Charge device-resident physical allocation handles. Retained handles increment a local reference count and release quota only on the final successful `cuMemRelease`. Virtual-address, mapping, access, and query operations are forwarded without a second charge. Imported VMM handles are rejected in quota mode and delegated when quota mode is disabled. Host allocations are delegated because they do not consume the device quota. | M3 (implemented) | Fake Driver tests verify query, retain/release reference counting, import policy, invalid arguments, full address lifecycle, quota admission/rejection, and symbol routing. CUDA integration tests cover query and lifecycle APIs when VMM support is advertised. |
 | Context lifecycle | `cuCtxGetCurrent`, `cuCtxGetDevice`, `cuCtxDestroy_v2` (plus legacy alias) | Associate process-local metadata with the correct device and clean it up on intercepted context teardown. | M2 partial / M3 | Multiple contexts, primary-context lifecycle, and cleanup after process/context exit. |
-| NVML presentation | `nvmlDeviceGetMemoryInfo`, `nvmlDeviceGetMemoryInfo_v2` | Present tenant-visible total, used, and free values where NVML compatibility is enabled. | M4 | NVML query agrees with the CUDA query contract. |
+| NVML presentation | `nvmlInit`, `nvmlInit_v2`, `nvmlInitWithFlags`, `nvmlShutdown`, `nvmlDeviceGetCount[_v2]`, `nvmlDeviceGetHandleByIndex[_v2]`, `nvmlDeviceGetIndex`, `nvmlDeviceGetMemoryInfo`, `nvmlDeviceGetMemoryInfo_v2` | Dynamically resolve NVML, preserve the complete physical structure when quota mode is disabled, and present tenant-visible total/used/free values when quota mode is enabled. Device identity is mapped through NVML index; v2 reserved bytes are set to zero only for the virtualized quota view. | M3 (implemented) | Fake NVML preload tests verify passthrough and virtualized v1/v2 memory views, explicit-handle `dlsym`, and usage changes; GPU tests query real NVML through the preload boundary. |
 
 `M1` is the first implementation milestone. A workload is not considered
 generally supported merely because it succeeds through one M1 path; it must
@@ -185,11 +184,10 @@ records are removed and released by device when an intercepted context is
 destroyed after the real Driver teardown succeeds. Context-independent
 stream-ordered records remain charged across context teardown and are removed
 only after an explicit completion boundary or release, so stream-handle reuse
-cannot silently under-report usage.
-Context creation/reset paths that are not represented by the covered Driver
-context APIs remain outside the current guarantee. Cross-process quota
-aggregation is available only through the explicit shared-memory control-plane
-mode described in ADR 0005.
+cannot silently under-report usage. Context creation/reset paths that are not
+represented by the covered Driver context APIs remain outside the current
+guarantee. Cross-process quota aggregation is available only through the
+explicit shared-memory control-plane mode described in ADR 0005.
 
 ## Concurrency and failure rules
 
@@ -248,12 +246,37 @@ M2 is complete only when all of the following are true:
    the correct bytes, including rejection and rollback behavior.
 4. Runtime `cudaMalloc`, `cudaFree`, and `cudaMemGetInfo` share the
    process-local ledger and have an independent Runtime-call reentrancy guard;
-   Runtime stream-ordered allocation, release, and completion boundaries use
-   an independent adapter backed by the same context-aware registry.
+   Runtime stream-ordered and memory-pool allocation, release, and completion
+   boundaries use an independent adapter backed by the same context-aware
+   registry, while imported pool handles/pointers are rejected in quota mode.
 5. No-GPU preload tests, including a fake Driver/Runtime fixture, static
    analysis, formatting checks, and compatible CUDA GPU integration tests pass
    with warnings treated as errors. GPU integration remains an environment
    requirement and is reported separately when the host blocks GPU access.
-6. Memory-pool management and trim, VMM, and NVML remain explicitly documented
-   as future milestones; the covered stream-ordered Driver allocation path and
-   shared-memory multi-process accounting have their own completion tests.
+6. Memory-pool lifecycle forwarding, quota-enabled import rejection, VMM query
+   forwarding and retain/release reference accounting, NVML passthrough and
+   virtualization, the covered stream-ordered Driver/Runtime allocation paths,
+   and shared-memory multi-process accounting have their own completion tests.
+
+## M3 VMM increment exit criteria
+
+The VMM increment is complete only when all of the following are true:
+
+1. Device-resident `cuMemCreate` and `cuMemRelease` enforce quota admission
+   and exact release accounting, including real-driver failure and cleanup
+   failures.
+2. `cuMemAddressReserve`, `cuMemAddressFree`, `cuMemMap`, `cuMemUnmap`, and
+   `cuMemSetAccess` have ABI-compatible wrappers, dispatch-table entries, and
+   `dlsym`/`cuGetProcAddress` routing.
+3. Address lifecycle operations are forwarded without charging or releasing
+   physical quota a second time; the physical handle remains the accounting
+   identity.
+4. Fake-Driver tests cover invalid arguments, complete reserve/create/map/
+   access/unmap/free/release sequencing, explicit-handle lookup, and both
+   procedure-address resolvers. CUDA integration tests exercise the same
+   lifecycle when the device advertises VMM support.
+5. Host VMM allocations are delegated conservatively; allocation-granularity
+   and access-query APIs are forwarded without accounting. Imported VMM and
+   memory-pool handles/pointers are rejected in quota mode, delegated when
+   quota mode is disabled, and covered by dedicated fake tests alongside NVML
+   presentation.

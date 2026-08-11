@@ -37,7 +37,7 @@ concrete responsibility and a testable interface.
 | --- | --- | --- |
 | `core` | `include/glimmer/core/`, `src/core/` | Provides a thread-safe in-process quota ledger with explicit reservation, commit, cancellation, and release transitions. It has no CUDA, dynamic-linker, transport, or process-global dependencies. |
 | `control` | `include/glimmer/control/`, `src/control/` | Defines the quota-store contract, adapts process-local quota requests to `core`, and implements the Linux shared-memory tenant accounting store. It computes tenant-visible memory information and has no CUDA or dynamic-linker dependencies. |
-| `interceptor` | `src/interceptor/` and `src/interceptor/internal/` | Provides ABI-compatible wrappers for covered CUDA Driver, PTDS stream-ordered Driver, and Runtime APIs, routes supported Driver symbol lookups, and owns process-local allocation metadata while using `control` for quota decisions. The `internal/` headers are private implementation interfaces and are not public project headers. |
+| `interceptor` | `src/interceptor/` and `src/interceptor/internal/` | Provides ABI-compatible wrappers for covered CUDA Driver, PTDS stream-ordered Driver, Runtime, and memory-pool APIs, routes supported symbol lookups, and owns process-local allocation metadata while using `control` for quota decisions. The `internal/` headers are private implementation interfaces and are not public project headers. |
 
 The interceptor is split into focused implementation units:
 
@@ -45,8 +45,10 @@ The interceptor is split into focused implementation units:
 | --- | --- |
 | `driver_api_interceptor.cc` | CUDA Driver admission, quota accounting, context/stream completion, and symbol-resolution policy. |
 | `driver_api_wrappers.cc` | Exported C/CUDA ABI entry points. These wrappers only contain boundary exception handling and delegate to the interceptor implementation. |
-| `runtime_api_interceptor.cc` | CUDA Runtime symbol resolution, Runtime-call reentrancy, and independent Runtime async accounting entry points. |
+| `runtime_api_interceptor.cc` | CUDA Runtime symbol resolution, Runtime-call reentrancy, independent Runtime async/pool accounting entry points, and memory-pool import policy. |
 | `driver_dispatch.cc` | Dynamic loading and guarded invocation of real CUDA Driver functions, including PTDS variants. |
+| `nvml_dispatch.cc` | Dynamic loading and guarded invocation of the real NVML library and its optional v1/v2 entry points. |
+| `nvml_api_wrappers.cc` | Exported NVML ABI entry points that route to the interceptor's NVML presentation policy. |
 | `symbol_interceptor.cc` | `dlsym` interception, caller classification, and safe delegation to the real loader. |
 | `symbol_registry.cc` | The single registry of exported aliases used by `dlsym` and `cuGetProcAddress`. |
 | `internal/allocation_registry.cc` | Process-local allocation metadata, release state, and deferred stream completion. |

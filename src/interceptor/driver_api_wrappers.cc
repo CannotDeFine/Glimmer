@@ -36,6 +36,30 @@
 #ifdef cuMemAllocFromPoolAsync
 #undef cuMemAllocFromPoolAsync
 #endif
+#ifdef cuMemCreate
+#undef cuMemCreate
+#endif
+#ifdef cuMemRelease
+#undef cuMemRelease
+#endif
+#ifdef cuMemAddressReserve
+#undef cuMemAddressReserve
+#endif
+#ifdef cuMemAddressFree
+#undef cuMemAddressFree
+#endif
+#ifdef cuMemMap
+#undef cuMemMap
+#endif
+#ifdef cuMemUnmap
+#undef cuMemUnmap
+#endif
+#ifdef cuMemSetAccess
+#undef cuMemSetAccess
+#endif
+#ifdef cuMemGetAddressRange
+#undef cuMemGetAddressRange
+#endif
 #ifdef cuMemFreeAsync
 #undef cuMemFreeAsync
 #endif
@@ -139,6 +163,246 @@ extern "C" CUresult CUDAAPI cuMemAllocFromPoolAsync_ptsz(CUdeviceptr* device_poi
     return guard_cuda_boundary([device_pointer, memory_bytes, pool, stream] {
         return glimmer::interceptor::intercept_mem_alloc_from_pool_async(
             device_pointer, memory_bytes, pool, stream, true);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemCreate(CUmemGenericAllocationHandle* handle,
+                                        std::size_t memory_bytes, const CUmemAllocationProp* prop,
+                                        unsigned long long flags) {
+    return guard_cuda_boundary([handle, memory_bytes, prop, flags] {
+        return glimmer::interceptor::intercept_mem_create(handle, memory_bytes, prop, flags);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemRelease(CUmemGenericAllocationHandle handle) {
+    return guard_cuda_boundary(
+        [handle] { return glimmer::interceptor::intercept_mem_release(handle); });
+}
+
+extern "C" CUresult CUDAAPI cuMemAddressReserve(CUdeviceptr* device_pointer,
+                                                std::size_t memory_bytes, std::size_t alignment,
+                                                CUdeviceptr requested_address,
+                                                unsigned long long flags) {
+    return guard_cuda_boundary([device_pointer, memory_bytes, alignment, requested_address, flags] {
+        return glimmer::interceptor::intercept_mem_address_reserve(
+            device_pointer, memory_bytes, alignment, requested_address, flags);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemAddressFree(CUdeviceptr device_pointer, std::size_t memory_bytes) {
+    return guard_cuda_boundary([device_pointer, memory_bytes] {
+        return glimmer::interceptor::intercept_mem_address_free(device_pointer, memory_bytes);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemMap(CUdeviceptr device_pointer, std::size_t memory_bytes,
+                                     std::size_t offset, CUmemGenericAllocationHandle handle,
+                                     unsigned long long flags) {
+    return guard_cuda_boundary([device_pointer, memory_bytes, offset, handle, flags] {
+        return glimmer::interceptor::intercept_mem_map(device_pointer, memory_bytes, offset, handle,
+                                                       flags);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemUnmap(CUdeviceptr device_pointer, std::size_t memory_bytes) {
+    return guard_cuda_boundary([device_pointer, memory_bytes] {
+        return glimmer::interceptor::intercept_mem_unmap(device_pointer, memory_bytes);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemSetAccess(CUdeviceptr device_pointer, std::size_t memory_bytes,
+                                           const CUmemAccessDesc* access_descriptors,
+                                           std::size_t descriptor_count) {
+    return guard_cuda_boundary(
+        [device_pointer, memory_bytes, access_descriptors, descriptor_count] {
+            return glimmer::interceptor::intercept_mem_set_access(
+                device_pointer, memory_bytes, access_descriptors, descriptor_count);
+        });
+}
+
+extern "C" CUresult CUDAAPI cuMemGetAddressRange_v2(CUdeviceptr* base_pointer,
+                                                    std::size_t* memory_bytes,
+                                                    CUdeviceptr device_pointer) {
+    return guard_cuda_boundary([base_pointer, memory_bytes, device_pointer] {
+        return glimmer::interceptor::intercept_mem_get_address_range(base_pointer, memory_bytes,
+                                                                     device_pointer);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemGetAddressRange(CUdeviceptr* base_pointer,
+                                                 std::size_t* memory_bytes,
+                                                 CUdeviceptr device_pointer) {
+    return cuMemGetAddressRange_v2(base_pointer, memory_bytes, device_pointer);
+}
+
+extern "C" CUresult CUDAAPI cuMemGetAccess(unsigned long long* flags, const CUmemLocation* location,
+                                           CUdeviceptr device_pointer) {
+    return guard_cuda_boundary([flags, location, device_pointer] {
+        return glimmer::interceptor::intercept_mem_get_access(flags, location, device_pointer);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemExportToShareableHandle(void* shareable_handle,
+                                                         CUmemGenericAllocationHandle handle,
+                                                         CUmemAllocationHandleType handle_type,
+                                                         unsigned long long flags) {
+    return guard_cuda_boundary([shareable_handle, handle, handle_type, flags] {
+        return glimmer::interceptor::intercept_mem_export_to_shareable_handle(
+            shareable_handle, handle, handle_type, flags);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* handle,
+                                                           void* os_handle,
+                                                           CUmemAllocationHandleType handle_type) {
+    return guard_cuda_boundary([handle, os_handle, handle_type] {
+        return glimmer::interceptor::intercept_mem_import_from_shareable_handle(handle, os_handle,
+                                                                                handle_type);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemGetAllocationGranularity(std::size_t* granularity,
+                                                          const CUmemAllocationProp* prop,
+                                                          CUmemAllocationGranularity_flags option) {
+    return guard_cuda_boundary([granularity, prop, option] {
+        return glimmer::interceptor::intercept_mem_get_allocation_granularity(granularity, prop,
+                                                                              option);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemGetAllocationPropertiesFromHandle(
+    CUmemAllocationProp* prop, CUmemGenericAllocationHandle handle) {
+    return guard_cuda_boundary([prop, handle] {
+        return glimmer::interceptor::intercept_mem_get_allocation_properties(prop, handle);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemRetainAllocationHandle(CUmemGenericAllocationHandle* handle,
+                                                        void* device_pointer) {
+    return guard_cuda_boundary([handle, device_pointer] {
+        return glimmer::interceptor::intercept_mem_retain_allocation_handle(handle, device_pointer);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolTrimTo(CUmemoryPool pool, std::size_t min_bytes_to_keep) {
+    return guard_cuda_boundary([pool, min_bytes_to_keep] {
+        return glimmer::interceptor::intercept_mem_pool_trim_to(pool, min_bytes_to_keep);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolSetAttribute(CUmemoryPool pool, CUmemPool_attribute attribute,
+                                                  void* value) {
+    return guard_cuda_boundary([pool, attribute, value] {
+        return glimmer::interceptor::intercept_mem_pool_set_attribute(pool, attribute, value);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolGetAttribute(CUmemoryPool pool, CUmemPool_attribute attribute,
+                                                  void* value) {
+    return guard_cuda_boundary([pool, attribute, value] {
+        return glimmer::interceptor::intercept_mem_pool_get_attribute(pool, attribute, value);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolSetAccess(CUmemoryPool pool,
+                                               const CUmemAccessDesc* access_descriptors,
+                                               std::size_t descriptor_count) {
+    return guard_cuda_boundary([pool, access_descriptors, descriptor_count] {
+        return glimmer::interceptor::intercept_mem_pool_set_access(pool, access_descriptors,
+                                                                   descriptor_count);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolGetAccess(CUmemAccess_flags* flags, CUmemoryPool pool,
+                                               CUmemLocation* location) {
+    return guard_cuda_boundary([flags, pool, location] {
+        return glimmer::interceptor::intercept_mem_pool_get_access(flags, pool, location);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolCreate(CUmemoryPool* pool, const CUmemPoolProps* properties) {
+    return guard_cuda_boundary([pool, properties] {
+        return glimmer::interceptor::intercept_mem_pool_create(pool, properties);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolDestroy(CUmemoryPool pool) {
+    return guard_cuda_boundary(
+        [pool] { return glimmer::interceptor::intercept_mem_pool_destroy(pool); });
+}
+
+extern "C" CUresult CUDAAPI cuDeviceGetMemPool(CUmemoryPool* pool, CUdevice device) {
+    return guard_cuda_boundary([pool, device] {
+        return glimmer::interceptor::intercept_device_get_mem_pool(pool, device);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuDeviceSetMemPool(CUdevice device, CUmemoryPool pool) {
+    return guard_cuda_boundary([device, pool] {
+        return glimmer::interceptor::intercept_device_set_mem_pool(device, pool);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuDeviceGetDefaultMemPool(CUmemoryPool* pool, CUdevice device) {
+    return guard_cuda_boundary([pool, device] {
+        return glimmer::interceptor::intercept_device_get_default_mem_pool(pool, device);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemGetDefaultMemPool(CUmemoryPool* pool, CUmemLocation* location,
+                                                   CUmemAllocationType allocation_type) {
+    return guard_cuda_boundary([pool, location, allocation_type] {
+        return glimmer::interceptor::intercept_mem_get_default_mem_pool(pool, location,
+                                                                        allocation_type);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemGetMemPool(CUmemoryPool* pool, CUmemLocation* location,
+                                            CUmemAllocationType allocation_type) {
+    return guard_cuda_boundary([pool, location, allocation_type] {
+        return glimmer::interceptor::intercept_mem_get_mem_pool(pool, location, allocation_type);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemSetMemPool(CUmemLocation* location,
+                                            CUmemAllocationType allocation_type,
+                                            CUmemoryPool pool) {
+    return guard_cuda_boundary([location, allocation_type, pool] {
+        return glimmer::interceptor::intercept_mem_set_mem_pool(location, allocation_type, pool);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolExportToShareableHandle(void* handle_out, CUmemoryPool pool,
+                                                             CUmemAllocationHandleType handle_type,
+                                                             unsigned long long flags) {
+    return guard_cuda_boundary([handle_out, pool, handle_type, flags] {
+        return glimmer::interceptor::intercept_mem_pool_export_to_shareable_handle(
+            handle_out, pool, handle_type, flags);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolImportFromShareableHandle(
+    CUmemoryPool* pool_out, void* handle, CUmemAllocationHandleType handle_type,
+    unsigned long long flags) {
+    return guard_cuda_boundary([pool_out, handle, handle_type, flags] {
+        return glimmer::interceptor::intercept_mem_pool_import_from_shareable_handle(
+            pool_out, handle, handle_type, flags);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolExportPointer(CUmemPoolPtrExportData* share_data_out,
+                                                   CUdeviceptr device_pointer) {
+    return guard_cuda_boundary([share_data_out, device_pointer] {
+        return glimmer::interceptor::intercept_mem_pool_export_pointer(share_data_out,
+                                                                       device_pointer);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMemPoolImportPointer(CUdeviceptr* pointer_out, CUmemoryPool pool,
+                                                   CUmemPoolPtrExportData* share_data) {
+    return guard_cuda_boundary([pointer_out, pool, share_data] {
+        return glimmer::interceptor::intercept_mem_pool_import_pointer(pointer_out, pool,
+                                                                       share_data);
     });
 }
 

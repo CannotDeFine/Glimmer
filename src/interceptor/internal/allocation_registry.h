@@ -29,6 +29,13 @@ struct AllocationIdentityHash {
     [[nodiscard]] std::size_t operator()(const AllocationIdentity& identity) const noexcept;
 };
 
+struct VmmAllocationIdentity {
+    CUmemGenericAllocationHandle handle = 0;
+    CUdevice device = 0;
+
+    friend bool operator==(const VmmAllocationIdentity&, const VmmAllocationIdentity&) = default;
+};
+
 enum class AllocationScope : std::uint8_t {
     kContextBound,
     kContextIndependent,
@@ -55,6 +62,12 @@ class AllocationRegistry {
         AsyncStreamIdentity stream;
     };
 
+    struct VmmReleaseTicket {
+        VmmAllocationIdentity identity;
+        core::MemoryBytes memory_bytes;
+        bool is_last_reference = false;
+    };
+
     struct DeviceReleaseSummary {
         CUdevice device = 0;
         core::MemoryBytes memory_bytes = 0;
@@ -68,9 +81,15 @@ class AllocationRegistry {
 
     [[nodiscard]] bool record(AllocationIdentity identity, core::MemoryBytes memory_bytes,
                               AllocationScope scope = AllocationScope::kContextBound);
+    [[nodiscard]] bool record_vmm(VmmAllocationIdentity identity, core::MemoryBytes memory_bytes);
+    [[nodiscard]] bool retain_vmm_handle(CUmemGenericAllocationHandle handle) noexcept;
 
     [[nodiscard]] std::pair<ReleaseStatus, std::optional<ReleaseTicket>> begin_release(
         AllocationIdentity identity);
+    [[nodiscard]] std::pair<ReleaseStatus, std::optional<VmmReleaseTicket>> begin_vmm_release(
+        VmmAllocationIdentity identity);
+    [[nodiscard]] std::pair<ReleaseStatus, std::optional<VmmReleaseTicket>>
+    begin_vmm_release_by_handle(CUmemGenericAllocationHandle handle);
     [[nodiscard]] std::pair<ReleaseStatus, std::optional<ReleaseTicket>> begin_release_by_pointer(
         CUdeviceptr device_pointer, CUdevice device);
     [[nodiscard]] std::pair<ReleaseStatus, std::optional<ReleaseTicket>> begin_async_release(
@@ -79,8 +98,10 @@ class AllocationRegistry {
     begin_async_release_by_pointer(CUdeviceptr device_pointer, CUdevice device,
                                    AsyncStreamIdentity stream);
     [[nodiscard]] bool complete_release(const ReleaseTicket& ticket);
+    [[nodiscard]] bool complete_vmm_release(const VmmReleaseTicket& ticket) noexcept;
     [[nodiscard]] bool commit_async_release(const ReleaseTicket& ticket) noexcept;
     void cancel_release(const ReleaseTicket& ticket) noexcept;
+    void cancel_vmm_release(const VmmReleaseTicket& ticket) noexcept;
     [[nodiscard]] bool detach_async_releases_for_stream(const AsyncStreamIdentity& stream) noexcept;
 
     [[nodiscard]] std::optional<std::vector<DeviceReleaseSummary>>
@@ -112,9 +133,17 @@ class AllocationRegistry {
         AsyncStreamIdentity pending_stream;
     };
 
+    struct VmmAllocationRecord {
+        core::MemoryBytes memory_bytes;
+        CUdevice device = 0;
+        std::size_t reference_count = 1;
+        bool is_releasing = false;
+    };
+
     mutable std::unique_ptr<std::mutex> mutex_;
     mutable std::unordered_map<AllocationIdentity, AllocationRecord, AllocationIdentityHash>
         records_;
+    mutable std::unordered_map<CUmemGenericAllocationHandle, VmmAllocationRecord> vmm_records_;
     // Health must remain observable even when acquiring the registry mutex fails.
     mutable std::atomic<bool> is_accounting_degraded_{false};
     mutable pid_t process_id_ = 0;

@@ -13,6 +13,7 @@ using glimmer::interceptor::AllocationIdentity;
 using glimmer::interceptor::AllocationRegistry;
 using glimmer::interceptor::AllocationScope;
 using glimmer::interceptor::AsyncStreamIdentity;
+using glimmer::interceptor::VmmAllocationIdentity;
 
 bool expect(bool condition, std::string_view message) {
     if (condition) {
@@ -119,6 +120,67 @@ int main() {
         expect(registry.is_accounting_degraded(), "accounting degradation was not recorded");
     all_passed &=
         expect(!registry.record(second_key, 16), "degraded accounting accepted a new allocation");
+
+    AllocationRegistry vmm_registry;
+    const VmmAllocationIdentity vmm_key{.handle = 0x1234, .device = 1};
+    all_passed &=
+        expect(vmm_registry.record_vmm(vmm_key, 256), "VMM allocation handle was not recorded");
+    all_passed &= expect(!vmm_registry.record_vmm(vmm_key, 256),
+                         "duplicate VMM allocation handle was recorded");
+    auto [vmm_status, vmm_ticket] = vmm_registry.begin_vmm_release_by_handle(vmm_key.handle);
+    all_passed &=
+        expect(vmm_status == AllocationRegistry::ReleaseStatus::kStarted && vmm_ticket.has_value(),
+               "VMM release did not enter the releasing state");
+    const auto [vmm_duplicate_status, vmm_duplicate_ticket] =
+        vmm_registry.begin_vmm_release_by_handle(vmm_key.handle);
+    all_passed &= expect(vmm_duplicate_status == AllocationRegistry::ReleaseStatus::kInProgress &&
+                             !vmm_duplicate_ticket.has_value(),
+                         "duplicate VMM release was not identified as in progress");
+    if (vmm_ticket.has_value()) {
+        vmm_registry.cancel_vmm_release(*vmm_ticket);
+    }
+    auto [vmm_retry_status, vmm_retry_ticket] = vmm_registry.begin_vmm_release(vmm_key);
+    all_passed &= expect(vmm_retry_status == AllocationRegistry::ReleaseStatus::kStarted &&
+                             vmm_retry_ticket.has_value(),
+                         "cancelled VMM release did not restore the handle");
+    if (vmm_retry_ticket.has_value()) {
+        all_passed &= expect(vmm_registry.complete_vmm_release(*vmm_retry_ticket),
+                             "VMM release did not complete");
+    }
+    const auto [vmm_unknown_status, vmm_unknown_ticket] =
+        vmm_registry.begin_vmm_release_by_handle(vmm_key.handle);
+    all_passed &= expect(vmm_unknown_status == AllocationRegistry::ReleaseStatus::kUnknown &&
+                             !vmm_unknown_ticket.has_value(),
+                         "released VMM handle remained in the registry");
+
+    AllocationRegistry retained_vmm_registry;
+    const VmmAllocationIdentity retained_vmm_key{.handle = 0x5678, .device = 0};
+    all_passed &= expect(!retained_vmm_registry.retain_vmm_handle(retained_vmm_key.handle),
+                         "unknown VMM handle was retained");
+    all_passed &= expect(retained_vmm_registry.record_vmm(retained_vmm_key, 512),
+                         "retained VMM allocation was not recorded");
+    all_passed &= expect(retained_vmm_registry.retain_vmm_handle(retained_vmm_key.handle),
+                         "VMM handle retain was not recorded");
+    auto [retained_release_status, retained_release_ticket] =
+        retained_vmm_registry.begin_vmm_release_by_handle(retained_vmm_key.handle);
+    all_passed &= expect(retained_release_status == AllocationRegistry::ReleaseStatus::kStarted &&
+                             retained_release_ticket.has_value() &&
+                             !retained_release_ticket->is_last_reference,
+                         "retained VMM release was marked as final");
+    if (retained_release_ticket.has_value()) {
+        all_passed &= expect(retained_vmm_registry.complete_vmm_release(*retained_release_ticket),
+                             "retained VMM release did not decrement its reference count");
+    }
+    auto [final_release_status, final_release_ticket] =
+        retained_vmm_registry.begin_vmm_release_by_handle(retained_vmm_key.handle);
+    all_passed &=
+        expect(final_release_status == AllocationRegistry::ReleaseStatus::kStarted &&
+                   final_release_ticket.has_value() && final_release_ticket->is_last_reference,
+               "final VMM release was not marked as final");
+    if (final_release_ticket.has_value()) {
+        all_passed &= expect(retained_vmm_registry.complete_vmm_release(*final_release_ticket),
+                             "final retained VMM release did not complete");
+    }
 
     AllocationRegistry context_registry;
     all_passed &= expect(context_registry.record(key, 64), "context allocation was not recorded");

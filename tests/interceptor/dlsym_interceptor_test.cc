@@ -54,6 +54,38 @@ int main() {
         "cuMemAllocAsync_ptsz",
         "cuMemAllocFromPoolAsync",
         "cuMemAllocFromPoolAsync_ptsz",
+        "cuMemCreate",
+        "cuMemRelease",
+        "cuMemAddressReserve",
+        "cuMemAddressFree",
+        "cuMemMap",
+        "cuMemUnmap",
+        "cuMemSetAccess",
+        "cuMemGetAddressRange",
+        "cuMemGetAddressRange_v2",
+        "cuMemGetAccess",
+        "cuMemExportToShareableHandle",
+        "cuMemImportFromShareableHandle",
+        "cuMemGetAllocationGranularity",
+        "cuMemGetAllocationPropertiesFromHandle",
+        "cuMemRetainAllocationHandle",
+        "cuMemPoolTrimTo",
+        "cuMemPoolSetAttribute",
+        "cuMemPoolGetAttribute",
+        "cuMemPoolSetAccess",
+        "cuMemPoolGetAccess",
+        "cuMemPoolCreate",
+        "cuMemPoolDestroy",
+        "cuDeviceGetMemPool",
+        "cuDeviceSetMemPool",
+        "cuDeviceGetDefaultMemPool",
+        "cuMemGetDefaultMemPool",
+        "cuMemGetMemPool",
+        "cuMemSetMemPool",
+        "cuMemPoolExportToShareableHandle",
+        "cuMemPoolImportFromShareableHandle",
+        "cuMemPoolExportPointer",
+        "cuMemPoolImportPointer",
         "cuMemFreeAsync",
         "cuMemFreeAsync_ptsz",
         "cuStreamGetDevice",
@@ -71,6 +103,20 @@ int main() {
         "cuGetProcAddress_v2",
     };
 
+    const char* const nvml_names[] = {
+        "nvmlInit",
+        "nvmlInit_v2",
+        "nvmlInitWithFlags",
+        "nvmlShutdown",
+        "nvmlDeviceGetCount",
+        "nvmlDeviceGetCount_v2",
+        "nvmlDeviceGetHandleByIndex",
+        "nvmlDeviceGetHandleByIndex_v2",
+        "nvmlDeviceGetIndex",
+        "nvmlDeviceGetMemoryInfo",
+        "nvmlDeviceGetMemoryInfo_v2",
+    };
+
     for (const char* name : intercepted_names) {
         if (!is_from_interceptor(dlsym(RTLD_DEFAULT, name))) {
             std::cerr << "dlsym did not return the interceptor for " << name << '\n';
@@ -78,9 +124,18 @@ int main() {
         }
     }
 
+    for (const char* name : nvml_names) {
+        if (!is_from_interceptor(dlsym(RTLD_DEFAULT, name))) {
+            std::cerr << "dlsym did not return the NVML interceptor for " << name << '\n';
+            return EXIT_FAILURE;
+        }
+    }
+
     const char* const runtime_names[] = {"cudaMalloc",
                                          "cudaMallocAsync",
                                          "cudaMallocAsync_ptsz",
+                                         "cudaMallocFromPoolAsync",
+                                         "cudaMallocFromPoolAsync_ptsz",
                                          "cudaFree",
                                          "cudaFreeAsync",
                                          "cudaFreeAsync_ptsz",
@@ -90,7 +145,24 @@ int main() {
                                          "cudaStreamSynchronize_ptsz",
                                          "cudaStreamQuery",
                                          "cudaStreamQuery_ptsz",
-                                         "cudaStreamDestroy"};
+                                         "cudaStreamDestroy",
+                                         "cudaDeviceGetDefaultMemPool",
+                                         "cudaDeviceSetMemPool",
+                                         "cudaDeviceGetMemPool",
+                                         "cudaMemPoolTrimTo",
+                                         "cudaMemPoolSetAttribute",
+                                         "cudaMemPoolGetAttribute",
+                                         "cudaMemPoolSetAccess",
+                                         "cudaMemPoolGetAccess",
+                                         "cudaMemPoolCreate",
+                                         "cudaMemPoolDestroy",
+                                         "cudaMemGetDefaultMemPool",
+                                         "cudaMemGetMemPool",
+                                         "cudaMemSetMemPool",
+                                         "cudaMemPoolExportToShareableHandle",
+                                         "cudaMemPoolImportFromShareableHandle",
+                                         "cudaMemPoolExportPointer",
+                                         "cudaMemPoolImportPointer"};
     for (const char* name : runtime_names) {
         if (!is_from_interceptor(dlsym(RTLD_DEFAULT, name))) {
             std::cerr << "dlsym did not return the Runtime interceptor for " << name << '\n';

@@ -16,6 +16,8 @@ namespace {
 using DriverAllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes);
 using DriverAllocAsyncFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes,
                                               CUstream stream);
+using DriverPoolAllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes,
+                                             CUmemoryPool pool, CUstream stream);
 using DriverFreeFunction = CUresult (*)(CUdeviceptr device_pointer);
 using DriverFreeAsyncFunction = CUresult (*)(CUdeviceptr device_pointer, CUstream stream);
 using DriverContextSynchronizeFunction = CUresult (*)();
@@ -23,6 +25,12 @@ using DriverStreamSynchronizeFunction = CUresult (*)(CUstream stream);
 using DriverStreamQueryFunction = CUresult (*)(CUstream stream);
 using DriverStreamDestroyFunction = CUresult (*)(CUstream stream);
 using DriverMemGetInfoFunction = CUresult (*)(std::size_t* free_bytes, std::size_t* total_bytes);
+
+std::uint8_t g_pool_token = 0;
+
+cudaMemPool_t fake_pool() noexcept {
+    return reinterpret_cast<cudaMemPool_t>(&g_pool_token);
+}
 
 template <typename Function>
 Function resolve_driver_function(const char* name) {
@@ -107,6 +115,136 @@ extern "C" cudaError_t CUDARTAPI cudaMallocAsync_ptsz(void** device_pointer,
                                                       std::size_t memory_bytes,
                                                       cudaStream_t stream) {
     return cudaMallocAsync(device_pointer, memory_bytes, stream);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMallocFromPoolAsync(void** device_pointer,
+                                                         std::size_t memory_bytes,
+                                                         cudaMemPool_t pool, cudaStream_t stream) {
+    if (device_pointer == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    const DriverPoolAllocFunction allocate =
+        resolve_driver_function<DriverPoolAllocFunction>("cuMemAllocFromPoolAsync");
+    if (allocate == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    CUdeviceptr driver_pointer = 0;
+    const CUresult result =
+        allocate(&driver_pointer, memory_bytes, reinterpret_cast<CUmemoryPool>(pool), stream);
+    if (result != CUDA_SUCCESS) {
+        return cudaErrorMemoryAllocation;
+    }
+    *device_pointer = to_runtime_pointer(driver_pointer);
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMallocFromPoolAsync_ptsz(void** device_pointer,
+                                                              std::size_t memory_bytes,
+                                                              cudaMemPool_t pool,
+                                                              cudaStream_t stream) {
+    return cudaMallocFromPoolAsync(device_pointer, memory_bytes, pool, stream);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaDeviceGetDefaultMemPool(cudaMemPool_t* pool, int device) {
+    if (pool == nullptr || device < 0) {
+        return cudaErrorInvalidValue;
+    }
+    *pool = fake_pool();
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaDeviceSetMemPool(int device, cudaMemPool_t pool) {
+    return device < 0 || pool == nullptr ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaDeviceGetMemPool(cudaMemPool_t* pool, int device) {
+    return cudaDeviceGetDefaultMemPool(pool, device);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMemPoolTrimTo(cudaMemPool_t pool, std::size_t) {
+    return pool == nullptr ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMemPoolSetAttribute(cudaMemPool_t pool, cudaMemPoolAttr,
+                                                         void* value) {
+    return pool == nullptr || value == nullptr ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMemPoolGetAttribute(cudaMemPool_t pool, cudaMemPoolAttr,
+                                                         void* value) {
+    return pool == nullptr || value == nullptr ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMemPoolSetAccess(cudaMemPool_t pool,
+                                                      const cudaMemAccessDesc* descriptors,
+                                                      std::size_t descriptor_count) {
+    return pool == nullptr || (descriptor_count != 0 && descriptors == nullptr)
+               ? cudaErrorInvalidValue
+               : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMemPoolGetAccess(cudaMemAccessFlags* flags, cudaMemPool_t pool,
+                                                      cudaMemLocation* location) {
+    if (flags == nullptr || pool == nullptr || location == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    *flags = cudaMemAccessFlagsProtReadWrite;
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMemPoolCreate(cudaMemPool_t* pool,
+                                                   const cudaMemPoolProps* properties) {
+    if (pool == nullptr || properties == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    *pool = fake_pool();
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMemPoolDestroy(cudaMemPool_t pool) {
+    return pool == nullptr ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMemGetDefaultMemPool(cudaMemPool_t* pool,
+                                                          cudaMemLocation* location,
+                                                          cudaMemAllocationType) {
+    return pool == nullptr || location == nullptr ? cudaErrorInvalidValue
+                                                  : (*pool = fake_pool(), cudaSuccess);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMemGetMemPool(cudaMemPool_t* pool, cudaMemLocation* location,
+                                                   cudaMemAllocationType type) {
+    return cudaMemGetDefaultMemPool(pool, location, type);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMemSetMemPool(cudaMemLocation* location, cudaMemAllocationType,
+                                                   cudaMemPool_t pool) {
+    return location == nullptr || pool == nullptr ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMemPoolExportToShareableHandle(
+    void* handle_out, cudaMemPool_t pool, enum cudaMemAllocationHandleType, unsigned int) {
+    return handle_out == nullptr || pool == nullptr ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMemPoolImportFromShareableHandle(
+    cudaMemPool_t* pool_out, void*, enum cudaMemAllocationHandleType, unsigned int) {
+    return pool_out == nullptr ? cudaErrorInvalidValue : (*pool_out = fake_pool(), cudaSuccess);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMemPoolExportPointer(cudaMemPoolPtrExportData* share_data_out,
+                                                          void* device_pointer) {
+    return share_data_out == nullptr || device_pointer == nullptr ? cudaErrorInvalidValue
+                                                                  : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMemPoolImportPointer(void** pointer_out, cudaMemPool_t pool,
+                                                          cudaMemPoolPtrExportData* share_data) {
+    if (pointer_out == nullptr || pool == nullptr || share_data == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    *pointer_out = reinterpret_cast<void*>(0x70000000U);
+    return cudaSuccess;
 }
 
 extern "C" cudaError_t CUDARTAPI cudaFreeAsync(void* device_pointer, cudaStream_t stream) {

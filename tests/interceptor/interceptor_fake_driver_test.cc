@@ -4,6 +4,7 @@
 
 #include <cuda.h>
 #include <cuda_runtime_api.h>
+#include <nvml.h>
 
 #include "glimmer/control/shared_memory_quota.h"
 
@@ -11,8 +12,10 @@
 #include <dlfcn.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <bit>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -34,6 +37,69 @@ using AsyncAllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t
                                         CUstream stream);
 using PoolAsyncAllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes,
                                             CUmemoryPool pool, CUstream stream);
+using VmmCreateFunction = CUresult (*)(CUmemGenericAllocationHandle* handle,
+                                       std::size_t memory_bytes, const CUmemAllocationProp* prop,
+                                       unsigned long long flags);
+using VmmReleaseFunction = CUresult (*)(CUmemGenericAllocationHandle handle);
+using AddressReserveFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes,
+                                            std::size_t alignment, CUdeviceptr requested_address,
+                                            unsigned long long flags);
+using AddressFreeFunction = CUresult (*)(CUdeviceptr device_pointer, std::size_t memory_bytes);
+using MapFunction = CUresult (*)(CUdeviceptr device_pointer, std::size_t memory_bytes,
+                                 std::size_t offset, CUmemGenericAllocationHandle handle,
+                                 unsigned long long flags);
+using UnmapFunction = CUresult (*)(CUdeviceptr device_pointer, std::size_t memory_bytes);
+using SetAccessFunction = CUresult (*)(CUdeviceptr device_pointer, std::size_t memory_bytes,
+                                       const CUmemAccessDesc* access_descriptors,
+                                       std::size_t descriptor_count);
+using GetAddressRangeFunction = CUresult (*)(CUdeviceptr* base_pointer, std::size_t* memory_bytes,
+                                             CUdeviceptr device_pointer);
+using GetAccessFunction = CUresult (*)(unsigned long long* flags, const CUmemLocation* location,
+                                       CUdeviceptr device_pointer);
+using ExportHandleFunction = CUresult (*)(void* shareable_handle,
+                                          CUmemGenericAllocationHandle handle,
+                                          CUmemAllocationHandleType handle_type,
+                                          unsigned long long flags);
+using ImportHandleFunction = CUresult (*)(CUmemGenericAllocationHandle* handle, void* os_handle,
+                                          CUmemAllocationHandleType handle_type);
+using GetGranularityFunction = CUresult (*)(std::size_t* granularity,
+                                            const CUmemAllocationProp* prop,
+                                            CUmemAllocationGranularity_flags option);
+using GetPropertiesFunction = CUresult (*)(CUmemAllocationProp* prop,
+                                           CUmemGenericAllocationHandle handle);
+using RetainHandleFunction = CUresult (*)(CUmemGenericAllocationHandle* handle,
+                                          void* device_pointer);
+using PoolTrimFunction = CUresult (*)(CUmemoryPool pool, std::size_t min_bytes_to_keep);
+using PoolSetAttributeFunction = CUresult (*)(CUmemoryPool pool, CUmemPool_attribute attribute,
+                                              void* value);
+using PoolGetAttributeFunction = CUresult (*)(CUmemoryPool pool, CUmemPool_attribute attribute,
+                                              void* value);
+using PoolSetAccessFunction = CUresult (*)(CUmemoryPool pool,
+                                           const CUmemAccessDesc* access_descriptors,
+                                           std::size_t descriptor_count);
+using PoolGetAccessFunction = CUresult (*)(CUmemAccess_flags* flags, CUmemoryPool pool,
+                                           CUmemLocation* location);
+using PoolCreateFunction = CUresult (*)(CUmemoryPool* pool, const CUmemPoolProps* properties);
+using PoolDestroyFunction = CUresult (*)(CUmemoryPool pool);
+using DeviceGetPoolFunction = CUresult (*)(CUmemoryPool* pool, CUdevice device);
+using DeviceSetPoolFunction = CUresult (*)(CUdevice device, CUmemoryPool pool);
+using DeviceGetDefaultPoolFunction = CUresult (*)(CUmemoryPool* pool, CUdevice device);
+using GetDefaultPoolFunction = CUresult (*)(CUmemoryPool* pool, CUmemLocation* location,
+                                            CUmemAllocationType type);
+using GetPoolFunction = CUresult (*)(CUmemoryPool* pool, CUmemLocation* location,
+                                     CUmemAllocationType type);
+using SetPoolFunction = CUresult (*)(CUmemLocation* location, CUmemAllocationType type,
+                                     CUmemoryPool pool);
+using PoolExportHandleFunction = CUresult (*)(void* handle_out, CUmemoryPool pool,
+                                              CUmemAllocationHandleType handle_type,
+                                              unsigned long long flags);
+using PoolImportHandleFunction = CUresult (*)(CUmemoryPool* pool_out, void* handle,
+                                              CUmemAllocationHandleType handle_type,
+                                              unsigned long long flags);
+using PoolExportPointerFunction = CUresult (*)(CUmemPoolPtrExportData* share_data_out,
+                                               CUdeviceptr device_pointer);
+using PoolImportPointerFunction = CUresult (*)(CUdeviceptr* pointer_out, CUmemoryPool pool,
+                                               CUmemPoolPtrExportData* share_data);
 using FreeFunction = CUresult (*)(CUdeviceptr device_pointer);
 using AsyncFreeFunction = CUresult (*)(CUdeviceptr device_pointer, CUstream stream);
 using StreamGetDeviceFunction = CUresult (*)(CUstream stream, CUdevice* device);
@@ -54,6 +120,9 @@ using GetProcAddressV2Function = CUresult (*)(const char* symbol, void** functio
 using RuntimeMallocFunction = cudaError_t (*)(void** device_pointer, std::size_t memory_bytes);
 using RuntimeMallocAsyncFunction = cudaError_t (*)(void** device_pointer, std::size_t memory_bytes,
                                                    cudaStream_t stream);
+using RuntimeMallocFromPoolAsyncFunction = cudaError_t (*)(void** device_pointer,
+                                                           std::size_t memory_bytes,
+                                                           cudaMemPool_t pool, cudaStream_t stream);
 using RuntimeFreeFunction = cudaError_t (*)(void* device_pointer);
 using RuntimeFreeAsyncFunction = cudaError_t (*)(void* device_pointer, cudaStream_t stream);
 using RuntimeDeviceSynchronizeFunction = cudaError_t (*)();
@@ -62,6 +131,51 @@ using RuntimeStreamQueryFunction = cudaError_t (*)(cudaStream_t stream);
 using RuntimeStreamDestroyFunction = cudaError_t (*)(cudaStream_t stream);
 using RuntimeMemGetInfoFunction = cudaError_t (*)(std::size_t* free_bytes,
                                                   std::size_t* total_bytes);
+using RuntimeDeviceGetDefaultMemPoolFunction = cudaError_t (*)(cudaMemPool_t* pool, int device);
+using RuntimeDeviceSetMemPoolFunction = cudaError_t (*)(int device, cudaMemPool_t pool);
+using RuntimeDeviceGetMemPoolFunction = cudaError_t (*)(cudaMemPool_t* pool, int device);
+using RuntimeMemPoolTrimToFunction = cudaError_t (*)(cudaMemPool_t pool,
+                                                     std::size_t min_bytes_to_keep);
+using RuntimeMemPoolSetAttributeFunction = cudaError_t (*)(cudaMemPool_t pool,
+                                                           cudaMemPoolAttr attribute, void* value);
+using RuntimeMemPoolGetAttributeFunction = cudaError_t (*)(cudaMemPool_t pool,
+                                                           cudaMemPoolAttr attribute, void* value);
+using RuntimeMemPoolSetAccessFunction = cudaError_t (*)(cudaMemPool_t pool,
+                                                        const cudaMemAccessDesc* descriptors,
+                                                        std::size_t descriptor_count);
+using RuntimeMemPoolGetAccessFunction = cudaError_t (*)(cudaMemAccessFlags* flags,
+                                                        cudaMemPool_t pool,
+                                                        cudaMemLocation* location);
+using RuntimeMemPoolCreateFunction = cudaError_t (*)(cudaMemPool_t* pool,
+                                                     const cudaMemPoolProps* properties);
+using RuntimeMemPoolDestroyFunction = cudaError_t (*)(cudaMemPool_t pool);
+using RuntimeMemGetDefaultMemPoolFunction = cudaError_t (*)(cudaMemPool_t* pool,
+                                                            cudaMemLocation* location,
+                                                            cudaMemAllocationType allocation_type);
+using RuntimeMemGetMemPoolFunction = cudaError_t (*)(cudaMemPool_t* pool, cudaMemLocation* location,
+                                                     cudaMemAllocationType allocation_type);
+using RuntimeMemSetMemPoolFunction = cudaError_t (*)(cudaMemLocation* location,
+                                                     cudaMemAllocationType allocation_type,
+                                                     cudaMemPool_t pool);
+using RuntimeMemPoolExportToShareableHandleFunction =
+    cudaError_t (*)(void* handle_out, cudaMemPool_t pool,
+                    enum cudaMemAllocationHandleType handle_type, unsigned int flags);
+using RuntimeMemPoolImportFromShareableHandleFunction =
+    cudaError_t (*)(cudaMemPool_t* pool_out, void* handle,
+                    enum cudaMemAllocationHandleType handle_type, unsigned int flags);
+using RuntimeMemPoolExportPointerFunction =
+    cudaError_t (*)(cudaMemPoolPtrExportData* share_data_out, void* device_pointer);
+using RuntimeMemPoolImportPointerFunction = cudaError_t (*)(void** pointer_out, cudaMemPool_t pool,
+                                                            cudaMemPoolPtrExportData* share_data);
+using NvmlInitFunction = nvmlReturn_t (*)();
+using NvmlShutdownFunction = nvmlReturn_t (*)();
+using NvmlDeviceGetCountFunction = nvmlReturn_t (*)(unsigned int* device_count);
+using NvmlDeviceGetHandleByIndexFunction = nvmlReturn_t (*)(unsigned int index,
+                                                            nvmlDevice_t* device);
+using NvmlDeviceGetIndexFunction = nvmlReturn_t (*)(nvmlDevice_t device, unsigned int* index);
+using NvmlDeviceGetMemoryInfoFunction = nvmlReturn_t (*)(nvmlDevice_t device, nvmlMemory_t* memory);
+using NvmlDeviceGetMemoryInfoV2Function = nvmlReturn_t (*)(nvmlDevice_t device,
+                                                           nvmlMemory_v2_t* memory);
 
 template <typename Function>
 Function resolve_default(const char* name) {
@@ -297,6 +411,58 @@ int main() {
         resolve_default<PoolAsyncAllocFunction>("cuMemAllocFromPoolAsync");
     const PoolAsyncAllocFunction pool_async_allocate_ptsz =
         resolve_default<PoolAsyncAllocFunction>("cuMemAllocFromPoolAsync_ptsz");
+    const VmmCreateFunction vmm_create = resolve_default<VmmCreateFunction>("cuMemCreate");
+    const VmmReleaseFunction vmm_release = resolve_default<VmmReleaseFunction>("cuMemRelease");
+    const AddressReserveFunction address_reserve =
+        resolve_default<AddressReserveFunction>("cuMemAddressReserve");
+    const AddressFreeFunction address_free =
+        resolve_default<AddressFreeFunction>("cuMemAddressFree");
+    const MapFunction map = resolve_default<MapFunction>("cuMemMap");
+    const UnmapFunction unmap = resolve_default<UnmapFunction>("cuMemUnmap");
+    const SetAccessFunction set_access = resolve_default<SetAccessFunction>("cuMemSetAccess");
+    const GetAddressRangeFunction get_address_range =
+        resolve_default<GetAddressRangeFunction>("cuMemGetAddressRange_v2");
+    const GetAccessFunction get_access = resolve_default<GetAccessFunction>("cuMemGetAccess");
+    const ExportHandleFunction export_handle =
+        resolve_default<ExportHandleFunction>("cuMemExportToShareableHandle");
+    const ImportHandleFunction import_handle =
+        resolve_default<ImportHandleFunction>("cuMemImportFromShareableHandle");
+    const GetGranularityFunction get_granularity =
+        resolve_default<GetGranularityFunction>("cuMemGetAllocationGranularity");
+    const GetPropertiesFunction get_properties =
+        resolve_default<GetPropertiesFunction>("cuMemGetAllocationPropertiesFromHandle");
+    const RetainHandleFunction retain_handle =
+        resolve_default<RetainHandleFunction>("cuMemRetainAllocationHandle");
+    const PoolTrimFunction pool_trim = resolve_default<PoolTrimFunction>("cuMemPoolTrimTo");
+    const PoolSetAttributeFunction pool_set_attribute =
+        resolve_default<PoolSetAttributeFunction>("cuMemPoolSetAttribute");
+    const PoolGetAttributeFunction pool_get_attribute =
+        resolve_default<PoolGetAttributeFunction>("cuMemPoolGetAttribute");
+    const PoolSetAccessFunction pool_set_access =
+        resolve_default<PoolSetAccessFunction>("cuMemPoolSetAccess");
+    const PoolGetAccessFunction pool_get_access =
+        resolve_default<PoolGetAccessFunction>("cuMemPoolGetAccess");
+    const PoolCreateFunction pool_create = resolve_default<PoolCreateFunction>("cuMemPoolCreate");
+    const PoolDestroyFunction pool_destroy =
+        resolve_default<PoolDestroyFunction>("cuMemPoolDestroy");
+    const DeviceGetPoolFunction device_get_pool =
+        resolve_default<DeviceGetPoolFunction>("cuDeviceGetMemPool");
+    const DeviceSetPoolFunction device_set_pool =
+        resolve_default<DeviceSetPoolFunction>("cuDeviceSetMemPool");
+    const DeviceGetDefaultPoolFunction device_get_default_pool =
+        resolve_default<DeviceGetDefaultPoolFunction>("cuDeviceGetDefaultMemPool");
+    const GetDefaultPoolFunction get_default_pool =
+        resolve_default<GetDefaultPoolFunction>("cuMemGetDefaultMemPool");
+    const GetPoolFunction get_pool = resolve_default<GetPoolFunction>("cuMemGetMemPool");
+    const SetPoolFunction set_pool = resolve_default<SetPoolFunction>("cuMemSetMemPool");
+    const PoolExportHandleFunction pool_export_handle =
+        resolve_default<PoolExportHandleFunction>("cuMemPoolExportToShareableHandle");
+    const PoolImportHandleFunction pool_import_handle =
+        resolve_default<PoolImportHandleFunction>("cuMemPoolImportFromShareableHandle");
+    const PoolExportPointerFunction pool_export_pointer =
+        resolve_default<PoolExportPointerFunction>("cuMemPoolExportPointer");
+    const PoolImportPointerFunction pool_import_pointer =
+        resolve_default<PoolImportPointerFunction>("cuMemPoolImportPointer");
     const AsyncFreeFunction async_release = resolve_default<AsyncFreeFunction>("cuMemFreeAsync");
     const AsyncFreeFunction async_release_ptsz =
         resolve_default<AsyncFreeFunction>("cuMemFreeAsync_ptsz");
@@ -326,17 +492,45 @@ int main() {
         resolve_default<ContextGetCurrentFunction>("cuCtxGetCurrent");
     const ContextDestroyFunction destroy_context =
         resolve_default<ContextDestroyFunction>("cuCtxDestroy_v2");
+    const NvmlInitFunction nvml_init = resolve_default<NvmlInitFunction>("nvmlInit_v2");
+    const NvmlShutdownFunction nvml_shutdown =
+        resolve_default<NvmlShutdownFunction>("nvmlShutdown");
+    const NvmlDeviceGetCountFunction nvml_get_count =
+        resolve_default<NvmlDeviceGetCountFunction>("nvmlDeviceGetCount_v2");
+    const NvmlDeviceGetHandleByIndexFunction nvml_get_handle =
+        resolve_default<NvmlDeviceGetHandleByIndexFunction>("nvmlDeviceGetHandleByIndex_v2");
+    const NvmlDeviceGetIndexFunction nvml_get_index =
+        resolve_default<NvmlDeviceGetIndexFunction>("nvmlDeviceGetIndex");
+    const NvmlDeviceGetMemoryInfoFunction nvml_get_memory_info =
+        resolve_default<NvmlDeviceGetMemoryInfoFunction>("nvmlDeviceGetMemoryInfo");
+    const NvmlDeviceGetMemoryInfoV2Function nvml_get_memory_info_v2 =
+        resolve_default<NvmlDeviceGetMemoryInfoV2Function>("nvmlDeviceGetMemoryInfo_v2");
     all_passed &= expect(
         init != nullptr && allocate != nullptr && release != nullptr && async_allocate != nullptr &&
             async_allocate_ptsz != nullptr && pool_async_allocate != nullptr &&
-            pool_async_allocate_ptsz != nullptr && async_release != nullptr &&
+            pool_async_allocate_ptsz != nullptr && vmm_create != nullptr &&
+            vmm_release != nullptr && address_reserve != nullptr && address_free != nullptr &&
+            map != nullptr && unmap != nullptr && set_access != nullptr &&
+            get_address_range != nullptr && get_access != nullptr && export_handle != nullptr &&
+            import_handle != nullptr && get_granularity != nullptr && get_properties != nullptr &&
+            retain_handle != nullptr && pool_trim != nullptr && pool_set_attribute != nullptr &&
+            pool_get_attribute != nullptr && pool_set_access != nullptr &&
+            pool_get_access != nullptr && pool_create != nullptr && pool_destroy != nullptr &&
+            device_get_pool != nullptr && device_set_pool != nullptr &&
+            device_get_default_pool != nullptr && get_default_pool != nullptr &&
+            get_pool != nullptr && set_pool != nullptr && pool_export_handle != nullptr &&
+            pool_import_handle != nullptr && pool_export_pointer != nullptr &&
+            pool_import_pointer != nullptr && async_release != nullptr &&
             async_release_ptsz != nullptr && stream_get_device != nullptr &&
             stream_get_device_ptsz != nullptr && stream_get_context != nullptr &&
             stream_get_context_ptsz != nullptr && stream_query != nullptr &&
             stream_query_ptsz != nullptr && stream_synchronize != nullptr &&
             stream_synchronize_ptsz != nullptr && stream_destroy != nullptr &&
             context_synchronize != nullptr && get_info != nullptr && get_total != nullptr &&
-            get_current != nullptr && destroy_context != nullptr,
+            get_current != nullptr && destroy_context != nullptr && nvml_init != nullptr &&
+            nvml_shutdown != nullptr && nvml_get_count != nullptr && nvml_get_handle != nullptr &&
+            nvml_get_index != nullptr && nvml_get_memory_info != nullptr &&
+            nvml_get_memory_info_v2 != nullptr,
         "interceptor symbols were not exported");
     if (!all_passed) {
         return EXIT_FAILURE;
@@ -375,12 +569,36 @@ int main() {
                              free_bytes == kQuotaBytes && total_bytes == kQuotaBytes,
                          "initial memory info was incorrect");
 
+    nvmlDevice_t nvml_device = nullptr;
+    unsigned int nvml_count = 0;
+    unsigned int nvml_index = 0;
+    nvmlMemory_t nvml_memory{};
+    nvmlMemory_v2_t nvml_memory_v2{};
+    nvml_memory_v2.version = nvmlMemory_v2;
+    const bool nvml_initialized = nvml_init() == NVML_SUCCESS;
+    const bool nvml_visible =
+        nvml_initialized && nvml_get_count(&nvml_count) == NVML_SUCCESS && nvml_count == 2 &&
+        nvml_get_handle(0, &nvml_device) == NVML_SUCCESS &&
+        nvml_get_index(nvml_device, &nvml_index) == NVML_SUCCESS && nvml_index == 0 &&
+        nvml_get_memory_info(nvml_device, &nvml_memory) == NVML_SUCCESS &&
+        nvml_memory.total == kQuotaBytes && nvml_memory.free == kQuotaBytes &&
+        nvml_memory.used == 0 &&
+        nvml_get_memory_info_v2(nvml_device, &nvml_memory_v2) == NVML_SUCCESS &&
+        nvml_memory_v2.total == kQuotaBytes && nvml_memory_v2.free == kQuotaBytes &&
+        nvml_memory_v2.used == 0 && nvml_memory_v2.reserved == 0;
+    all_passed &= expect(nvml_visible, "NVML memory view was not virtualized");
+
     CUdeviceptr direct_pointer = 0;
     all_passed &= expect(allocate(&direct_pointer, kDirectAllocationBytes) == CUDA_SUCCESS,
                          "direct allocation was rejected");
     all_passed &= expect(get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS &&
                              free_bytes == kQuotaBytes - kDirectAllocationBytes,
                          "direct allocation was not accounted once");
+    all_passed &= expect(nvml_get_memory_info(nvml_device, &nvml_memory) == NVML_SUCCESS &&
+                             nvml_memory.total == kQuotaBytes &&
+                             nvml_memory.free == kQuotaBytes - kDirectAllocationBytes &&
+                             nvml_memory.used == kDirectAllocationBytes,
+                         "NVML memory view did not follow quota usage");
 
     CUdeviceptr rejected_pointer = 0;
     all_passed &=
@@ -399,13 +617,197 @@ int main() {
             get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS && free_bytes == kQuotaBytes,
         "real Driver allocation failure did not roll back the reservation");
 
+    CUmemAllocationProp vmm_prop{};
+    vmm_prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+    vmm_prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_NONE;
+    vmm_prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    vmm_prop.location.id = 0;
+    CUmemGenericAllocationHandle vmm_handle = 0;
+    all_passed &= expect(vmm_create(nullptr, 1, &vmm_prop, 0) == CUDA_ERROR_INVALID_VALUE,
+                         "null VMM handle output was not rejected");
+    all_passed &= expect(vmm_create(&vmm_handle, 1, nullptr, 0) == CUDA_ERROR_INVALID_VALUE,
+                         "null VMM allocation properties were not rejected");
+    all_passed &=
+        expect(vmm_create(&vmm_handle, kAsyncAllocationBytes, &vmm_prop, 0) == CUDA_SUCCESS &&
+                   get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS &&
+                   free_bytes == kQuotaBytes - kAsyncAllocationBytes,
+               "VMM allocation was not admitted and accounted");
+    CUdeviceptr virtual_address = 0;
+    all_passed &=
+        expect(address_reserve(nullptr, kAsyncAllocationBytes, 0, 0, 0) == CUDA_ERROR_INVALID_VALUE,
+               "null VMM address output was not rejected");
+    all_passed &=
+        expect(address_reserve(&virtual_address, kAsyncAllocationBytes, 0, 0, 0) == CUDA_SUCCESS &&
+                   virtual_address != 0,
+               "VMM address reservation was not forwarded");
+    all_passed &=
+        expect(map(virtual_address, kAsyncAllocationBytes, 0, vmm_handle, 0) == CUDA_SUCCESS,
+               "VMM address mapping was not forwarded");
+    CUmemAccessDesc access_descriptor{};
+    access_descriptor.location = vmm_prop.location;
+    access_descriptor.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    all_passed &= expect(
+        set_access(virtual_address, kAsyncAllocationBytes, &access_descriptor, 1) == CUDA_SUCCESS,
+        "VMM access permissions were not forwarded");
+    all_passed &= expect(
+        set_access(virtual_address, kAsyncAllocationBytes, nullptr, 1) == CUDA_ERROR_INVALID_VALUE,
+        "null VMM access descriptors were not rejected");
+    CUdeviceptr address_base = 0;
+    std::size_t address_size = 0;
+    all_passed &=
+        expect(get_address_range(&address_base, &address_size, virtual_address) == CUDA_SUCCESS &&
+                   address_base == virtual_address && address_size != 0,
+               "VMM address range query was not forwarded");
+    unsigned long long access_flags = 0;
+    all_passed &= expect(
+        get_access(&access_flags, &access_descriptor.location, virtual_address) == CUDA_SUCCESS &&
+            access_flags == CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
+        "VMM access query was not forwarded");
+    unsigned long long exported_handle = 0;
+    all_passed &= expect(
+        export_handle(&exported_handle, vmm_handle, CU_MEM_HANDLE_TYPE_NONE, 0) == CUDA_SUCCESS,
+        "VMM shareable-handle export was not forwarded");
+    CUmemGenericAllocationHandle imported_handle = 0;
+    all_passed &= expect(import_handle(&imported_handle, &exported_handle,
+                                       CU_MEM_HANDLE_TYPE_NONE) == CUDA_ERROR_NOT_SUPPORTED &&
+                             imported_handle == 0,
+                         "VMM shareable-handle import was not rejected under quota");
+    std::size_t granularity = 0;
+    all_passed &= expect(get_granularity(&granularity, &vmm_prop,
+                                         CU_MEM_ALLOC_GRANULARITY_MINIMUM) == CUDA_SUCCESS &&
+                             granularity != 0,
+                         "VMM allocation granularity query was not forwarded");
+    CUmemAllocationProp queried_properties{};
+    all_passed &= expect(get_properties(&queried_properties, vmm_handle) == CUDA_SUCCESS &&
+                             queried_properties.location.type == CU_MEM_LOCATION_TYPE_DEVICE,
+                         "VMM allocation properties query was not forwarded");
+    CUmemGenericAllocationHandle retained_handle = 0;
+    void* retained_pointer = std::bit_cast<void*>(virtual_address);
+    all_passed &= expect(retain_handle(&retained_handle, retained_pointer) == CUDA_SUCCESS &&
+                             retained_handle == vmm_handle,
+                         "VMM allocation-handle retain was not forwarded and accounted");
+
+    CUmemPoolProps pool_properties{};
+    pool_properties.allocType = CU_MEM_ALLOCATION_TYPE_PINNED;
+    pool_properties.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    pool_properties.location.id = 0;
+    CUmemoryPool pool = nullptr;
+    all_passed &= expect(pool_create(&pool, &pool_properties) == CUDA_SUCCESS && pool != nullptr,
+                         "memory-pool creation was not forwarded");
+    std::uint64_t release_threshold = 128;
+    all_passed &= expect(pool_set_attribute(pool, CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+                                            &release_threshold) == CUDA_SUCCESS,
+                         "memory-pool attribute update was not forwarded");
+    release_threshold = 0;
+    all_passed &= expect(pool_get_attribute(pool, CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+                                            &release_threshold) == CUDA_SUCCESS &&
+                             release_threshold == 128,
+                         "memory-pool attribute query was not forwarded");
+    all_passed &= expect(pool_set_access(pool, &access_descriptor, 1) == CUDA_SUCCESS,
+                         "memory-pool access update was not forwarded");
+    CUmemAccess_flags pool_access_flags = CU_MEM_ACCESS_FLAGS_PROT_NONE;
+    CUmemLocation pool_location = pool_properties.location;
+    all_passed &=
+        expect(pool_get_access(&pool_access_flags, pool, &pool_location) == CUDA_SUCCESS &&
+                   pool_access_flags == CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
+               "memory-pool access query was not forwarded");
+    all_passed &= expect(pool_trim(pool, 0) == CUDA_SUCCESS, "memory-pool trim was not forwarded");
+    CUmemoryPool queried_pool = nullptr;
+    all_passed &=
+        expect(device_get_pool(&queried_pool, 0) == CUDA_SUCCESS && queried_pool != nullptr,
+               "device memory-pool query was not forwarded");
+    all_passed &= expect(device_set_pool(0, pool) == CUDA_SUCCESS,
+                         "device memory-pool update was not forwarded");
+    all_passed &=
+        expect(device_get_default_pool(&queried_pool, 0) == CUDA_SUCCESS && queried_pool != nullptr,
+               "device default memory-pool query was not forwarded");
+    all_passed &= expect(get_default_pool(&queried_pool, &pool_location,
+                                          CU_MEM_ALLOCATION_TYPE_PINNED) == CUDA_SUCCESS,
+                         "default memory-pool query was not forwarded");
+    all_passed &= expect(
+        get_pool(&queried_pool, &pool_location, CU_MEM_ALLOCATION_TYPE_PINNED) == CUDA_SUCCESS,
+        "pointer memory-pool query was not forwarded");
+    all_passed &=
+        expect(set_pool(&pool_location, CU_MEM_ALLOCATION_TYPE_PINNED, pool) == CUDA_SUCCESS,
+               "memory-pool selection was not forwarded");
+    unsigned long long pool_exported_handle = 0;
+    all_passed &= expect(
+        pool_export_handle(&pool_exported_handle, pool, CU_MEM_HANDLE_TYPE_NONE, 0) == CUDA_SUCCESS,
+        "memory-pool handle export was not forwarded");
+    CUmemoryPool imported_pool = nullptr;
+    all_passed &=
+        expect(pool_import_handle(&imported_pool, &pool_exported_handle, CU_MEM_HANDLE_TYPE_NONE,
+                                  0) == CUDA_ERROR_NOT_SUPPORTED &&
+                   imported_pool == nullptr,
+               "memory-pool handle import was not rejected under quota");
+    CUmemPoolPtrExportData pointer_export_data{};
+    all_passed &= expect(pool_export_pointer(&pointer_export_data, virtual_address) == CUDA_SUCCESS,
+                         "memory-pool pointer export was not forwarded");
+    CUdeviceptr imported_pointer = 0;
+    all_passed &= expect(pool_import_pointer(&imported_pointer, pool, &pointer_export_data) ==
+                                 CUDA_ERROR_NOT_SUPPORTED &&
+                             imported_pointer == 0,
+                         "memory-pool pointer import was not rejected under quota");
+    all_passed &=
+        expect(pool_destroy(pool) == CUDA_SUCCESS, "memory-pool destruction was not forwarded");
+    all_passed &= expect(unmap(virtual_address, kAsyncAllocationBytes) == CUDA_SUCCESS,
+                         "VMM address unmapping was not forwarded");
+    all_passed &= expect(address_free(virtual_address, kAsyncAllocationBytes) == CUDA_SUCCESS,
+                         "VMM address free was not forwarded");
+    all_passed &= expect(vmm_release(retained_handle) == CUDA_SUCCESS &&
+                             get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS &&
+                             free_bytes == kQuotaBytes - kAsyncAllocationBytes,
+                         "first VMM release did not preserve shared allocation quota");
+    all_passed &=
+        expect(vmm_release(vmm_handle) == CUDA_SUCCESS &&
+                   get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS && free_bytes == kQuotaBytes,
+               "final VMM release did not restore quota");
+    vmm_handle = 0;
+    all_passed &=
+        expect(vmm_create(&vmm_handle, kForcedAllocationFailureBytes, &vmm_prop, 0) ==
+                       CUDA_ERROR_INVALID_VALUE &&
+                   get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS && free_bytes == kQuotaBytes,
+               "real VMM allocation failure did not roll back the reservation");
+    vmm_handle = 0;
+    all_passed &=
+        expect(vmm_create(&vmm_handle, kQuotaBytes + 1, &vmm_prop, 0) == CUDA_ERROR_OUT_OF_MEMORY &&
+                   vmm_handle == 0 && get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS &&
+                   free_bytes == kQuotaBytes,
+               "VMM quota rejection did not preserve usage");
+    vmm_prop.location.type = CU_MEM_LOCATION_TYPE_HOST;
+    all_passed &=
+        expect(vmm_create(&vmm_handle, kAsyncAllocationBytes, &vmm_prop, 0) == CUDA_SUCCESS &&
+                   get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS &&
+                   free_bytes == kQuotaBytes && vmm_release(vmm_handle) == CUDA_SUCCESS,
+               "host VMM allocation was incorrectly charged by the device quota");
+
     void* cuda_handle = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
     all_passed &= expect(cuda_handle != nullptr, "fake CUDA driver could not be loaded");
     if (cuda_handle != nullptr) {
         all_passed &=
             expect(dlsym(cuda_handle, "cuMemAlloc_v2") == reinterpret_cast<void*>(allocate),
                    "explicit CUDA handle did not return the interceptor wrapper");
+        all_passed &=
+            expect(dlsym(cuda_handle, "cuMemCreate") == reinterpret_cast<void*>(vmm_create),
+                   "explicit CUDA handle did not return the VMM wrapper");
+        all_passed &= expect(
+            dlsym(cuda_handle, "cuMemAddressReserve") == reinterpret_cast<void*>(address_reserve),
+            "explicit CUDA handle did not return the VMM address wrapper");
+        all_passed &=
+            expect(dlsym(cuda_handle, "cuMemPoolCreate") == reinterpret_cast<void*>(pool_create),
+                   "explicit CUDA handle did not return the memory-pool wrapper");
+        all_passed &= expect(dlsym(cuda_handle, "cuDeviceGetDefaultMemPool") ==
+                                 reinterpret_cast<void*>(device_get_default_pool),
+                             "explicit CUDA handle did not return the default-pool wrapper");
         dlclose(cuda_handle);
+    }
+    void* nvml_handle = dlopen("libnvidia-ml.so.1", RTLD_NOW | RTLD_LOCAL);
+    all_passed &= expect(nvml_handle != nullptr, "fake NVML could not be loaded");
+    if (nvml_handle != nullptr) {
+        all_passed &= expect(dlsym(nvml_handle, "nvmlDeviceGetMemoryInfo") ==
+                                 reinterpret_cast<void*>(nvml_get_memory_info),
+                             "explicit NVML handle did not return the memory wrapper");
+        dlclose(nvml_handle);
     }
 
     void* runtime_handle = dlopen("libcudart.so", RTLD_NOW | RTLD_GLOBAL);
@@ -416,6 +818,10 @@ int main() {
         resolve_default<RuntimeMallocAsyncFunction>("cudaMallocAsync");
     const RuntimeMallocAsyncFunction runtime_async_allocate_ptsz =
         resolve_default<RuntimeMallocAsyncFunction>("cudaMallocAsync_ptsz");
+    const RuntimeMallocFromPoolAsyncFunction runtime_pool_async_allocate =
+        resolve_default<RuntimeMallocFromPoolAsyncFunction>("cudaMallocFromPoolAsync");
+    const RuntimeMallocFromPoolAsyncFunction runtime_pool_async_allocate_ptsz =
+        resolve_default<RuntimeMallocFromPoolAsyncFunction>("cudaMallocFromPoolAsync_ptsz");
     const RuntimeFreeFunction runtime_release = resolve_default<RuntimeFreeFunction>("cudaFree");
     const RuntimeFreeAsyncFunction runtime_async_release =
         resolve_default<RuntimeFreeAsyncFunction>("cudaFreeAsync");
@@ -435,16 +841,61 @@ int main() {
         resolve_default<RuntimeStreamDestroyFunction>("cudaStreamDestroy");
     const RuntimeMemGetInfoFunction runtime_get_info =
         resolve_default<RuntimeMemGetInfoFunction>("cudaMemGetInfo");
+    const RuntimeDeviceGetDefaultMemPoolFunction runtime_device_get_default_pool =
+        resolve_default<RuntimeDeviceGetDefaultMemPoolFunction>("cudaDeviceGetDefaultMemPool");
+    const RuntimeDeviceSetMemPoolFunction runtime_device_set_pool =
+        resolve_default<RuntimeDeviceSetMemPoolFunction>("cudaDeviceSetMemPool");
+    const RuntimeDeviceGetMemPoolFunction runtime_device_get_pool =
+        resolve_default<RuntimeDeviceGetMemPoolFunction>("cudaDeviceGetMemPool");
+    const RuntimeMemPoolTrimToFunction runtime_pool_trim =
+        resolve_default<RuntimeMemPoolTrimToFunction>("cudaMemPoolTrimTo");
+    const RuntimeMemPoolSetAttributeFunction runtime_pool_set_attribute =
+        resolve_default<RuntimeMemPoolSetAttributeFunction>("cudaMemPoolSetAttribute");
+    const RuntimeMemPoolGetAttributeFunction runtime_pool_get_attribute =
+        resolve_default<RuntimeMemPoolGetAttributeFunction>("cudaMemPoolGetAttribute");
+    const RuntimeMemPoolSetAccessFunction runtime_pool_set_access =
+        resolve_default<RuntimeMemPoolSetAccessFunction>("cudaMemPoolSetAccess");
+    const RuntimeMemPoolGetAccessFunction runtime_pool_get_access =
+        resolve_default<RuntimeMemPoolGetAccessFunction>("cudaMemPoolGetAccess");
+    const RuntimeMemPoolCreateFunction runtime_pool_create =
+        resolve_default<RuntimeMemPoolCreateFunction>("cudaMemPoolCreate");
+    const RuntimeMemPoolDestroyFunction runtime_pool_destroy =
+        resolve_default<RuntimeMemPoolDestroyFunction>("cudaMemPoolDestroy");
+    const RuntimeMemGetDefaultMemPoolFunction runtime_get_default_pool =
+        resolve_default<RuntimeMemGetDefaultMemPoolFunction>("cudaMemGetDefaultMemPool");
+    const RuntimeMemGetMemPoolFunction runtime_get_pool =
+        resolve_default<RuntimeMemGetMemPoolFunction>("cudaMemGetMemPool");
+    const RuntimeMemSetMemPoolFunction runtime_set_pool =
+        resolve_default<RuntimeMemSetMemPoolFunction>("cudaMemSetMemPool");
+    const RuntimeMemPoolExportToShareableHandleFunction runtime_pool_export_handle =
+        resolve_default<RuntimeMemPoolExportToShareableHandleFunction>(
+            "cudaMemPoolExportToShareableHandle");
+    const RuntimeMemPoolImportFromShareableHandleFunction runtime_pool_import_handle =
+        resolve_default<RuntimeMemPoolImportFromShareableHandleFunction>(
+            "cudaMemPoolImportFromShareableHandle");
+    const RuntimeMemPoolExportPointerFunction runtime_pool_export_pointer =
+        resolve_default<RuntimeMemPoolExportPointerFunction>("cudaMemPoolExportPointer");
+    const RuntimeMemPoolImportPointerFunction runtime_pool_import_pointer =
+        resolve_default<RuntimeMemPoolImportPointerFunction>("cudaMemPoolImportPointer");
     void* runtime_pointer = nullptr;
-    all_passed &=
-        expect(runtime_allocate != nullptr && runtime_async_allocate != nullptr &&
-                   runtime_async_allocate_ptsz != nullptr && runtime_release != nullptr &&
-                   runtime_async_release != nullptr && runtime_async_release_ptsz != nullptr &&
-                   runtime_device_synchronize != nullptr && runtime_stream_synchronize != nullptr &&
-                   runtime_stream_synchronize_ptsz != nullptr && runtime_stream_query != nullptr &&
-                   runtime_stream_query_ptsz != nullptr && runtime_stream_destroy != nullptr &&
-                   runtime_get_info != nullptr,
-               "runtime interceptor symbols were not exported");
+    all_passed &= expect(
+        runtime_allocate != nullptr && runtime_async_allocate != nullptr &&
+            runtime_async_allocate_ptsz != nullptr && runtime_release != nullptr &&
+            runtime_pool_async_allocate != nullptr && runtime_pool_async_allocate_ptsz != nullptr &&
+            runtime_async_release != nullptr && runtime_async_release_ptsz != nullptr &&
+            runtime_device_synchronize != nullptr && runtime_stream_synchronize != nullptr &&
+            runtime_stream_synchronize_ptsz != nullptr && runtime_stream_query != nullptr &&
+            runtime_stream_query_ptsz != nullptr && runtime_stream_destroy != nullptr &&
+            runtime_get_info != nullptr && runtime_device_get_default_pool != nullptr &&
+            runtime_device_set_pool != nullptr && runtime_device_get_pool != nullptr &&
+            runtime_pool_trim != nullptr && runtime_pool_set_attribute != nullptr &&
+            runtime_pool_get_attribute != nullptr && runtime_pool_set_access != nullptr &&
+            runtime_pool_get_access != nullptr && runtime_pool_create != nullptr &&
+            runtime_pool_destroy != nullptr && runtime_get_default_pool != nullptr &&
+            runtime_get_pool != nullptr && runtime_set_pool != nullptr &&
+            runtime_pool_export_handle != nullptr && runtime_pool_import_handle != nullptr &&
+            runtime_pool_export_pointer != nullptr && runtime_pool_import_pointer != nullptr,
+        "runtime interceptor symbols were not exported");
     if (runtime_handle != nullptr) {
         all_passed &=
             expect(dlsym(runtime_handle, "cudaMalloc") == reinterpret_cast<void*>(runtime_allocate),
@@ -490,6 +941,83 @@ int main() {
     all_passed &= expect(
         runtime_get_info(&free_bytes, &total_bytes) == cudaSuccess && free_bytes == kQuotaBytes,
         "Runtime PTDS stream query did not restore quota");
+
+    cudaMemPool_t runtime_pool = nullptr;
+    cudaMemPoolProps runtime_pool_properties{};
+    all_passed &=
+        expect(runtime_pool_create(&runtime_pool, &runtime_pool_properties) == cudaSuccess &&
+                   runtime_pool != nullptr,
+               "Runtime memory-pool creation was rejected");
+    cudaMemPool_t queried_runtime_pool = nullptr;
+    cudaMemLocation runtime_pool_location{};
+    all_passed &= expect(runtime_device_get_default_pool(&queried_runtime_pool, 0) == cudaSuccess &&
+                             queried_runtime_pool != nullptr &&
+                             runtime_device_get_pool(&queried_runtime_pool, 0) == cudaSuccess &&
+                             runtime_device_set_pool(0, runtime_pool) == cudaSuccess,
+                         "Runtime device memory-pool operations were rejected");
+    all_passed &= expect(runtime_get_default_pool(&queried_runtime_pool, &runtime_pool_location,
+                                                  cudaMemAllocationTypePinned) == cudaSuccess &&
+                             runtime_get_pool(&queried_runtime_pool, &runtime_pool_location,
+                                              cudaMemAllocationTypePinned) == cudaSuccess &&
+                             runtime_set_pool(&runtime_pool_location, cudaMemAllocationTypePinned,
+                                              runtime_pool) == cudaSuccess,
+                         "Runtime memory-pool selection operations were rejected");
+    std::uint64_t runtime_release_threshold = 128;
+    cudaMemAccessFlags runtime_access_flags = cudaMemAccessFlagsProtNone;
+    all_passed &=
+        expect(runtime_pool_set_attribute(runtime_pool, cudaMemPoolAttrReleaseThreshold,
+                                          &runtime_release_threshold) == cudaSuccess &&
+                   runtime_pool_get_attribute(runtime_pool, cudaMemPoolAttrReleaseThreshold,
+                                              &runtime_release_threshold) == cudaSuccess &&
+                   runtime_pool_set_access(runtime_pool, nullptr, 0) == cudaSuccess &&
+                   runtime_pool_get_access(&runtime_access_flags, runtime_pool,
+                                           &runtime_pool_location) == cudaSuccess &&
+                   runtime_pool_trim(runtime_pool, 0) == cudaSuccess,
+               "Runtime memory-pool management operations were rejected");
+    void* runtime_pool_pointer = nullptr;
+    all_passed &= expect(runtime_pool_async_allocate(&runtime_pool_pointer, kAsyncAllocationBytes,
+                                                     runtime_pool, nullptr) == cudaSuccess,
+                         "Runtime memory-pool allocation was rejected");
+    all_passed &= expect(runtime_get_info(&free_bytes, &total_bytes) == cudaSuccess &&
+                             free_bytes == kQuotaBytes - kAsyncAllocationBytes,
+                         "Runtime memory-pool allocation was not accounted");
+    cudaMemPoolPtrExportData runtime_pointer_export_data{};
+    all_passed &= expect(runtime_pool_export_pointer(&runtime_pointer_export_data,
+                                                     runtime_pool_pointer) == cudaSuccess,
+                         "Runtime memory-pool pointer export was rejected");
+    unsigned long long runtime_pool_exported_handle = 0;
+    all_passed &= expect(
+        runtime_pool_export_handle(&runtime_pool_exported_handle, runtime_pool,
+                                   static_cast<cudaMemAllocationHandleType>(0), 0) == cudaSuccess,
+        "Runtime memory-pool handle export was rejected");
+    cudaMemPool_t imported_runtime_pool = nullptr;
+    all_passed &=
+        expect(runtime_pool_import_handle(&imported_runtime_pool, &runtime_pool_exported_handle,
+                                          static_cast<cudaMemAllocationHandleType>(0),
+                                          0) == cudaErrorNotSupported &&
+                   imported_runtime_pool == nullptr,
+               "Runtime memory-pool handle import was not rejected under quota");
+    void* imported_runtime_pointer = nullptr;
+    all_passed &=
+        expect(runtime_pool_import_pointer(&imported_runtime_pointer, runtime_pool,
+                                           &runtime_pointer_export_data) == cudaErrorNotSupported &&
+                   imported_runtime_pointer == nullptr,
+               "Runtime memory-pool pointer import was not rejected under quota");
+    all_passed &= expect(runtime_async_release(runtime_pool_pointer, nullptr) == cudaSuccess &&
+                             runtime_device_synchronize() == cudaSuccess &&
+                             runtime_get_info(&free_bytes, &total_bytes) == cudaSuccess &&
+                             free_bytes == kQuotaBytes,
+                         "Runtime memory-pool release did not restore quota");
+    void* runtime_pool_ptsz_pointer = nullptr;
+    all_passed &= expect(
+        runtime_pool_async_allocate_ptsz(&runtime_pool_ptsz_pointer, kAsyncAllocationBytes,
+                                         runtime_pool, nullptr) == cudaSuccess &&
+            runtime_async_release_ptsz(runtime_pool_ptsz_pointer, nullptr) == cudaSuccess &&
+            runtime_device_synchronize() == cudaSuccess &&
+            runtime_get_info(&free_bytes, &total_bytes) == cudaSuccess && free_bytes == kQuotaBytes,
+        "Runtime PTDS memory-pool path did not restore quota");
+    all_passed &= expect(runtime_pool_destroy(runtime_pool) == cudaSuccess,
+                         "Runtime memory-pool destruction was rejected");
 
     void* runtime_device_async_pointer = nullptr;
     all_passed &= expect(runtime_async_allocate(&runtime_device_async_pointer,
@@ -657,6 +1185,29 @@ int main() {
             queried_symbol == reinterpret_cast<void*>(allocate),
         "legacy cuGetProcAddress did not return the interceptor wrapper");
     queried_symbol = nullptr;
+    all_passed &= expect(
+        legacy_get_proc != nullptr &&
+            legacy_get_proc("cuMemCreate", &queried_symbol, CUDA_VERSION, 0) == CUDA_SUCCESS &&
+            queried_symbol == reinterpret_cast<void*>(vmm_create),
+        "legacy cuGetProcAddress did not return the VMM wrapper");
+    queried_symbol = nullptr;
+    all_passed &=
+        expect(legacy_get_proc != nullptr &&
+                   legacy_get_proc("cuMemMap", &queried_symbol, CUDA_VERSION, 0) == CUDA_SUCCESS &&
+                   queried_symbol == reinterpret_cast<void*>(map),
+               "legacy cuGetProcAddress did not return the VMM address wrapper");
+    queried_symbol = nullptr;
+    all_passed &= expect(
+        legacy_get_proc != nullptr &&
+            legacy_get_proc("cuMemPoolCreate", &queried_symbol, CUDA_VERSION, 0) == CUDA_SUCCESS &&
+            queried_symbol == reinterpret_cast<void*>(pool_create),
+        "legacy cuGetProcAddress did not return the memory-pool wrapper");
+    queried_symbol = nullptr;
+    all_passed &= expect(legacy_get_proc != nullptr &&
+                             legacy_get_proc("cuDeviceGetDefaultMemPool", &queried_symbol,
+                                             CUDA_VERSION, 0) == CUDA_SUCCESS &&
+                             queried_symbol == reinterpret_cast<void*>(device_get_default_pool),
+                         "legacy cuGetProcAddress did not return the default-pool wrapper");
     CUdriverProcAddressQueryResult query_status{};
     all_passed &= expect(get_proc_v2 != nullptr &&
                              get_proc_v2("cuMemAllocAsync", &queried_symbol, CUDA_VERSION, 0,
@@ -672,10 +1223,28 @@ int main() {
                              queried_symbol == reinterpret_cast<void*>(async_allocate_ptsz) &&
                              query_status == CU_GET_PROC_ADDRESS_SUCCESS,
                          "v2 cuGetProcAddress did not return the PTDS async wrapper");
+    queried_symbol = nullptr;
+    query_status = {};
+    all_passed &= expect(get_proc_v2 != nullptr &&
+                             get_proc_v2("cuMemSetAccess", &queried_symbol, CUDA_VERSION, 0,
+                                         &query_status) == CUDA_SUCCESS &&
+                             queried_symbol == reinterpret_cast<void*>(set_access) &&
+                             query_status == CU_GET_PROC_ADDRESS_SUCCESS,
+                         "v2 cuGetProcAddress did not return the VMM access wrapper");
+
+    queried_symbol = nullptr;
+    query_status = {};
+    all_passed &= expect(get_proc_v2 != nullptr &&
+                             get_proc_v2("cuMemGetAllocationGranularity", &queried_symbol,
+                                         CUDA_VERSION, 0, &query_status) == CUDA_SUCCESS &&
+                             queried_symbol == reinterpret_cast<void*>(get_granularity) &&
+                             query_status == CU_GET_PROC_ADDRESS_SUCCESS,
+                         "v2 cuGetProcAddress did not return the VMM query wrapper");
 
     if (runtime_handle != nullptr) {
         dlclose(runtime_handle);
     }
+    all_passed &= expect(nvml_shutdown() == NVML_SUCCESS, "NVML shutdown failed");
 
     if (shared_mode && !shared_tenant_id.empty()) {
         all_passed &= expect(glimmer::control::SharedMemoryQuota::remove_region(shared_tenant_id),

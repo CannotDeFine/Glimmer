@@ -33,14 +33,18 @@ replace it.
 | --- | --- | --- |
 | `core` | Reservation admission, rejection, commit, cancellation, release failures, concurrent reservations, lifetime safety, and counter overflow protection. | No |
 | `control` | Quota-visible memory information, physical-memory bounds, rejected reservations, shared-memory accounting, multi-process quota boundaries, per-device counters, fork re-registration, continuous stale-process recovery, committed-byte recovery grace, stale-process reservation/commit recovery, safe region cleanup, reservation lifecycle checks, and robust-mutex owner-death recovery. | No |
-| `interceptor` | Driver/Runtime preload coverage through a fake CUDA Driver and Runtime, `cuInit`, `dlsym` including explicit CUDA Runtime handles, both `cuGetProcAddress` forms, invalid-argument rejection, legacy/versioned and PTDS allocation/query aliases, exact PTDS availability checks, context-aware allocation records, duplicate-pointer degraded-state handling, ambiguous successful-null allocation rollback, context-bound cleanup that preserves context-independent allocations, stream cleanup, device-grouped asynchronous completion, fork reinitialization of local allocation metadata, `cuDeviceTotalMem_v2`, `cuMemAllocManaged`, `cuMemAllocPitch_v2`, stream-ordered Driver allocation/free and completion accounting, Runtime `cudaMalloc`/`cudaFree`/`cudaMemGetInfo` plus independently accounted Runtime async allocation/free, PTDS aliases, and stream/device completion, deterministic allocation-registry tests, and injectable Driver dispatch tests. | GPU test for real CUDA routing; no GPU for symbol, fake preload, registry, dispatch, and core tests |
+| `interceptor` | Driver/Runtime preload coverage through fake CUDA Driver, Runtime, and NVML libraries, `cuInit`, `dlsym` including explicit CUDA Driver/Runtime/NVML handles, both `cuGetProcAddress` forms, invalid-argument rejection, legacy/versioned and PTDS allocation/query aliases, exact PTDS availability checks, context-aware allocation records, duplicate-pointer degraded-state handling, ambiguous successful-null allocation rollback, context-bound cleanup that preserves context-independent allocations, stream cleanup, device-grouped asynchronous completion, fork reinitialization of local allocation metadata, `cuDeviceTotalMem_v2`, `cuMemAllocManaged`, `cuMemAllocPitch_v2`, stream-ordered Driver/Runtime allocation/free and completion accounting, memory-pool lifecycle and import policy, device-resident `cuMemCreate`/`cuMemRelease` VMM handle accounting with retain/release references, VMM address reserve/map/access/unmap/free and query/import policy, NVML initialization/device lookup and passthrough plus v1/v2 memory-view virtualization, deterministic allocation-registry tests, and injectable Driver dispatch tests. | GPU test for real CUDA/NVML routing; no GPU for symbol, fake preload, registry, dispatch, and core tests |
 
 The current interceptor milestone covers the Driver stream-ordered allocation
-path, its PTDS aliases, independently accounted Runtime async allocation and
-its PTDS aliases and explicit completion boundaries, and the shared-memory
-quota control path. It does not claim
-coverage for CUDA memory-pool management and trim, VMM, or NVML. Those remain
-governed by [CUDA_API_COVERAGE.md](CUDA_API_COVERAGE.md).
+path, its PTDS aliases, independently accounted Runtime async and pool
+allocation paths, explicit completion boundaries, memory-pool lifecycle
+forwarding with quota-enabled import rejection, the device-resident VMM
+physical handle path with retain/release references, VMM address and query
+policy, NVML passthrough and memory-view virtualization, and the shared-memory
+quota control path. Remaining API families and their exact guarantees remain
+governed by [CUDA_API_COVERAGE.md](CUDA_API_COVERAGE.md). The fake preload
+suite also runs dedicated quota-disabled passthrough checks for POSIX-handle
+imports and NVML physical fields.
 
 ## Test design
 

@@ -60,6 +60,7 @@ void AllocationRegistry::reset_after_fork_if_needed() const noexcept {
         return;
     }
     records_.clear();
+    vmm_records_.clear();
     is_accounting_degraded_.store(false, std::memory_order_relaxed);
     process_id_ = current_process_id;
 }
@@ -103,6 +104,41 @@ bool AllocationRegistry::record(AllocationIdentity identity, core::MemoryBytes m
     }
 }
 
+bool AllocationRegistry::record_vmm(VmmAllocationIdentity identity,
+                                    core::MemoryBytes memory_bytes) {
+    try {
+        std::scoped_lock lock(mutex());
+        if (is_accounting_degraded_.load(std::memory_order_relaxed) || identity.handle == 0 ||
+            identity.device < 0 || vmm_records_.contains(identity.handle)) {
+            return false;
+        }
+        return vmm_records_
+            .emplace(identity.handle, VmmAllocationRecord{.memory_bytes = memory_bytes,
+                                                          .device = identity.device,
+                                                          .reference_count = 1})
+            .second;
+    } catch (...) {
+        mark_accounting_degraded();
+        return false;
+    }
+}
+
+bool AllocationRegistry::retain_vmm_handle(CUmemGenericAllocationHandle handle) noexcept {
+    try {
+        std::scoped_lock lock(mutex());
+        const auto record = vmm_records_.find(handle);
+        if (record == vmm_records_.end() || record->second.is_releasing ||
+            record->second.reference_count == std::numeric_limits<std::size_t>::max()) {
+            return false;
+        }
+        ++record->second.reference_count;
+        return true;
+    } catch (...) {
+        mark_accounting_degraded();
+        return false;
+    }
+}
+
 std::pair<AllocationRegistry::ReleaseStatus, std::optional<AllocationRegistry::ReleaseTicket>>
 AllocationRegistry::begin_release(AllocationIdentity identity) {
     try {
@@ -119,6 +155,53 @@ AllocationRegistry::begin_release(AllocationIdentity identity) {
         return {ReleaseStatus::kStarted, ReleaseTicket{.identity = identity,
                                                        .memory_bytes = record->second.memory_bytes,
                                                        .stream = {}}};
+    } catch (...) {
+        mark_accounting_degraded();
+        return {ReleaseStatus::kUnknown, std::nullopt};
+    }
+}
+
+std::pair<AllocationRegistry::ReleaseStatus, std::optional<AllocationRegistry::VmmReleaseTicket>>
+AllocationRegistry::begin_vmm_release(VmmAllocationIdentity identity) {
+    try {
+        std::scoped_lock lock(mutex());
+        const auto record = vmm_records_.find(identity.handle);
+        if (record == vmm_records_.end() || record->second.device != identity.device) {
+            return {ReleaseStatus::kUnknown, std::nullopt};
+        }
+        if (record->second.is_releasing) {
+            return {ReleaseStatus::kInProgress, std::nullopt};
+        }
+
+        record->second.is_releasing = true;
+        return {ReleaseStatus::kStarted,
+                VmmReleaseTicket{.identity = identity,
+                                 .memory_bytes = record->second.memory_bytes,
+                                 .is_last_reference = record->second.reference_count == 1}};
+    } catch (...) {
+        mark_accounting_degraded();
+        return {ReleaseStatus::kUnknown, std::nullopt};
+    }
+}
+
+std::pair<AllocationRegistry::ReleaseStatus, std::optional<AllocationRegistry::VmmReleaseTicket>>
+AllocationRegistry::begin_vmm_release_by_handle(CUmemGenericAllocationHandle handle) {
+    try {
+        std::scoped_lock lock(mutex());
+        const auto record = vmm_records_.find(handle);
+        if (record == vmm_records_.end()) {
+            return {ReleaseStatus::kUnknown, std::nullopt};
+        }
+        if (record->second.is_releasing) {
+            return {ReleaseStatus::kInProgress, std::nullopt};
+        }
+
+        record->second.is_releasing = true;
+        return {ReleaseStatus::kStarted,
+                VmmReleaseTicket{.identity = VmmAllocationIdentity{.handle = handle,
+                                                                   .device = record->second.device},
+                                 .memory_bytes = record->second.memory_bytes,
+                                 .is_last_reference = record->second.reference_count == 1}};
     } catch (...) {
         mark_accounting_degraded();
         return {ReleaseStatus::kUnknown, std::nullopt};
@@ -238,6 +321,33 @@ bool AllocationRegistry::complete_release(const ReleaseTicket& ticket) {
     }
 }
 
+bool AllocationRegistry::complete_vmm_release(const VmmReleaseTicket& ticket) noexcept {
+    try {
+        std::scoped_lock lock(mutex());
+        const auto record = vmm_records_.find(ticket.identity.handle);
+        if (record == vmm_records_.end() || record->second.device != ticket.identity.device ||
+            !record->second.is_releasing || record->second.memory_bytes != ticket.memory_bytes) {
+            return false;
+        }
+        if (ticket.is_last_reference) {
+            if (record->second.reference_count != 1) {
+                return false;
+            }
+            vmm_records_.erase(record);
+        } else {
+            if (record->second.reference_count <= 1) {
+                return false;
+            }
+            --record->second.reference_count;
+            record->second.is_releasing = false;
+        }
+        return true;
+    } catch (...) {
+        mark_accounting_degraded();
+        return false;
+    }
+}
+
 bool AllocationRegistry::commit_async_release(const ReleaseTicket& ticket) noexcept {
     try {
         std::scoped_lock lock(mutex());
@@ -269,6 +379,20 @@ void AllocationRegistry::cancel_release(const ReleaseTicket& ticket) noexcept {
         record->second.is_async_release_submitted = false;
         record->second.is_async_release_stream_detached = false;
         record->second.pending_stream = {};
+    } catch (...) {
+        mark_accounting_degraded();
+    }
+}
+
+void AllocationRegistry::cancel_vmm_release(const VmmReleaseTicket& ticket) noexcept {
+    try {
+        std::scoped_lock lock(mutex());
+        const auto record = vmm_records_.find(ticket.identity.handle);
+        if (record == vmm_records_.end() || record->second.device != ticket.identity.device ||
+            !record->second.is_releasing || record->second.memory_bytes != ticket.memory_bytes) {
+            return;
+        }
+        record->second.is_releasing = false;
     } catch (...) {
         mark_accounting_degraded();
     }

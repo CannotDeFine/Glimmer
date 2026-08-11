@@ -5,9 +5,12 @@ add_library(glimmer_cuda_interceptor SHARED
     internal/diagnostics.h
     driver_dispatch.cc
     internal/driver_dispatch.h
+    nvml_dispatch.cc
+    internal/nvml_dispatch.h
     driver_api_interceptor.cc
     internal/driver_api_interceptor.h
     driver_api_wrappers.cc
+    nvml_api_wrappers.cc
     runtime_api_interceptor.cc
     symbol_interceptor.cc
     internal/runtime_api_bridge.h
@@ -141,6 +144,22 @@ if(BUILD_TESTING)
     )
     glimmer_enable_clang_tidy(glimmer_fake_cuda_runtime)
 
+    add_library(glimmer_fake_nvml SHARED
+        "${PROJECT_SOURCE_DIR}/tests/interceptor/fake_nvml.cc"
+    )
+    set_target_properties(glimmer_fake_nvml PROPERTIES
+        PREFIX "lib"
+        OUTPUT_NAME nvidia-ml
+        SUFFIX ".so.1"
+        LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/fake_cuda"
+    )
+    target_include_directories(glimmer_fake_nvml
+        PRIVATE
+            "${CUDAToolkit_INCLUDE_DIRS}"
+    )
+    target_link_libraries(glimmer_fake_nvml PRIVATE Glimmer::project_options)
+    glimmer_enable_clang_tidy(glimmer_fake_nvml)
+
     add_executable(glimmer_cuda_interceptor_fake_driver_test
         "${PROJECT_SOURCE_DIR}/tests/interceptor/interceptor_fake_driver_test.cc"
     )
@@ -158,6 +177,7 @@ if(BUILD_TESTING)
     add_dependencies(glimmer_cuda_interceptor_fake_driver_test
         glimmer_fake_cuda_driver
         glimmer_fake_cuda_runtime
+        glimmer_fake_nvml
         glimmer_cuda_interceptor
     )
     add_test(NAME glimmer_cuda_interceptor_fake_driver_test
@@ -166,6 +186,56 @@ if(BUILD_TESTING)
     set_tests_properties(glimmer_cuda_interceptor_fake_driver_test PROPERTIES
         ENVIRONMENT
             "GLIMMER_MEMORY_LIMIT_BYTES=4096;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
+    )
+
+    add_executable(glimmer_cuda_interceptor_nvml_passthrough_test
+        "${PROJECT_SOURCE_DIR}/tests/interceptor/nvml_passthrough_test.cc"
+    )
+    target_include_directories(glimmer_cuda_interceptor_nvml_passthrough_test
+        PRIVATE
+            "${CUDAToolkit_INCLUDE_DIRS}"
+    )
+    target_link_libraries(glimmer_cuda_interceptor_nvml_passthrough_test
+        PRIVATE
+            Glimmer::project_options
+            "${CMAKE_DL_LIBS}"
+    )
+    glimmer_enable_clang_tidy(glimmer_cuda_interceptor_nvml_passthrough_test)
+    add_dependencies(glimmer_cuda_interceptor_nvml_passthrough_test
+        glimmer_fake_nvml
+        glimmer_cuda_interceptor
+    )
+    add_test(NAME glimmer_cuda_interceptor_nvml_passthrough_test
+        COMMAND glimmer_cuda_interceptor_nvml_passthrough_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_nvml_passthrough_test PROPERTIES
+        ENVIRONMENT
+            "LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_nvml>"
+    )
+
+    add_executable(glimmer_cuda_interceptor_cuda_import_passthrough_test
+        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_import_passthrough_test.cc"
+    )
+    target_include_directories(glimmer_cuda_interceptor_cuda_import_passthrough_test
+        PRIVATE
+            "${CUDAToolkit_INCLUDE_DIRS}"
+    )
+    target_link_libraries(glimmer_cuda_interceptor_cuda_import_passthrough_test
+        PRIVATE
+            Glimmer::project_options
+            "${CMAKE_DL_LIBS}"
+    )
+    glimmer_enable_clang_tidy(glimmer_cuda_interceptor_cuda_import_passthrough_test)
+    add_dependencies(glimmer_cuda_interceptor_cuda_import_passthrough_test
+        glimmer_fake_cuda_driver
+        glimmer_cuda_interceptor
+    )
+    add_test(NAME glimmer_cuda_interceptor_cuda_import_passthrough_test
+        COMMAND glimmer_cuda_interceptor_cuda_import_passthrough_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_cuda_import_passthrough_test PROPERTIES
+        ENVIRONMENT
+            "LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
     )
 
     add_test(NAME glimmer_cuda_interceptor_duplicate_record_failure_test
@@ -216,6 +286,23 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_runtime_gpu_test.cc"
     )
 
+    add_executable(glimmer_cuda_interceptor_nvml_gpu_test
+        "${PROJECT_SOURCE_DIR}/tests/interceptor/nvml_interceptor_gpu_test.cc"
+    )
+
+    target_include_directories(glimmer_cuda_interceptor_nvml_gpu_test
+        PRIVATE
+            "${CUDAToolkit_INCLUDE_DIRS}"
+    )
+
+    target_link_libraries(glimmer_cuda_interceptor_nvml_gpu_test
+        PRIVATE
+            Glimmer::project_options
+            "${CMAKE_DL_LIBS}"
+    )
+
+    glimmer_enable_clang_tidy(glimmer_cuda_interceptor_nvml_gpu_test)
+
     target_link_libraries(glimmer_cuda_interceptor_runtime_gpu_test
         PRIVATE
             Glimmer::project_options
@@ -241,6 +328,14 @@ if(BUILD_TESTING)
             COMMAND glimmer_cuda_interceptor_runtime_gpu_test
         )
         set_tests_properties(glimmer_cuda_interceptor_runtime_gpu_test PROPERTIES
+            ENVIRONMENT
+                "GLIMMER_MEMORY_LIMIT_BYTES=8388608;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>"
+        )
+
+        add_test(NAME glimmer_cuda_interceptor_nvml_gpu_test
+            COMMAND glimmer_cuda_interceptor_nvml_gpu_test
+        )
+        set_tests_properties(glimmer_cuda_interceptor_nvml_gpu_test PROPERTIES
             ENVIRONMENT
                 "GLIMMER_MEMORY_LIMIT_BYTES=8388608;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>"
         )

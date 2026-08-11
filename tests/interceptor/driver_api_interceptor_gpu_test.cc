@@ -1,6 +1,8 @@
 #include <cuda.h>
 
+#include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <iostream>
 #include <string_view>
 
@@ -127,6 +129,7 @@ int main() {
                                    CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED, device),
               "cuDeviceGetAttribute memory pools");
     bool async_checks = true;
+    bool pool_lifecycle_checks = true;
     if (has_memory_pool_attribute && memory_pools_supported != 0) {
         CUstream stream = nullptr;
         async_checks &= check(cuStreamCreate(&stream, kStreamFlags), "cuStreamCreate");
@@ -186,7 +189,140 @@ int main() {
             pool_freed && check(cuCtxSynchronize(), "cuCtxSynchronize pool");
         async_checks &= pool_available && pool_allocated && pool_freed && pool_completed;
 
+        CUmemPoolProps pool_properties{};
+        pool_properties.allocType = CU_MEM_ALLOCATION_TYPE_PINNED;
+        pool_properties.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        pool_properties.location.id = device;
+        CUmemoryPool custom_pool = nullptr;
+        const bool pool_created =
+            check(cuMemPoolCreate(&custom_pool, &pool_properties), "cuMemPoolCreate");
+        std::uint64_t release_threshold = 0;
+        const bool pool_attribute_updated =
+            pool_created &&
+            check(cuMemPoolSetAttribute(custom_pool, CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+                                        &release_threshold),
+                  "cuMemPoolSetAttribute");
+        std::uint64_t queried_release_threshold = 1;
+        const bool pool_attribute_read =
+            pool_attribute_updated &&
+            check(cuMemPoolGetAttribute(custom_pool, CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+                                        &queried_release_threshold),
+                  "cuMemPoolGetAttribute") &&
+            queried_release_threshold == release_threshold;
+        CUmemAccessDesc pool_access_descriptor{};
+        pool_access_descriptor.location = pool_properties.location;
+        pool_access_descriptor.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+        const bool pool_access_updated =
+            pool_created && check(cuMemPoolSetAccess(custom_pool, &pool_access_descriptor, 1),
+                                  "cuMemPoolSetAccess");
+        CUmemAccess_flags pool_access_flags = CU_MEM_ACCESS_FLAGS_PROT_NONE;
+        CUmemLocation pool_access_location = pool_properties.location;
+        const bool pool_access_read =
+            pool_access_updated &&
+            check(cuMemPoolGetAccess(&pool_access_flags, custom_pool, &pool_access_location),
+                  "cuMemPoolGetAccess") &&
+            pool_access_flags == CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+        const bool pool_trimmed =
+            pool_created && check(cuMemPoolTrimTo(custom_pool, 0), "cuMemPoolTrimTo");
+        const bool pool_destroyed =
+            pool_created && check(cuMemPoolDestroy(custom_pool), "cuMemPoolDestroy");
+        pool_lifecycle_checks = pool_created && pool_attribute_updated && pool_attribute_read &&
+                                pool_access_updated && pool_access_read && pool_trimmed &&
+                                pool_destroyed;
+
         async_checks &= check(cuStreamDestroy(stream), "cuStreamDestroy");
+    }
+
+    int virtual_memory_supported = 0;
+    const bool has_virtual_memory_attribute =
+        check(cuDeviceGetAttribute(&virtual_memory_supported,
+                                   CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED, device),
+              "cuDeviceGetAttribute virtual memory");
+    bool vmm_checks = has_virtual_memory_attribute;
+    bool vmm_allocated = true;
+    bool vmm_released = true;
+    bool vmm_usage_charged = true;
+    bool vmm_reserved = true;
+    bool vmm_mapped = true;
+    bool vmm_access_set = true;
+    bool vmm_address_query = true;
+    bool vmm_access_query = true;
+    bool vmm_granularity_query = true;
+    bool vmm_properties_query = true;
+    bool vmm_unmapped = true;
+    bool vmm_address_freed = true;
+    if (has_virtual_memory_attribute && virtual_memory_supported != 0) {
+        CUmemAllocationProp vmm_prop{};
+        vmm_prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+        vmm_prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_NONE;
+        vmm_prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        vmm_prop.location.id = device;
+        std::size_t allocation_granularity = 0;
+        vmm_granularity_query =
+            check(cuMemGetAllocationGranularity(&allocation_granularity, &vmm_prop,
+                                                CU_MEM_ALLOC_GRANULARITY_MINIMUM),
+                  "cuMemGetAllocationGranularity") &&
+            allocation_granularity != 0;
+
+        std::size_t vmm_request_bytes = kSuccessfulRequestBytes;
+        if (vmm_granularity_query) {
+            const std::size_t remainder = kSuccessfulRequestBytes % allocation_granularity;
+            const std::size_t padding = remainder == 0 ? 0 : allocation_granularity - remainder;
+            vmm_granularity_query =
+                padding <= std::numeric_limits<std::size_t>::max() - kSuccessfulRequestBytes;
+            if (vmm_granularity_query) {
+                vmm_request_bytes += padding;
+            }
+        }
+        vmm_granularity_query = vmm_granularity_query && vmm_request_bytes <= kQuotaBytes;
+
+        CUmemGenericAllocationHandle vmm_handle = 0;
+        vmm_allocated =
+            vmm_granularity_query &&
+            check(cuMemCreate(&vmm_handle, vmm_request_bytes, &vmm_prop, 0), "cuMemCreate");
+        vmm_usage_charged =
+            vmm_allocated &&
+            check(cuMemGetInfo_v2(&free_bytes, &total_bytes), "cuMemGetInfo_v2 VMM allocation") &&
+            free_bytes == kQuotaBytes - vmm_request_bytes;
+        CUdeviceptr vmm_address = 0;
+        vmm_reserved =
+            vmm_allocated && check(cuMemAddressReserve(&vmm_address, vmm_request_bytes, 0, 0, 0),
+                                   "cuMemAddressReserve");
+        vmm_mapped = vmm_reserved &&
+                     check(cuMemMap(vmm_address, vmm_request_bytes, 0, vmm_handle, 0), "cuMemMap");
+        CUmemAccessDesc access_descriptor{};
+        access_descriptor.location = vmm_prop.location;
+        access_descriptor.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+        vmm_access_set = vmm_mapped && check(cuMemSetAccess(vmm_address, vmm_request_bytes,
+                                                            &access_descriptor, 1),
+                                             "cuMemSetAccess");
+        CUdeviceptr queried_base = 0;
+        std::size_t queried_size = 0;
+        vmm_address_query = vmm_mapped &&
+                            check(cuMemGetAddressRange(&queried_base, &queried_size, vmm_address),
+                                  "cuMemGetAddressRange") &&
+                            queried_base != 0 && queried_size != 0;
+        unsigned long long queried_access_flags = CU_MEM_ACCESS_FLAGS_PROT_NONE;
+        vmm_access_query =
+            vmm_mapped &&
+            check(cuMemGetAccess(&queried_access_flags, &access_descriptor.location, vmm_address),
+                  "cuMemGetAccess") &&
+            queried_access_flags == CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+        CUmemAllocationProp queried_properties{};
+        vmm_properties_query =
+            vmm_allocated &&
+            check(cuMemGetAllocationPropertiesFromHandle(&queried_properties, vmm_handle),
+                  "cuMemGetAllocationPropertiesFromHandle") &&
+            queried_properties.location.type == CU_MEM_LOCATION_TYPE_DEVICE;
+        vmm_unmapped =
+            !vmm_mapped || check(cuMemUnmap(vmm_address, vmm_request_bytes), "cuMemUnmap");
+        vmm_address_freed = !vmm_reserved || check(cuMemAddressFree(vmm_address, vmm_request_bytes),
+                                                   "cuMemAddressFree");
+        vmm_released = !vmm_allocated || check(cuMemRelease(vmm_handle), "cuMemRelease");
+        vmm_checks = vmm_allocated && vmm_usage_charged && vmm_reserved && vmm_mapped &&
+                     vmm_access_set && vmm_unmapped && vmm_address_freed && vmm_released;
+        vmm_checks = vmm_checks && vmm_address_query && vmm_access_query && vmm_granularity_query &&
+                     vmm_properties_query;
     }
 
     CUdeviceptr device_pointer{};
@@ -201,7 +337,8 @@ int main() {
         !pitch_released || !has_memory_info || !has_expected_total || !has_expected_initial_free ||
         !allocated_within_quota || !has_reduced_free || !released_within_quota ||
         !has_restored_free || !propagated_driver_error || !unknown_free_preserved_usage ||
-        !has_memory_pool_attribute || !async_checks || !was_rejected ||
+        !has_memory_pool_attribute || !async_checks || !pool_lifecycle_checks ||
+        !has_virtual_memory_attribute || !vmm_checks || !was_rejected ||
         !released_unexpected_allocation || !destroyed_context) {
         std::cerr << "proc_address_call=" << proc_address_call
                   << " unsupported_proc_address=" << unsupported_proc_address
@@ -218,7 +355,15 @@ int main() {
                   << " propagated_error=" << propagated_driver_error
                   << " unknown_free=" << unknown_free_preserved_usage
                   << " memory_pools_attribute=" << has_memory_pool_attribute
-                  << " async=" << async_checks << " rejected=" << was_rejected
+                  << " async=" << async_checks << " pool_lifecycle=" << pool_lifecycle_checks
+                  << " virtual_memory_attribute=" << has_virtual_memory_attribute
+                  << " vmm=" << vmm_checks << " vmm_reserved=" << vmm_reserved
+                  << " vmm_mapped=" << vmm_mapped << " vmm_access=" << vmm_access_set
+                  << " vmm_address_query=" << vmm_address_query
+                  << " vmm_access_query=" << vmm_access_query
+                  << " vmm_granularity=" << vmm_granularity_query
+                  << " vmm_properties=" << vmm_properties_query << " vmm_unmapped=" << vmm_unmapped
+                  << " vmm_address_freed=" << vmm_address_freed << " rejected=" << was_rejected
                   << " released_unexpected=" << released_unexpected_allocation
                   << " destroyed=" << destroyed_context << '\n';
         std::cerr << "CUDA interceptor GPU test failed\n";
