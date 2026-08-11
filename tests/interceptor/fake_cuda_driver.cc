@@ -144,6 +144,22 @@ extern "C" CUresult CUDAAPI cuInit(unsigned int) {
     return CUDA_SUCCESS;
 }
 
+extern "C" CUresult CUDAAPI cuLaunchKernel(CUfunction, unsigned int, unsigned int, unsigned int,
+                                           unsigned int, unsigned int, unsigned int, unsigned int,
+                                           CUstream, void**, void**) {
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuLaunchKernel_ptsz(CUfunction function, unsigned int grid_dim_x,
+                                                unsigned int grid_dim_y, unsigned int grid_dim_z,
+                                                unsigned int block_dim_x, unsigned int block_dim_y,
+                                                unsigned int block_dim_z,
+                                                unsigned int shared_memory_bytes, CUstream stream,
+                                                void** kernel_parameters, void** extra) {
+    return cuLaunchKernel(function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y,
+                          block_dim_z, shared_memory_bytes, stream, kernel_parameters, extra);
+}
+
 extern "C" CUresult CUDAAPI cuMemAlloc_v2(CUdeviceptr* device_pointer, std::size_t memory_bytes) {
     return reserve_memory(device_pointer, memory_bytes);
 }
@@ -652,6 +668,12 @@ void* lookup_symbol(const char* symbol) {
     }
     if (std::string_view(symbol) == "cuInit") {
         return reinterpret_cast<void*>(&cuInit);
+    }
+    if (std::string_view(symbol) == "cuLaunchKernel") {
+        return reinterpret_cast<void*>(&cuLaunchKernel);
+    }
+    if (std::string_view(symbol) == "cuLaunchKernel_ptsz") {
+        return reinterpret_cast<void*>(&cuLaunchKernel_ptsz);
     }
     if (std::string_view(symbol) == "cuMemAlloc" || std::string_view(symbol) == "cuMemAlloc_v2") {
         return reinterpret_cast<void*>(&cuMemAlloc_v2);

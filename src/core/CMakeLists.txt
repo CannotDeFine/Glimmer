@@ -1,4 +1,8 @@
-add_library(glimmer_core quota_ledger.cc)
+add_library(glimmer_core
+    quota_ledger.cc
+    scheduler.cc
+    scheduler_mode.cc
+)
 add_library(Glimmer::core ALIAS glimmer_core)
 
 set_target_properties(glimmer_core PROPERTIES POSITION_INDEPENDENT_CODE ON)

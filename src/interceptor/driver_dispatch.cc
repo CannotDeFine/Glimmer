@@ -48,6 +48,8 @@ DriverDispatch::~DriverDispatch() {
 
 DriverDispatch::DriverDispatch(DriverFunctionTable functions) noexcept
     : init_(functions.init),
+      launch_kernel_(functions.launch_kernel),
+      launch_kernel_ptsz_(functions.launch_kernel_ptsz),
       mem_alloc_(functions.mem_alloc),
       mem_alloc_managed_(functions.mem_alloc_managed),
       mem_alloc_pitch_(functions.mem_alloc_pitch),
@@ -118,6 +120,9 @@ bool DriverDispatch::initialize() {
     }
 
     init_ = reinterpret_cast<InitFunction>(load_symbol("cuInit"));
+    launch_kernel_ = reinterpret_cast<LaunchKernelFunction>(load_symbol("cuLaunchKernel"));
+    launch_kernel_ptsz_ =
+        reinterpret_cast<LaunchKernelFunction>(load_symbol("cuLaunchKernel_ptsz"));
     mem_alloc_ = reinterpret_cast<MemAllocFunction>(load_symbol("cuMemAlloc_v2"));
     mem_alloc_managed_ =
         reinterpret_cast<MemAllocManagedFunction>(load_symbol("cuMemAllocManaged"));
@@ -241,6 +246,35 @@ CUresult DriverDispatch::init(unsigned int flags) const {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
     return init_(flags);
+}
+
+CUresult DriverDispatch::launch_kernel(CUfunction function, unsigned int grid_dim_x,
+                                       unsigned int grid_dim_y, unsigned int grid_dim_z,
+                                       unsigned int block_dim_x, unsigned int block_dim_y,
+                                       unsigned int block_dim_z, unsigned int shared_memory_bytes,
+                                       CUstream stream, void** kernel_parameters,
+                                       void** extra) const {
+    DriverCallScope scope;
+    if (launch_kernel_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return launch_kernel_(function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y,
+                          block_dim_z, shared_memory_bytes, stream, kernel_parameters, extra);
+}
+
+CUresult DriverDispatch::launch_kernel_ptsz(CUfunction function, unsigned int grid_dim_x,
+                                            unsigned int grid_dim_y, unsigned int grid_dim_z,
+                                            unsigned int block_dim_x, unsigned int block_dim_y,
+                                            unsigned int block_dim_z,
+                                            unsigned int shared_memory_bytes, CUstream stream,
+                                            void** kernel_parameters, void** extra) const {
+    DriverCallScope scope;
+    if (launch_kernel_ptsz_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return launch_kernel_ptsz_(function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x,
+                               block_dim_y, block_dim_z, shared_memory_bytes, stream,
+                               kernel_parameters, extra);
 }
 
 CUresult DriverDispatch::mem_alloc_managed(CUdeviceptr* device_pointer, std::size_t memory_bytes,
@@ -753,6 +787,14 @@ bool DriverDispatch::has_get_proc_address() const {
 
 bool DriverDispatch::has_get_proc_address_v2() const {
     return get_proc_address_v2_ != nullptr;
+}
+
+bool DriverDispatch::has_launch_kernel() const {
+    return launch_kernel_ != nullptr;
+}
+
+bool DriverDispatch::has_launch_kernel_ptsz() const {
+    return launch_kernel_ptsz_ != nullptr;
 }
 
 bool DriverDispatch::has_mem_alloc_managed() const {

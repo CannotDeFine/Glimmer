@@ -3,11 +3,24 @@
 #include <cuda.h>
 #include <nvml.h>
 
+#include "internal/diagnostics.h"
+
 #include <cstddef>
+#include <cstdint>
 
 namespace glimmer::interceptor {
 
 [[nodiscard]] CUresult intercept_init(unsigned int flags);
+void report_kernel_launch_observed(const KernelLaunchObservation& observation) noexcept;
+void report_memory_info_observed(const char* api_name, std::int32_t device,
+                                 std::uint64_t total_bytes, std::uint64_t free_bytes) noexcept;
+[[nodiscard]] CUresult intercept_launch_kernel(CUfunction function, unsigned int grid_dim_x,
+                                               unsigned int grid_dim_y, unsigned int grid_dim_z,
+                                               unsigned int block_dim_x, unsigned int block_dim_y,
+                                               unsigned int block_dim_z,
+                                               unsigned int shared_memory_bytes, CUstream stream,
+                                               void** kernel_parameters, void** extra,
+                                               bool per_thread_default_stream);
 [[nodiscard]] CUresult intercept_mem_alloc(CUdeviceptr* device_pointer, std::size_t memory_bytes);
 [[nodiscard]] CUresult intercept_mem_alloc_managed(CUdeviceptr* device_pointer,
                                                    std::size_t memory_bytes, unsigned int flags);

@@ -31,9 +31,10 @@ replace it.
 
 | Module | Current tests | Hardware required |
 | --- | --- | --- |
-| `core` | Reservation admission, rejection, commit, cancellation, release failures, concurrent reservations, lifetime safety, and counter overflow protection. | No |
+| `core` | Quota reservation admission, rejection, commit, cancellation, release failures, concurrent reservations, lifetime safety, counter overflow protection, task admission, weighted tenant ordering, single-task dispatch, completion, cancellation, failure, and input validation. | No |
+| `backend` | Simulated task submission, deterministic progress, completion, cancellation, duplicate rejection, and unknown-task handling. | No |
 | `control` | Quota-visible memory information, physical-memory bounds, rejected reservations, shared-memory accounting, multi-process quota boundaries, per-device counters, fork re-registration, continuous stale-process recovery, committed-byte recovery grace, stale-process reservation/commit recovery, safe region cleanup, reservation lifecycle checks, and robust-mutex owner-death recovery. | No |
-| `interceptor` | Driver/Runtime preload coverage through fake CUDA Driver, Runtime, and NVML libraries, `cuInit`, `dlsym` including explicit CUDA Driver/Runtime/NVML handles, both `cuGetProcAddress` forms, invalid-argument rejection, legacy/versioned and PTDS allocation/query aliases, exact PTDS availability checks, context-aware allocation records, duplicate-pointer degraded-state handling, ambiguous successful-null allocation rollback, context-bound cleanup that preserves context-independent allocations, stream cleanup, device-grouped asynchronous completion, fork reinitialization of local allocation metadata, `cuDeviceTotalMem_v2`, `cuMemAllocManaged`, `cuMemAllocPitch_v2`, stream-ordered Driver/Runtime allocation/free and completion accounting, memory-pool lifecycle and import policy, device-resident `cuMemCreate`/`cuMemRelease` VMM handle accounting with retain/release references, VMM address reserve/map/access/unmap/free and query/import policy, NVML initialization/device lookup and passthrough plus v1/v2 memory-view virtualization, deterministic allocation-registry tests, and injectable Driver dispatch tests. | GPU test for real CUDA/NVML routing; no GPU for symbol, fake preload, registry, dispatch, and core tests |
+| `interceptor` | Driver/Runtime preload coverage through fake CUDA Driver, Runtime, and NVML libraries, `cuInit`, `cuLaunchKernel` and PTDS launch forwarding, `dlsym` including explicit CUDA Driver/Runtime/NVML handles, both `cuGetProcAddress` forms, invalid-argument rejection, legacy/versioned and PTDS allocation/query aliases, exact PTDS availability checks, context-aware allocation records, duplicate-pointer degraded-state handling, ambiguous successful-null allocation rollback, context-bound cleanup that preserves context-independent allocations, stream cleanup, device-grouped asynchronous completion, fork reinitialization of local allocation metadata, `cuDeviceTotalMem_v2`, `cuMemAllocManaged`, `cuMemAllocPitch_v2`, stream-ordered Driver/Runtime allocation/free and completion accounting, memory-pool lifecycle and import policy, device-resident `cuMemCreate`/`cuMemRelease` VMM handle accounting with retain/release references, VMM address reserve/map/access/unmap/free and query/import policy, NVML initialization/device lookup and passthrough plus v1/v2 memory-view virtualization, deterministic allocation-registry tests, and injectable Driver dispatch tests. | GPU tests for real CUDA/NVML routing, Driver and Runtime kernel launches, and cross-process shared quota; no GPU for symbol, fake preload, registry, dispatch, and core tests |
 
 The current interceptor milestone covers the Driver stream-ordered allocation
 path, its PTDS aliases, independently accounted Runtime async and pool
@@ -45,6 +46,26 @@ quota control path. Remaining API families and their exact guarantees remain
 governed by [CUDA_API_COVERAGE.md](CUDA_API_COVERAGE.md). The fake preload
 suite also runs dedicated quota-disabled passthrough checks for POSIX-handle
 imports and NVML physical fields.
+
+The CUDA GPU preset also builds `glimmer_cuda_interceptor_kernel_gpu_test`. It
+loads an embedded PTX module through the Driver API, allocates its output with
+the intercepted allocator, launches the kernel through the intercepted
+`cuLaunchKernel` path, synchronizes, verifies the device result, and cleans up
+under `LD_PRELOAD`. This is the first end-to-end real CUDA workload test. The
+public and compiler-generated Runtime launch symbols are also forwarded and
+covered by the fake Runtime forwarding test. `GLIMMER_TRACE_KERNEL_LAUNCHES=1`
+prints one structured, allocation-free line per successful launch, including
+the API, grid, block, shared-memory size, stream, and process-local sequence
+number. A hardware regression test for a Runtime-compiled kernel is provided by
+`glimmer_cuda_interceptor_runtime_kernel_gpu_test` when the CUDA GPU preset is
+enabled. `glimmer_cuda_interceptor_runtime_shared_quota_gpu_test` forks two
+Runtime processes with the same tenant identity: one holds 6 MiB and the other
+must be rejected when it requests 4 MiB from the shared 8 MiB quota. The holder
+then releases its allocation and verifies that its visible quota is restored.
+
+`GLIMMER_TRACE_MEMORY_INFO=1` reports the virtualized CUDA memory view after
+successful `cuMemGetInfo_v2` or `cudaMemGetInfo` calls, including visible total,
+used, and free bytes.
 
 ## Test design
 

@@ -10,6 +10,9 @@
 #ifdef cuGetProcAddress
 #undef cuGetProcAddress
 #endif
+#ifdef cuLaunchKernel
+#undef cuLaunchKernel
+#endif
 #ifdef cuCtxDestroy
 #undef cuCtxDestroy
 #endif
@@ -40,9 +43,24 @@
 #ifdef cudaMallocFromPoolAsync
 #undef cudaMallocFromPoolAsync
 #endif
+#ifdef cudaLaunchKernel
+#undef cudaLaunchKernel
+#endif
 
 extern "C" CUresult CUDAAPI cuMemAlloc_v2(CUdeviceptr* device_pointer, std::size_t memory_bytes);
 extern "C" CUresult CUDAAPI cuInit(unsigned int flags);
+extern "C" CUresult CUDAAPI cuLaunchKernel(CUfunction function, unsigned int grid_dim_x,
+                                           unsigned int grid_dim_y, unsigned int grid_dim_z,
+                                           unsigned int block_dim_x, unsigned int block_dim_y,
+                                           unsigned int block_dim_z,
+                                           unsigned int shared_memory_bytes, CUstream stream,
+                                           void** kernel_parameters, void** extra);
+extern "C" CUresult CUDAAPI cuLaunchKernel_ptsz(CUfunction function, unsigned int grid_dim_x,
+                                                unsigned int grid_dim_y, unsigned int grid_dim_z,
+                                                unsigned int block_dim_x, unsigned int block_dim_y,
+                                                unsigned int block_dim_z,
+                                                unsigned int shared_memory_bytes, CUstream stream,
+                                                void** kernel_parameters, void** extra);
 extern "C" CUresult CUDAAPI cuMemAllocManaged(CUdeviceptr* device_pointer, std::size_t memory_bytes,
                                               unsigned int flags);
 extern "C" CUresult CUDAAPI cuMemAllocPitch_v2(CUdeviceptr* device_pointer, std::size_t* pitch,
@@ -153,6 +171,25 @@ extern "C" CUresult CUDAAPI cuGetProcAddress_v2(const char* symbol, void** funct
                                                 int cuda_version, cuuint64_t flags,
                                                 CUdriverProcAddressQueryResult* symbol_status);
 extern "C" cudaError_t CUDARTAPI cudaMalloc(void** device_pointer, std::size_t memory_bytes);
+extern "C" cudaError_t CUDARTAPI cudaLaunchKernel(const void* function, dim3 grid_dim,
+                                                  dim3 block_dim, void** arguments,
+                                                  std::size_t shared_memory_bytes,
+                                                  cudaStream_t stream);
+extern "C" cudaError_t CUDARTAPI cudaLaunchKernel_ptsz(const void* function, dim3 grid_dim,
+                                                       dim3 block_dim, void** arguments,
+                                                       std::size_t shared_memory_bytes,
+                                                       cudaStream_t stream);
+// NOLINTBEGIN(bugprone-reserved-identifier, readability-identifier-naming): preserve CUDA compiler
+// ABI names.
+extern "C" cudaError_t CUDARTAPI __cudaLaunchKernel(cudaKernel_t kernel, dim3 grid_dim,
+                                                    dim3 block_dim, void** arguments,
+                                                    std::size_t shared_memory_bytes,
+                                                    cudaStream_t stream);
+extern "C" cudaError_t CUDARTAPI __cudaLaunchKernel_ptsz(cudaKernel_t kernel, dim3 grid_dim,
+                                                         dim3 block_dim, void** arguments,
+                                                         std::size_t shared_memory_bytes,
+                                                         cudaStream_t stream);
+// NOLINTEND(bugprone-reserved-identifier, readability-identifier-naming)
 extern "C" cudaError_t CUDARTAPI cudaMallocAsync(void** device_pointer, std::size_t memory_bytes,
                                                  cudaStream_t stream);
 extern "C" cudaError_t CUDARTAPI cudaMallocAsync_ptsz(void** device_pointer,
@@ -233,8 +270,10 @@ struct InterceptorSymbol {
     void* wrapper;
 };
 
-const std::array<InterceptorSymbol, 110> kInterceptorSymbols{{
+const std::array<InterceptorSymbol, 116> kInterceptorSymbols{{
     {"cuInit", reinterpret_cast<void*>(&cuInit)},
+    {"cuLaunchKernel", reinterpret_cast<void*>(&cuLaunchKernel)},
+    {"cuLaunchKernel_ptsz", reinterpret_cast<void*>(&cuLaunchKernel_ptsz)},
     {"cuMemAlloc", reinterpret_cast<void*>(&cuMemAlloc_v2)},
     {"cuMemAlloc_v2", reinterpret_cast<void*>(&cuMemAlloc_v2)},
     {"cuMemAllocManaged", reinterpret_cast<void*>(&cuMemAllocManaged)},
@@ -305,6 +344,10 @@ const std::array<InterceptorSymbol, 110> kInterceptorSymbols{{
     {"cuGetProcAddress", reinterpret_cast<void*>(&cuGetProcAddress)},
     {"cuGetProcAddress_v2", reinterpret_cast<void*>(&cuGetProcAddress_v2)},
     {"cudaMalloc", reinterpret_cast<void*>(&cudaMalloc)},
+    {"cudaLaunchKernel", reinterpret_cast<void*>(&cudaLaunchKernel)},
+    {"cudaLaunchKernel_ptsz", reinterpret_cast<void*>(&cudaLaunchKernel_ptsz)},
+    {"__cudaLaunchKernel", reinterpret_cast<void*>(&__cudaLaunchKernel)},
+    {"__cudaLaunchKernel_ptsz", reinterpret_cast<void*>(&__cudaLaunchKernel_ptsz)},
     {"cudaMallocAsync", reinterpret_cast<void*>(&cudaMallocAsync)},
     {"cudaMallocAsync_ptsz", reinterpret_cast<void*>(&cudaMallocAsync_ptsz)},
     {"cudaMallocFromPoolAsync", reinterpret_cast<void*>(&cudaMallocFromPoolAsync)},

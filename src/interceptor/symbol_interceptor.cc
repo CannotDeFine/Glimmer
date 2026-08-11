@@ -97,7 +97,7 @@ namespace {
         return false;
     }
     const std::string_view symbol{name};
-    return symbol.starts_with("cuda");
+    return symbol.starts_with("cuda") || symbol.starts_with("__cudaLaunchKernel");
 }
 
 [[nodiscard]] bool is_nvml_symbol_name(const char* name) noexcept {

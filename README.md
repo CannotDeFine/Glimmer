@@ -89,6 +89,28 @@ cmake --build --preset cuda-gpu
 ctest --preset cuda-gpu --output-on-failure
 ```
 
+The GPU preset includes both an embedded Driver-PTX workload and a Runtime
+kernel compiled with `nvcc`. To run only the end-to-end kernel checks:
+
+```sh
+ctest --preset cuda-gpu -R 'glimmer_cuda_interceptor_(kernel_gpu_test|runtime_kernel_gpu_test)' --output-on-failure
+```
+
+To verify a real cross-process shared quota, run:
+
+```sh
+ctest --preset cuda-gpu -R glimmer_cuda_interceptor_runtime_shared_quota_gpu_test --output-on-failure
+```
+
+For structured launch observations, enable tracing in observe mode:
+
+```sh
+env GLIMMER_MEMORY_LIMIT_BYTES=8388608 GLIMMER_SCHEDULER_MODE=observe GLIMMER_TRACE_KERNEL_LAUNCHES=1 LD_PRELOAD="$PWD/build/cuda-gpu/lib/libglimmer_cuda_interceptor.so" "$PWD/build/cuda-gpu/src/interceptor/glimmer_cuda_interceptor_runtime_kernel_gpu_test"
+```
+
+Add `GLIMMER_TRACE_MEMORY_INFO=1` to also print the virtualized total, used,
+and free memory after each successful memory-information query.
+
 The root `compile_commands.json` link follows the most recently built preset.
 Use `cuda-lint` last when editor diagnostics must include CUDA interceptor files
 and Toolkit include paths.

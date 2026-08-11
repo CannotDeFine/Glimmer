@@ -14,7 +14,7 @@ distinguishes the current bootstrap from the planned runtime architecture.
 | `src/` | Contains the `glimmer` executable entry point. It currently initializes the process and emits a startup log. |
 | `3rdparty/` | Contains pinned source dependencies. It currently contains `spdlog`. |
 | `scripts/` | Provides convenience commands for local development. |
-| `tests/` | Will contain project tests. CTest currently verifies that the executable starts. |
+| `tests/` | Contains core, simulated-backend, control, interceptor, and optional CUDA GPU tests. CTest verifies startup and module behavior. |
 | `docs/` | Defines engineering rules, architecture, dependencies, tests, and decisions. |
 
 ## Planned runtime modules
@@ -35,9 +35,10 @@ concrete responsibility and a testable interface.
 
 | Module | Location | Current responsibility |
 | --- | --- | --- |
-| `core` | `include/glimmer/core/`, `src/core/` | Provides a thread-safe in-process quota ledger with explicit reservation, commit, cancellation, and release transitions. It has no CUDA, dynamic-linker, transport, or process-global dependencies. |
+| `core` | `include/glimmer/core/`, `src/core/` | Provides the thread-safe quota ledger and task-boundary scheduler with explicit admission, weighted tenant queues, dispatch, completion, cancellation, and failure transitions. It has no CUDA, dynamic-linker, transport, or process-global dependencies. |
+| `backend` | `include/glimmer/backend/`, `src/backend/` | Defines the internal task execution contract and provides a deterministic simulated backend. It does not own tenant fairness, quota policy, or CUDA interception. |
 | `control` | `include/glimmer/control/`, `src/control/` | Defines the quota-store contract, adapts process-local quota requests to `core`, and implements the Linux shared-memory tenant accounting store. It computes tenant-visible memory information and has no CUDA or dynamic-linker dependencies. |
-| `interceptor` | `src/interceptor/` and `src/interceptor/internal/` | Provides ABI-compatible wrappers for covered CUDA Driver, PTDS stream-ordered Driver, Runtime, and memory-pool APIs, routes supported symbol lookups, and owns process-local allocation metadata while using `control` for quota decisions. The `internal/` headers are private implementation interfaces and are not public project headers. |
+| `interceptor` | `src/interceptor/` and `src/interceptor/internal/` | Provides ABI-compatible wrappers for covered CUDA Driver, PTDS stream-ordered Driver, CUDA kernel-launch, Runtime, and memory-pool APIs, routes supported symbol lookups, and owns process-local allocation metadata while using `control` for quota decisions. Kernel launches are forwarded unchanged; `GLIMMER_SCHEDULER_MODE=observe` emits a sampled boundary diagnostic. The `internal/` headers are private implementation interfaces and are not public project headers. |
 
 The interceptor is split into focused implementation units:
 
@@ -45,14 +46,14 @@ The interceptor is split into focused implementation units:
 | --- | --- |
 | `driver_api_interceptor.cc` | CUDA Driver admission, quota accounting, context/stream completion, and symbol-resolution policy. |
 | `driver_api_wrappers.cc` | Exported C/CUDA ABI entry points. These wrappers only contain boundary exception handling and delegate to the interceptor implementation. |
-| `runtime_api_interceptor.cc` | CUDA Runtime symbol resolution, Runtime-call reentrancy, independent Runtime async/pool accounting entry points, and memory-pool import policy. |
-| `driver_dispatch.cc` | Dynamic loading and guarded invocation of real CUDA Driver functions, including PTDS variants. |
+| `runtime_api_interceptor.cc` | CUDA Runtime symbol resolution, Runtime-call reentrancy, compiler-generated and public kernel-launch forwarding, independent Runtime async/pool accounting entry points, and memory-pool import policy. |
+| `driver_dispatch.cc` | Dynamic loading and guarded invocation of real CUDA Driver functions, including PTDS variants and kernel launch entry points. |
 | `nvml_dispatch.cc` | Dynamic loading and guarded invocation of the real NVML library and its optional v1/v2 entry points. |
 | `nvml_api_wrappers.cc` | Exported NVML ABI entry points that route to the interceptor's NVML presentation policy. |
 | `symbol_interceptor.cc` | `dlsym` interception, caller classification, and safe delegation to the real loader. |
 | `symbol_registry.cc` | The single registry of exported aliases used by `dlsym` and `cuGetProcAddress`. |
 | `internal/allocation_registry.cc` | Process-local allocation metadata, release state, and deferred stream completion. |
-| `internal/diagnostics.cc` | Allocation-free diagnostics for loader and accounting failure paths. |
+| `internal/diagnostics.cc` | Allocation-free diagnostics for loader and accounting failure paths, plus opt-in structured kernel-launch and virtualized memory-view observations. |
 
 ## Dependency direction
 

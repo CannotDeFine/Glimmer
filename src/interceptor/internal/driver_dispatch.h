@@ -8,6 +8,12 @@ namespace glimmer::interceptor {
 
 using MemAllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes);
 using InitFunction = CUresult (*)(unsigned int flags);
+using LaunchKernelFunction = CUresult (*)(CUfunction function, unsigned int grid_dim_x,
+                                          unsigned int grid_dim_y, unsigned int grid_dim_z,
+                                          unsigned int block_dim_x, unsigned int block_dim_y,
+                                          unsigned int block_dim_z,
+                                          unsigned int shared_memory_bytes, CUstream stream,
+                                          void** kernel_parameters, void** extra);
 using MemAllocManagedFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes,
                                              unsigned int flags);
 using MemAllocPitchFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t* pitch,
@@ -106,6 +112,8 @@ using GetProcAddressV2Function = CUresult (*)(const char* symbol, void** functio
 
 struct DriverFunctionTable {
     InitFunction init = nullptr;
+    LaunchKernelFunction launch_kernel = nullptr;
+    LaunchKernelFunction launch_kernel_ptsz = nullptr;
     MemAllocFunction mem_alloc = nullptr;
     MemAllocManagedFunction mem_alloc_managed = nullptr;
     MemAllocPitchFunction mem_alloc_pitch = nullptr;
@@ -183,6 +191,18 @@ class DriverDispatch {
 
     [[nodiscard]] CUresult mem_alloc(CUdeviceptr* device_pointer, std::size_t memory_bytes) const;
     [[nodiscard]] CUresult init(unsigned int flags) const;
+    [[nodiscard]] CUresult launch_kernel(CUfunction function, unsigned int grid_dim_x,
+                                         unsigned int grid_dim_y, unsigned int grid_dim_z,
+                                         unsigned int block_dim_x, unsigned int block_dim_y,
+                                         unsigned int block_dim_z, unsigned int shared_memory_bytes,
+                                         CUstream stream, void** kernel_parameters,
+                                         void** extra) const;
+    [[nodiscard]] CUresult launch_kernel_ptsz(CUfunction function, unsigned int grid_dim_x,
+                                              unsigned int grid_dim_y, unsigned int grid_dim_z,
+                                              unsigned int block_dim_x, unsigned int block_dim_y,
+                                              unsigned int block_dim_z,
+                                              unsigned int shared_memory_bytes, CUstream stream,
+                                              void** kernel_parameters, void** extra) const;
     [[nodiscard]] CUresult mem_alloc_managed(CUdeviceptr* device_pointer, std::size_t memory_bytes,
                                              unsigned int flags) const;
     [[nodiscard]] CUresult mem_alloc_pitch(CUdeviceptr* device_pointer, std::size_t* pitch,
@@ -294,6 +314,8 @@ class DriverDispatch {
 
     [[nodiscard]] bool has_get_proc_address() const;
     [[nodiscard]] bool has_get_proc_address_v2() const;
+    [[nodiscard]] bool has_launch_kernel() const;
+    [[nodiscard]] bool has_launch_kernel_ptsz() const;
     [[nodiscard]] bool has_mem_alloc_managed() const;
     [[nodiscard]] bool has_mem_alloc_pitch() const;
     [[nodiscard]] bool has_mem_alloc_async() const;
@@ -350,6 +372,8 @@ class DriverDispatch {
 
     void* library_handle_ = nullptr;
     InitFunction init_ = nullptr;
+    LaunchKernelFunction launch_kernel_ = nullptr;
+    LaunchKernelFunction launch_kernel_ptsz_ = nullptr;
     MemAllocFunction mem_alloc_ = nullptr;
     MemAllocManagedFunction mem_alloc_managed_ = nullptr;
     MemAllocPitchFunction mem_alloc_pitch_ = nullptr;

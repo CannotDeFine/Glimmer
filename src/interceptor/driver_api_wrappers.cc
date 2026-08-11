@@ -9,6 +9,9 @@
 #ifdef cuGetProcAddress
 #undef cuGetProcAddress
 #endif
+#ifdef cuLaunchKernel
+#undef cuLaunchKernel
+#endif
 #ifdef cuDeviceTotalMem
 #undef cuDeviceTotalMem
 #endif
@@ -107,6 +110,36 @@ extern "C" CUresult CUDAAPI cuMemAlloc(CUdeviceptr* device_pointer, std::size_t 
 
 extern "C" CUresult CUDAAPI cuInit(unsigned int flags) {
     return guard_cuda_boundary([flags] { return glimmer::interceptor::intercept_init(flags); });
+}
+
+extern "C" CUresult CUDAAPI cuLaunchKernel(CUfunction function, unsigned int grid_dim_x,
+                                           unsigned int grid_dim_y, unsigned int grid_dim_z,
+                                           unsigned int block_dim_x, unsigned int block_dim_y,
+                                           unsigned int block_dim_z,
+                                           unsigned int shared_memory_bytes, CUstream stream,
+                                           void** kernel_parameters, void** extra) {
+    return guard_cuda_boundary([function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x,
+                                block_dim_y, block_dim_z, shared_memory_bytes, stream,
+                                kernel_parameters, extra] {
+        return glimmer::interceptor::intercept_launch_kernel(
+            function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y, block_dim_z,
+            shared_memory_bytes, stream, kernel_parameters, extra, false);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuLaunchKernel_ptsz(CUfunction function, unsigned int grid_dim_x,
+                                                unsigned int grid_dim_y, unsigned int grid_dim_z,
+                                                unsigned int block_dim_x, unsigned int block_dim_y,
+                                                unsigned int block_dim_z,
+                                                unsigned int shared_memory_bytes, CUstream stream,
+                                                void** kernel_parameters, void** extra) {
+    return guard_cuda_boundary([function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x,
+                                block_dim_y, block_dim_z, shared_memory_bytes, stream,
+                                kernel_parameters, extra] {
+        return glimmer::interceptor::intercept_launch_kernel(
+            function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y, block_dim_z,
+            shared_memory_bytes, stream, kernel_parameters, extra, true);
+    });
 }
 
 extern "C" CUresult CUDAAPI cuMemAllocManaged(CUdeviceptr* device_pointer, std::size_t memory_bytes,

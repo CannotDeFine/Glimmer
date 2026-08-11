@@ -32,6 +32,12 @@ constexpr std::size_t kRejectedAllocationBytes = 2048;
 constexpr std::size_t kForcedAllocationFailureBytes = 1536;
 
 using InitFunction = CUresult (*)(unsigned int flags);
+using LaunchKernelFunction = CUresult (*)(CUfunction function, unsigned int grid_dim_x,
+                                          unsigned int grid_dim_y, unsigned int grid_dim_z,
+                                          unsigned int block_dim_x, unsigned int block_dim_y,
+                                          unsigned int block_dim_z,
+                                          unsigned int shared_memory_bytes, CUstream stream,
+                                          void** kernel_parameters, void** extra);
 using AllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes);
 using AsyncAllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes,
                                         CUstream stream);
@@ -120,6 +126,14 @@ using GetProcAddressV2Function = CUresult (*)(const char* symbol, void** functio
 using RuntimeMallocFunction = cudaError_t (*)(void** device_pointer, std::size_t memory_bytes);
 using RuntimeMallocAsyncFunction = cudaError_t (*)(void** device_pointer, std::size_t memory_bytes,
                                                    cudaStream_t stream);
+using RuntimeLaunchKernelFunction = cudaError_t (*)(const void* function, dim3 grid_dim,
+                                                    dim3 block_dim, void** arguments,
+                                                    std::size_t shared_memory_bytes,
+                                                    cudaStream_t stream);
+using RuntimeInternalLaunchKernelFunction = cudaError_t (*)(cudaKernel_t kernel, dim3 grid_dim,
+                                                            dim3 block_dim, void** arguments,
+                                                            std::size_t shared_memory_bytes,
+                                                            cudaStream_t stream);
 using RuntimeMallocFromPoolAsyncFunction = cudaError_t (*)(void** device_pointer,
                                                            std::size_t memory_bytes,
                                                            cudaMemPool_t pool, cudaStream_t stream);
@@ -401,6 +415,10 @@ int main() {
         }
     }
     const InitFunction init = resolve_default<InitFunction>("cuInit");
+    const LaunchKernelFunction launch_kernel =
+        resolve_default<LaunchKernelFunction>("cuLaunchKernel");
+    const LaunchKernelFunction launch_kernel_ptsz =
+        resolve_default<LaunchKernelFunction>("cuLaunchKernel_ptsz");
     const AllocFunction allocate = resolve_default<AllocFunction>("cuMemAlloc_v2");
     const FreeFunction release = resolve_default<FreeFunction>("cuMemFree_v2");
     const AsyncAllocFunction async_allocate =
@@ -506,7 +524,8 @@ int main() {
     const NvmlDeviceGetMemoryInfoV2Function nvml_get_memory_info_v2 =
         resolve_default<NvmlDeviceGetMemoryInfoV2Function>("nvmlDeviceGetMemoryInfo_v2");
     all_passed &= expect(
-        init != nullptr && allocate != nullptr && release != nullptr && async_allocate != nullptr &&
+        init != nullptr && launch_kernel != nullptr && launch_kernel_ptsz != nullptr &&
+            allocate != nullptr && release != nullptr && async_allocate != nullptr &&
             async_allocate_ptsz != nullptr && pool_async_allocate != nullptr &&
             pool_async_allocate_ptsz != nullptr && vmm_create != nullptr &&
             vmm_release != nullptr && address_reserve != nullptr && address_free != nullptr &&
@@ -537,6 +556,12 @@ int main() {
     }
 
     all_passed &= expect(init(0) == CUDA_SUCCESS, "fake cuInit failed");
+    all_passed &= expect(
+        launch_kernel(nullptr, 1, 1, 1, 1, 1, 1, 0, nullptr, nullptr, nullptr) == CUDA_SUCCESS,
+        "fake cuLaunchKernel forwarding failed");
+    all_passed &= expect(
+        launch_kernel_ptsz(nullptr, 1, 1, 1, 1, 1, 1, 0, nullptr, nullptr, nullptr) == CUDA_SUCCESS,
+        "fake cuLaunchKernel_ptsz forwarding failed");
 
     std::size_t total_bytes = 0;
     all_passed &= expect(allocate(nullptr, 1) == CUDA_ERROR_INVALID_VALUE,
@@ -814,6 +839,17 @@ int main() {
     all_passed &= expect(runtime_handle != nullptr, "fake CUDA runtime could not be loaded");
     const RuntimeMallocFunction runtime_allocate =
         resolve_default<RuntimeMallocFunction>("cudaMalloc");
+    const RuntimeLaunchKernelFunction runtime_launch_kernel =
+        resolve_default<RuntimeLaunchKernelFunction>("cudaLaunchKernel");
+    const RuntimeLaunchKernelFunction runtime_launch_kernel_ptsz =
+        resolve_default<RuntimeLaunchKernelFunction>("cudaLaunchKernel_ptsz");
+    // NOLINTBEGIN(bugprone-reserved-identifier, readability-identifier-naming): preserve CUDA
+    // compiler ABI names.
+    const RuntimeInternalLaunchKernelFunction runtime_internal_launch_kernel =
+        resolve_default<RuntimeInternalLaunchKernelFunction>("__cudaLaunchKernel");
+    const RuntimeInternalLaunchKernelFunction runtime_internal_launch_kernel_ptsz =
+        resolve_default<RuntimeInternalLaunchKernelFunction>("__cudaLaunchKernel_ptsz");
+    // NOLINTEND(bugprone-reserved-identifier, readability-identifier-naming)
     const RuntimeMallocAsyncFunction runtime_async_allocate =
         resolve_default<RuntimeMallocAsyncFunction>("cudaMallocAsync");
     const RuntimeMallocAsyncFunction runtime_async_allocate_ptsz =
@@ -880,6 +916,9 @@ int main() {
     void* runtime_pointer = nullptr;
     all_passed &= expect(
         runtime_allocate != nullptr && runtime_async_allocate != nullptr &&
+            runtime_launch_kernel != nullptr && runtime_launch_kernel_ptsz != nullptr &&
+            runtime_internal_launch_kernel != nullptr &&
+            runtime_internal_launch_kernel_ptsz != nullptr &&
             runtime_async_allocate_ptsz != nullptr && runtime_release != nullptr &&
             runtime_pool_async_allocate != nullptr && runtime_pool_async_allocate_ptsz != nullptr &&
             runtime_async_release != nullptr && runtime_async_release_ptsz != nullptr &&
@@ -900,6 +939,13 @@ int main() {
         all_passed &=
             expect(dlsym(runtime_handle, "cudaMalloc") == reinterpret_cast<void*>(runtime_allocate),
                    "explicit CUDA Runtime handle did not return the interceptor wrapper");
+        all_passed &= expect(dlsym(runtime_handle, "cudaLaunchKernel") ==
+                                 reinterpret_cast<void*>(runtime_launch_kernel),
+                             "explicit CUDA Runtime handle did not return the launch wrapper");
+        all_passed &=
+            expect(dlsym(runtime_handle, "__cudaLaunchKernel_ptsz") ==
+                       reinterpret_cast<void*>(runtime_internal_launch_kernel_ptsz),
+                   "explicit CUDA Runtime handle did not return the compiler launch wrapper");
         all_passed &=
             expect(dlsym(runtime_handle, "cudaMallocAsync_ptsz") ==
                        reinterpret_cast<void*>(runtime_async_allocate_ptsz),
@@ -907,6 +953,18 @@ int main() {
     }
     all_passed &= expect(runtime_allocate(&runtime_pointer, kRuntimeAllocationBytes) == cudaSuccess,
                          "runtime allocation was rejected");
+    all_passed &= expect(runtime_launch_kernel(nullptr, dim3{1, 1, 1}, dim3{1, 1, 1}, nullptr, 0,
+                                               nullptr) == cudaSuccess,
+                         "Runtime cudaLaunchKernel forwarding failed");
+    all_passed &= expect(runtime_launch_kernel_ptsz(nullptr, dim3{1, 1, 1}, dim3{1, 1, 1}, nullptr,
+                                                    0, nullptr) == cudaSuccess,
+                         "Runtime cudaLaunchKernel_ptsz forwarding failed");
+    all_passed &= expect(runtime_internal_launch_kernel(nullptr, dim3{1, 1, 1}, dim3{1, 1, 1},
+                                                        nullptr, 0, nullptr) == cudaSuccess,
+                         "Runtime __cudaLaunchKernel forwarding failed");
+    all_passed &= expect(runtime_internal_launch_kernel_ptsz(nullptr, dim3{1, 1, 1}, dim3{1, 1, 1},
+                                                             nullptr, 0, nullptr) == cudaSuccess,
+                         "Runtime __cudaLaunchKernel_ptsz forwarding failed");
     all_passed &= expect(runtime_get_info(&free_bytes, &total_bytes) == cudaSuccess &&
                              free_bytes == kQuotaBytes - kRuntimeAllocationBytes,
                          "runtime allocation was double-accounted or not accounted");
@@ -1223,6 +1281,13 @@ int main() {
                              queried_symbol == reinterpret_cast<void*>(async_allocate_ptsz) &&
                              query_status == CU_GET_PROC_ADDRESS_SUCCESS,
                          "v2 cuGetProcAddress did not return the PTDS async wrapper");
+    queried_symbol = nullptr;
+    all_passed &=
+        expect(legacy_get_proc != nullptr &&
+                   legacy_get_proc("cuLaunchKernel", &queried_symbol, CUDA_VERSION,
+                                   CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM) == CUDA_SUCCESS &&
+                   queried_symbol == reinterpret_cast<void*>(launch_kernel_ptsz),
+               "cuGetProcAddress did not return the PTDS kernel-launch wrapper");
     queried_symbol = nullptr;
     query_status = {};
     all_passed &= expect(get_proc_v2 != nullptr &&

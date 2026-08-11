@@ -4,6 +4,7 @@
 
 #include "glimmer/control/process_memory_quota.h"
 #include "glimmer/control/shared_memory_quota.h"
+#include "glimmer/core/scheduler_mode.h"
 
 #include "internal/allocation_registry.h"
 #include "internal/diagnostics.h"
@@ -21,6 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -57,6 +59,11 @@ struct InterceptorState {
     DriverDispatch driver;
     NvmlDispatch nvml;
     QuotaMode quota_mode = QuotaMode::kDisabled;
+    glimmer::core::SchedulerMode scheduler_mode = glimmer::core::SchedulerMode::kOff;
+    std::atomic<bool> launch_observation_reported = false;
+    std::atomic<std::uint64_t> launch_observation_count = 0;
+    bool trace_kernel_launches = false;
+    bool trace_memory_info = false;
     std::unique_ptr<QuotaStore> quota;
     glimmer::interceptor::AllocationRegistry allocations;
     bool is_driver_ready = false;
@@ -115,6 +122,38 @@ class ProcAddressV2Scope {
     return static_cast<glimmer::control::DeviceId>(device_id);
 }
 
+[[nodiscard]] std::optional<glimmer::core::SchedulerMode> read_scheduler_mode() {
+    const char* value = std::getenv("GLIMMER_SCHEDULER_MODE");
+    if (value == nullptr) {
+        return glimmer::core::SchedulerMode::kOff;
+    }
+    return glimmer::core::parse_scheduler_mode(value);
+}
+
+[[nodiscard]] bool read_trace_setting(const char* variable_name) noexcept {
+    const char* value = std::getenv(variable_name);
+    return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+}
+
+[[nodiscard]] bool read_kernel_launch_trace_setting() noexcept {
+    return read_trace_setting("GLIMMER_TRACE_KERNEL_LAUNCHES");
+}
+
+[[nodiscard]] bool read_memory_info_trace_setting() noexcept {
+    return read_trace_setting("GLIMMER_TRACE_MEMORY_INFO");
+}
+
+std::uint64_t next_launch_observation_count(std::atomic<std::uint64_t>& count) noexcept {
+    std::uint64_t current = count.load(std::memory_order_relaxed);
+    while (current != std::numeric_limits<std::uint64_t>::max()) {
+        if (count.compare_exchange_weak(current, current + 1, std::memory_order_relaxed,
+                                        std::memory_order_relaxed)) {
+            return current + 1;
+        }
+    }
+    return current;
+}
+
 [[nodiscard]] std::optional<MemoryBytes> checked_multiply(MemoryBytes left, MemoryBytes right) {
     if (right != 0 && left > std::numeric_limits<MemoryBytes>::max() / right) {
         return std::nullopt;
@@ -123,6 +162,21 @@ class ProcAddressV2Scope {
 }
 
 void initialize_state(InterceptorState& state) noexcept {
+    state.trace_kernel_launches = read_kernel_launch_trace_setting();
+    state.trace_memory_info = read_memory_info_trace_setting();
+    const std::optional<glimmer::core::SchedulerMode> configured_scheduler_mode =
+        read_scheduler_mode();
+    if (!configured_scheduler_mode.has_value()) {
+        glimmer::interceptor::report_diagnostic(
+            "[glimmer] GLIMMER_SCHEDULER_MODE is invalid; scheduler integration disabled\n");
+    } else {
+        state.scheduler_mode = *configured_scheduler_mode;
+        if (state.scheduler_mode == glimmer::core::SchedulerMode::kEnforce) {
+            glimmer::interceptor::report_diagnostic(
+                "[glimmer] scheduler enforce mode is not implemented; forwarding CUDA calls\n");
+        }
+    }
+
     state.is_driver_ready = state.driver.initialize();
     if (!state.is_driver_ready) {
         glimmer::interceptor::report_diagnostic(
@@ -202,6 +256,14 @@ void ensure_state_initialized(InterceptorState& state) {
 [[nodiscard]] bool ensure_initialized(InterceptorState& state) {
     ensure_state_initialized(state);
     return state.is_driver_ready;
+}
+
+[[nodiscard]] void* find_proc_address_interceptor(const char* symbol, cuuint64_t flags) noexcept {
+    if (std::strcmp(symbol, "cuLaunchKernel") == 0 &&
+        (flags & CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM) != 0) {
+        return glimmer::interceptor::find_interceptor_symbol("cuLaunchKernel_ptsz");
+    }
+    return glimmer::interceptor::find_interceptor_symbol(symbol);
 }
 
 struct ContextIdentity {
@@ -509,6 +571,8 @@ cudaError_t intercept_runtime_mem_get_info(std::size_t* free_bytes, std::size_t*
     }
     *total_bytes = static_cast<std::size_t>(memory_info.total_bytes);
     *free_bytes = static_cast<std::size_t>(memory_info.free_bytes);
+    report_memory_info_observed("cudaMemGetInfo", device, static_cast<std::uint64_t>(*total_bytes),
+                                static_cast<std::uint64_t>(*free_bytes));
     return cudaSuccess;
 }
 
@@ -2137,6 +2201,94 @@ CUresult intercept_init(unsigned int flags) {
     return state.driver.init(flags);
 }
 
+void report_kernel_launch_observed(const KernelLaunchObservation& observation) noexcept {
+    try {
+        InterceptorState& state = get_state();
+        ensure_state_initialized(state);
+        const bool observe_first_launch =
+            state.scheduler_mode == glimmer::core::SchedulerMode::kObserve;
+        if (!state.trace_kernel_launches && !observe_first_launch) {
+            return;
+        }
+        const std::uint64_t launch_count =
+            next_launch_observation_count(state.launch_observation_count);
+        if (state.trace_kernel_launches || !state.launch_observation_reported.exchange(true)) {
+            glimmer::interceptor::report_kernel_launch_diagnostic(observation, launch_count);
+        }
+    } catch (...) {
+        glimmer::interceptor::report_diagnostic(
+            "[glimmer] kernel launch observation initialization failed\n");
+    }
+}
+
+void report_memory_info_observed(const char* api_name, std::int32_t device,
+                                 std::uint64_t total_bytes, std::uint64_t free_bytes) noexcept {
+    try {
+        InterceptorState& state = get_state();
+        if (!state.trace_memory_info) {
+            return;
+        }
+        glimmer::interceptor::report_memory_info_diagnostic({
+            .api_name = api_name,
+            .device = device,
+            .total_bytes = total_bytes,
+            .free_bytes = free_bytes,
+        });
+    } catch (...) {
+        glimmer::interceptor::report_diagnostic("[glimmer] memory info observation failed\n");
+    }
+}
+
+CUresult intercept_launch_kernel(CUfunction function, unsigned int grid_dim_x,
+                                 unsigned int grid_dim_y, unsigned int grid_dim_z,
+                                 unsigned int block_dim_x, unsigned int block_dim_y,
+                                 unsigned int block_dim_z, unsigned int shared_memory_bytes,
+                                 CUstream stream, void** kernel_parameters, void** extra,
+                                 bool per_thread_default_stream) {
+    InterceptorState& state = get_state();
+    const auto invoke = [&state, function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x,
+                         block_dim_y, block_dim_z, shared_memory_bytes, stream, kernel_parameters,
+                         extra, per_thread_default_stream] {
+        return per_thread_default_stream
+                   ? state.driver.launch_kernel_ptsz(
+                         function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y,
+                         block_dim_z, shared_memory_bytes, stream, kernel_parameters, extra)
+                   : state.driver.launch_kernel(
+                         function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y,
+                         block_dim_z, shared_memory_bytes, stream, kernel_parameters, extra);
+    };
+
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return invoke();
+    }
+
+    if (!ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    const bool launch_available = per_thread_default_stream ? state.driver.has_launch_kernel_ptsz()
+                                                            : state.driver.has_launch_kernel();
+    if (!launch_available) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+
+    const CUresult launch_result = invoke();
+    if (launch_result == CUDA_SUCCESS) {
+        report_kernel_launch_observed({
+            .api_name = per_thread_default_stream ? "cuLaunchKernel_ptsz" : "cuLaunchKernel",
+            .grid_dim_x = grid_dim_x,
+            .grid_dim_y = grid_dim_y,
+            .grid_dim_z = grid_dim_z,
+            .block_dim_x = block_dim_x,
+            .block_dim_y = block_dim_y,
+            .block_dim_z = block_dim_z,
+            .shared_memory_bytes = shared_memory_bytes,
+            .stream = reinterpret_cast<const void*>(stream),
+        });
+    }
+    return launch_result;
+}
+
 CUresult intercept_mem_alloc(CUdeviceptr* device_pointer, std::size_t memory_bytes) {
     InterceptorState& state = get_state();
     return intercept_tracked_allocation(
@@ -2476,6 +2628,8 @@ CUresult intercept_mem_get_info(std::size_t* free_bytes, std::size_t* total_byte
     }
     *total_bytes = static_cast<std::size_t>(memory_info.total_bytes);
     *free_bytes = static_cast<std::size_t>(memory_info.free_bytes);
+    report_memory_info_observed("cuMemGetInfo_v2", device, static_cast<std::uint64_t>(*total_bytes),
+                                static_cast<std::uint64_t>(*free_bytes));
     return CUDA_SUCCESS;
 }
 
@@ -2542,7 +2696,7 @@ CUresult intercept_get_proc_address(const char* symbol, void** function_pointer,
         return result;
     }
 
-    if (void* intercepted_symbol = glimmer::interceptor::find_interceptor_symbol(symbol);
+    if (void* intercepted_symbol = find_proc_address_interceptor(symbol, flags);
         intercepted_symbol != nullptr) {
         *function_pointer = intercepted_symbol;
     }
@@ -2615,7 +2769,7 @@ CUresult intercept_get_proc_address_v2(const char* symbol, void** function_point
         return result;
     }
 
-    if (void* intercepted_symbol = glimmer::interceptor::find_interceptor_symbol(symbol);
+    if (void* intercepted_symbol = find_proc_address_interceptor(symbol, flags);
         intercepted_symbol != nullptr) {
         *function_pointer = intercepted_symbol;
     }

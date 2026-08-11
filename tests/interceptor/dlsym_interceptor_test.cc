@@ -35,6 +35,8 @@ bool is_not_from_interceptor(void* symbol) {
 int main() {
     const char* const intercepted_names[] = {
         "cuInit",
+        "cuLaunchKernel",
+        "cuLaunchKernel_ptsz",
         "cuMemAlloc",
         "cuMemAlloc_v2",
         "cuMemAllocManaged",
@@ -132,6 +134,10 @@ int main() {
     }
 
     const char* const runtime_names[] = {"cudaMalloc",
+                                         "cudaLaunchKernel",
+                                         "cudaLaunchKernel_ptsz",
+                                         "__cudaLaunchKernel",
+                                         "__cudaLaunchKernel_ptsz",
                                          "cudaMallocAsync",
                                          "cudaMallocAsync_ptsz",
                                          "cudaMallocFromPoolAsync",

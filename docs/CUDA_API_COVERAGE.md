@@ -69,6 +69,9 @@ Cross-process accounting requires `GLIMMER_QUOTA_MODE=shared`,
 `GLIMMER_QUOTA_DEVICE_ID` selects the initial device record. Shared state and
 its recovery guarantees are defined by
 [ADR 0005](decisions/0005-shared-quota-control-plane.md).
+The optional CUDA GPU preset includes a two-process Runtime test that verifies
+one shared tenant cannot exceed its combined quota and that the quota is
+restored after the holder releases its allocation.
 
 ## Symbol acquisition coverage
 
@@ -77,10 +80,11 @@ The interceptor must cover each supported path before claiming compatibility.
 
 | Path | Required behavior | Priority | Test |
 | --- | --- | --- | --- |
-| Direct dynamic import | Export ABI-compatible `cu*` wrapper symbols, including legacy, PTDS, allocation, stream identity, and query aliases, from the preload library. | M1/M2/M3 | A fixture directly calls versioned, PTDS, and legacy allocation/query symbols. |
-| `dlsym` | Return a supported wrapper when a CUDA Driver allocation, release, VMM handle, stream identity, or query symbol is requested. Delegate all other symbols to the real resolver. | M2/M3 (implemented) | A preload fixture resolves supported PTDS and VMM symbols and verifies delegation for an unsupported symbol. |
+| Direct dynamic import | Export ABI-compatible `cu*` wrapper symbols, including legacy, PTDS, allocation, kernel-launch, stream identity, and query aliases, from the preload library. | M1/M2/M3 | A fixture directly calls versioned, PTDS, legacy allocation/query, and kernel-launch symbols. |
+| `dlsym` | Return a supported wrapper when a CUDA Driver allocation, release, VMM handle, kernel launch, stream identity, or query symbol is requested. Delegate all other symbols to the real resolver. | M2/M3 (implemented) | A preload fixture resolves supported PTDS, kernel-launch, and VMM symbols and verifies delegation for an unsupported symbol. |
 | `cuGetProcAddress` and `cuGetProcAddress_v2` | Return a supported wrapper for requested CUDA Driver APIs and versions. Delegate unsupported requests unchanged. | M2 (implemented) | A CUDA integration test resolves and calls `cuMemGetInfo` through the versioned API and verifies an unsupported request. |
 | CUDA Runtime interception | Wrap synchronous and stream-ordered allocation/free APIs, including `cudaMallocFromPoolAsync`/`cudaMallocFromPoolAsync_ptsz`, completion boundaries, memory-pool lifecycle/query APIs, and memory-pool import/export APIs. Runtime calls use a reentrancy guard; allocation bytes are independently accounted through the shared registry, while imported pool handles/pointers are rejected when quota mode is enabled. | M2/M3 (implemented) | Fake Runtime and CUDA integration tests for synchronous, stream-ordered, PTDS, and memory-pool Runtime calls. |
+| CUDA kernel launch observation | Forward `cuLaunchKernel`, `cuLaunchKernel_ptsz`, `cudaLaunchKernel`, `cudaLaunchKernel_ptsz`, `__cudaLaunchKernel`, and `__cudaLaunchKernel_ptsz` with their exact ABIs and preserve the caller's launch arguments. In `observe` mode, emit one allocation-free boundary diagnostic after a successful launch; no queueing, delay, rejection, or kernel preemption is performed. | M4 partial | Dispatch, symbol-registry, and fake Runtime forwarding tests plus real GPU Driver-PTX and Runtime-compiled workloads that allocate memory, launch a kernel, synchronize, and verify the result through `LD_PRELOAD`. |
 
 `cuInit` is also wrapped as an initialization safety boundary. It does not
 make an accounting decision; it establishes the Driver-call guard so that
@@ -280,3 +284,22 @@ The VMM increment is complete only when all of the following are true:
    memory-pool handles/pointers are rejected in quota mode, delegated when
    quota mode is disabled, and covered by dedicated fake tests alongside NVML
    presentation.
+
+## Kernel launch observation increment
+
+The current launch increment proves transparent execution for a real CUDA
+Driver workload. `cuLaunchKernel` and its PTDS entry point are dynamically
+resolved, exported through the preload library, and forwarded without changing
+the launch configuration, argument storage, stream, or return code. The
+optional `GLIMMER_SCHEDULER_MODE=observe` setting reports the first successful
+launch through the interceptor's allocation-free diagnostic path. Set
+`GLIMMER_TRACE_KERNEL_LAUNCHES=1` to report every successful launch with its
+API, dimensions, shared-memory size, stream, and process-local sequence number.
+Set `GLIMMER_TRACE_MEMORY_INFO=1` to report the virtualized memory view returned
+by the CUDA memory-information APIs.
+`enforce`
+is intentionally not an admission queue: it currently forwards CUDA calls and
+reports that enforcement is not implemented. Cooperative and graph launch
+families remain separate follow-up coverage. The Runtime compiler-generated
+path is covered by the optional CUDA GPU test, while its public and `__cuda`
+ABI forwarding wrappers remain transparent and non-enforcing.

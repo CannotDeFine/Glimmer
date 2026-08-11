@@ -78,8 +78,10 @@ from a prototype into a shared-GPU scheduler.
   not log through a path that can invoke CUDA again or introduce recursive
   dynamic-linker calls.
 - The preload interceptor's loader and accounting-failure boundaries may use
-  its fixed-string `report_diagnostic` write path instead of `spdlog`. Keep
-  those messages rare, allocation-free, and free of CUDA or loader calls.
+  its fixed-string `report_diagnostic` write path instead of `spdlog`; its
+  opt-in kernel trace uses a fixed buffer for the same reason. Keep those
+  messages rare or explicitly enabled, allocation-free, and free of CUDA or
+  loader calls.
 - Use assertions only for programmer errors and internal invariants that must
   hold if the code is correct. Assertions must be side-effect free.
 - Do not use assertions for invalid user input, CUDA/NVML/POSIX failures,

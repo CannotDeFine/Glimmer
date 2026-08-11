@@ -35,6 +35,13 @@ CUresult CUDAAPI fake_init(unsigned int) {
     return CUDA_SUCCESS;
 }
 
+CUresult CUDAAPI fake_launch_kernel(CUfunction, unsigned int, unsigned int, unsigned int,
+                                    unsigned int, unsigned int, unsigned int, unsigned int,
+                                    CUstream, void**, void**) {
+    check_driver_guard();
+    return CUDA_SUCCESS;
+}
+
 CUresult CUDAAPI fake_mem_alloc(CUdeviceptr* device_pointer, std::size_t) {
     check_driver_guard();
     if (device_pointer == nullptr) {
@@ -449,6 +456,8 @@ CUresult CUDAAPI fake_get_proc_address_v2(const char*, void** function_pointer, 
 int main() {
     const glimmer::interceptor::DriverFunctionTable functions{
         .init = &fake_init,
+        .launch_kernel = &fake_launch_kernel,
+        .launch_kernel_ptsz = &fake_launch_kernel,
         .mem_alloc = &fake_mem_alloc,
         .mem_alloc_managed = &fake_mem_alloc_managed,
         .mem_alloc_pitch = &fake_mem_alloc_pitch,
@@ -513,6 +522,8 @@ int main() {
 
     all_passed &= expect(dispatch.has_get_proc_address(), "legacy resolver was not available");
     all_passed &= expect(dispatch.has_get_proc_address_v2(), "v2 resolver was not available");
+    all_passed &= expect(dispatch.has_launch_kernel(), "kernel launch was not available");
+    all_passed &= expect(dispatch.has_launch_kernel_ptsz(), "PTDS kernel launch was not available");
     all_passed &= expect(dispatch.has_mem_alloc_managed(), "managed allocator was not available");
     all_passed &= expect(dispatch.has_mem_alloc_pitch(), "pitched allocator was not available");
     all_passed &= expect(dispatch.has_mem_alloc_async(), "async allocator was not available");
@@ -625,6 +636,12 @@ int main() {
     CUcontext context{};
     CUdevice device{};
     all_passed &= expect(dispatch.init(0) == CUDA_SUCCESS, "fake cuInit failed");
+    all_passed &= expect(dispatch.launch_kernel(nullptr, 1, 1, 1, 1, 1, 1, 0, nullptr, nullptr,
+                                                nullptr) == CUDA_SUCCESS,
+                         "fake cuLaunchKernel failed");
+    all_passed &= expect(dispatch.launch_kernel_ptsz(nullptr, 1, 1, 1, 1, 1, 1, 0, nullptr, nullptr,
+                                                     nullptr) == CUDA_SUCCESS,
+                         "fake cuLaunchKernel_ptsz failed");
     all_passed &=
         expect(dispatch.mem_alloc(&device_pointer, 16) == CUDA_SUCCESS, "fake cuMemAlloc failed");
     all_passed &= expect(dispatch.mem_alloc_managed(&device_pointer, 16, 0) == CUDA_SUCCESS,

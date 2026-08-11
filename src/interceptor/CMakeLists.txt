@@ -188,6 +188,38 @@ if(BUILD_TESTING)
             "GLIMMER_MEMORY_LIMIT_BYTES=4096;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
     )
 
+    add_test(NAME glimmer_cuda_interceptor_observe_fake_driver_test
+        COMMAND glimmer_cuda_interceptor_fake_driver_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_observe_fake_driver_test PROPERTIES
+        ENVIRONMENT
+            "GLIMMER_MEMORY_LIMIT_BYTES=4096;GLIMMER_SCHEDULER_MODE=observe;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
+        PASS_REGULAR_EXPRESSION
+            "observed CUDA kernel launch #1 api=cuLaunchKernel grid="
+        FAIL_REGULAR_EXPRESSION
+            "observed CUDA kernel launch #2"
+    )
+
+    add_test(NAME glimmer_cuda_interceptor_trace_fake_driver_test
+        COMMAND glimmer_cuda_interceptor_fake_driver_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_trace_fake_driver_test PROPERTIES
+        ENVIRONMENT
+            "GLIMMER_MEMORY_LIMIT_BYTES=4096;GLIMMER_SCHEDULER_MODE=observe;GLIMMER_TRACE_KERNEL_LAUNCHES=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
+        PASS_REGULAR_EXPRESSION
+            "observed CUDA kernel launch #6 api=__cudaLaunchKernel_ptsz grid="
+    )
+
+    add_test(NAME glimmer_cuda_interceptor_trace_memory_fake_driver_test
+        COMMAND glimmer_cuda_interceptor_fake_driver_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_trace_memory_fake_driver_test PROPERTIES
+        ENVIRONMENT
+            "GLIMMER_MEMORY_LIMIT_BYTES=4096;GLIMMER_TRACE_MEMORY_INFO=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
+        PASS_REGULAR_EXPRESSION
+            "memory info api=cudaMemGetInfo device=0 total_bytes=4096 used_bytes=1024 free_bytes=3072"
+    )
+
     add_executable(glimmer_cuda_interceptor_nvml_passthrough_test
         "${PROJECT_SOURCE_DIR}/tests/interceptor/nvml_passthrough_test.cc"
     )
@@ -282,6 +314,18 @@ if(BUILD_TESTING)
 
     glimmer_enable_clang_tidy(glimmer_cuda_interceptor_gpu_test)
 
+    add_executable(glimmer_cuda_interceptor_kernel_gpu_test
+        "${PROJECT_SOURCE_DIR}/tests/interceptor/driver_kernel_gpu_test.cc"
+    )
+
+    target_link_libraries(glimmer_cuda_interceptor_kernel_gpu_test
+        PRIVATE
+            Glimmer::project_options
+            CUDA::cuda_driver
+    )
+
+    glimmer_enable_clang_tidy(glimmer_cuda_interceptor_kernel_gpu_test)
+
     add_executable(glimmer_cuda_interceptor_runtime_gpu_test
         "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_runtime_gpu_test.cc"
     )
@@ -316,12 +360,72 @@ if(BUILD_TESTING)
     glimmer_enable_clang_tidy(glimmer_cuda_interceptor_runtime_gpu_test)
 
     if(GLIMMER_ENABLE_CUDA_GPU_TESTS)
+        enable_language(CUDA)
+
+        add_executable(glimmer_cuda_interceptor_runtime_kernel_gpu_test
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/runtime_kernel_gpu_test.cu"
+        )
+
+        add_executable(glimmer_cuda_interceptor_runtime_shared_quota_gpu_test
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/runtime_shared_quota_gpu_test.cu"
+        )
+
+        target_compile_features(glimmer_cuda_interceptor_runtime_kernel_gpu_test
+            PRIVATE
+                cxx_std_20
+        )
+        target_compile_features(glimmer_cuda_interceptor_runtime_shared_quota_gpu_test
+            PRIVATE
+                cxx_std_20
+        )
+        target_link_libraries(glimmer_cuda_interceptor_runtime_kernel_gpu_test
+            PRIVATE
+                CUDA::cudart
+        )
+        target_link_libraries(glimmer_cuda_interceptor_runtime_shared_quota_gpu_test
+            PRIVATE
+                "$<LINK_ONLY:Glimmer::control>"
+                CUDA::cudart
+        )
+        target_include_directories(glimmer_cuda_interceptor_runtime_shared_quota_gpu_test
+            PRIVATE
+                "${PROJECT_SOURCE_DIR}/include"
+        )
+        target_compile_definitions(glimmer_cuda_interceptor_runtime_kernel_gpu_test
+            PRIVATE
+                CUDA_API_PER_THREAD_DEFAULT_STREAM
+        )
+        target_compile_definitions(glimmer_cuda_interceptor_runtime_shared_quota_gpu_test
+            PRIVATE
+                CUDA_API_PER_THREAD_DEFAULT_STREAM
+        )
+        set_target_properties(glimmer_cuda_interceptor_runtime_kernel_gpu_test PROPERTIES
+            CUDA_STANDARD 20
+            CUDA_STANDARD_REQUIRED ON
+        )
+        set_target_properties(glimmer_cuda_interceptor_runtime_shared_quota_gpu_test PROPERTIES
+            CUDA_STANDARD 20
+            CUDA_STANDARD_REQUIRED ON
+        )
+    endif()
+
+    if(GLIMMER_ENABLE_CUDA_GPU_TESTS)
         add_test(NAME glimmer_cuda_interceptor_gpu_test
             COMMAND glimmer_cuda_interceptor_gpu_test
         )
         set_tests_properties(glimmer_cuda_interceptor_gpu_test PROPERTIES
             ENVIRONMENT
                 "GLIMMER_MEMORY_LIMIT_BYTES=8388608;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>"
+            TIMEOUT 60
+        )
+
+        add_test(NAME glimmer_cuda_interceptor_kernel_gpu_test
+            COMMAND glimmer_cuda_interceptor_kernel_gpu_test
+        )
+        set_tests_properties(glimmer_cuda_interceptor_kernel_gpu_test PROPERTIES
+            ENVIRONMENT
+                "GLIMMER_MEMORY_LIMIT_BYTES=8388608;GLIMMER_SCHEDULER_MODE=observe;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>"
+            TIMEOUT 60
         )
 
         add_test(NAME glimmer_cuda_interceptor_runtime_gpu_test
@@ -330,6 +434,25 @@ if(BUILD_TESTING)
         set_tests_properties(glimmer_cuda_interceptor_runtime_gpu_test PROPERTIES
             ENVIRONMENT
                 "GLIMMER_MEMORY_LIMIT_BYTES=8388608;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>"
+            TIMEOUT 60
+        )
+
+        add_test(NAME glimmer_cuda_interceptor_runtime_kernel_gpu_test
+            COMMAND glimmer_cuda_interceptor_runtime_kernel_gpu_test
+        )
+        set_tests_properties(glimmer_cuda_interceptor_runtime_kernel_gpu_test PROPERTIES
+            ENVIRONMENT
+                "GLIMMER_MEMORY_LIMIT_BYTES=8388608;GLIMMER_SCHEDULER_MODE=observe;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>"
+            TIMEOUT 60
+        )
+
+        add_test(NAME glimmer_cuda_interceptor_runtime_shared_quota_gpu_test
+            COMMAND glimmer_cuda_interceptor_runtime_shared_quota_gpu_test
+        )
+        set_tests_properties(glimmer_cuda_interceptor_runtime_shared_quota_gpu_test PROPERTIES
+            ENVIRONMENT
+                "GLIMMER_QUOTA_MODE=shared;GLIMMER_MEMORY_LIMIT_BYTES=8388608;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>"
+            TIMEOUT 60
         )
 
         add_test(NAME glimmer_cuda_interceptor_nvml_gpu_test
@@ -338,6 +461,7 @@ if(BUILD_TESTING)
         set_tests_properties(glimmer_cuda_interceptor_nvml_gpu_test PROPERTIES
             ENVIRONMENT
                 "GLIMMER_MEMORY_LIMIT_BYTES=8388608;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>"
+            TIMEOUT 60
         )
     endif()
 endif()

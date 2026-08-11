@@ -9,19 +9,21 @@ option(GLIMMER_ENABLE_CLANG_TIDY "Enable clang-tidy during compilation" OFF)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(glimmer_project_options INTERFACE
-        -Wall
-        -Wextra
-        -Wpedantic
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>
     )
 
     if(GLIMMER_WARNINGS_AS_ERRORS)
-        target_compile_options(glimmer_project_options INTERFACE -Werror)
+        target_compile_options(glimmer_project_options INTERFACE
+            $<$<COMPILE_LANGUAGE:CXX>:-Werror>
+        )
     endif()
 
     if(GLIMMER_ENABLE_SANITIZERS)
         target_compile_options(glimmer_project_options INTERFACE
-            -fsanitize=address,undefined
-            -fno-omit-frame-pointer
+            $<$<COMPILE_LANGUAGE:CXX>:-fsanitize=address,undefined>
+            $<$<COMPILE_LANGUAGE:CXX>:-fno-omit-frame-pointer>
         )
         target_link_options(glimmer_project_options INTERFACE
             -fsanitize=address,undefined

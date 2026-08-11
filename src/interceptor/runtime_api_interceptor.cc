@@ -1,5 +1,6 @@
 #include "internal/runtime_api_bridge.h"
 
+#include "internal/driver_api_interceptor.h"
 #include "internal/driver_dispatch.h"
 
 #include <cstddef>
@@ -7,6 +8,9 @@
 
 #ifdef cudaMallocFromPoolAsync
 #undef cudaMallocFromPoolAsync
+#endif
+#ifdef cudaLaunchKernel
+#undef cudaLaunchKernel
 #endif
 
 namespace {
@@ -38,6 +42,14 @@ using glimmer::interceptor::RuntimeGetDeviceFunction;
 using glimmer::interceptor::RuntimeMallocAsyncFunction;
 using glimmer::interceptor::RuntimeMallocFromPoolAsyncFunction;
 using glimmer::interceptor::RuntimeMallocFunction;
+using RuntimeLaunchKernelFunction = cudaError_t (*)(const void* function, dim3 grid_dim,
+                                                    dim3 block_dim, void** arguments,
+                                                    std::size_t shared_memory_bytes,
+                                                    cudaStream_t stream);
+using RuntimeInternalLaunchKernelFunction = cudaError_t (*)(cudaKernel_t kernel, dim3 grid_dim,
+                                                            dim3 block_dim, void** arguments,
+                                                            std::size_t shared_memory_bytes,
+                                                            cudaStream_t stream);
 using glimmer::interceptor::RuntimeMemGetDefaultMemPoolFunction;
 using glimmer::interceptor::RuntimeMemGetInfoFunction;
 using glimmer::interceptor::RuntimeMemGetMemPoolFunction;
@@ -93,6 +105,48 @@ using glimmer::interceptor::RuntimeStreamSynchronizeFunction;
         return real_dlsym == nullptr ? nullptr
                                      : reinterpret_cast<RuntimeMemGetInfoFunction>(
                                            real_dlsym(RTLD_NEXT, "cudaMemGetInfo"));
+    }();
+    return function;
+}
+
+[[nodiscard]] RuntimeLaunchKernelFunction resolve_runtime_launch_kernel() noexcept {
+    static RuntimeLaunchKernelFunction function = []() noexcept {
+        const DlsymFunction real_dlsym = glimmer::interceptor::resolve_real_dlsym();
+        return real_dlsym == nullptr ? nullptr
+                                     : reinterpret_cast<RuntimeLaunchKernelFunction>(
+                                           real_dlsym(RTLD_NEXT, "cudaLaunchKernel"));
+    }();
+    return function;
+}
+
+[[nodiscard]] RuntimeLaunchKernelFunction resolve_runtime_launch_kernel_ptsz() noexcept {
+    static RuntimeLaunchKernelFunction function = []() noexcept {
+        const DlsymFunction real_dlsym = glimmer::interceptor::resolve_real_dlsym();
+        return real_dlsym == nullptr ? nullptr
+                                     : reinterpret_cast<RuntimeLaunchKernelFunction>(
+                                           real_dlsym(RTLD_NEXT, "cudaLaunchKernel_ptsz"));
+    }();
+    return function;
+}
+
+[[nodiscard]] RuntimeInternalLaunchKernelFunction
+resolve_runtime_internal_launch_kernel() noexcept {
+    static RuntimeInternalLaunchKernelFunction function = []() noexcept {
+        const DlsymFunction real_dlsym = glimmer::interceptor::resolve_real_dlsym();
+        return real_dlsym == nullptr ? nullptr
+                                     : reinterpret_cast<RuntimeInternalLaunchKernelFunction>(
+                                           real_dlsym(RTLD_NEXT, "__cudaLaunchKernel"));
+    }();
+    return function;
+}
+
+[[nodiscard]] RuntimeInternalLaunchKernelFunction
+resolve_runtime_internal_launch_kernel_ptsz() noexcept {
+    static RuntimeInternalLaunchKernelFunction function = []() noexcept {
+        const DlsymFunction real_dlsym = glimmer::interceptor::resolve_real_dlsym();
+        return real_dlsym == nullptr ? nullptr
+                                     : reinterpret_cast<RuntimeInternalLaunchKernelFunction>(
+                                           real_dlsym(RTLD_NEXT, "__cudaLaunchKernel_ptsz"));
     }();
     return function;
 }
@@ -935,3 +989,136 @@ extern "C" cudaError_t CUDARTAPI cudaStreamDestroy(cudaStream_t stream) {
         return cudaErrorUnknown;
     }
 }
+
+extern "C" cudaError_t CUDARTAPI cudaLaunchKernel(const void* function, dim3 grid_dim,
+                                                  dim3 block_dim, void** arguments,
+                                                  std::size_t shared_memory_bytes,
+                                                  cudaStream_t stream) {
+    const bool is_reentrant = glimmer::interceptor::is_inside_runtime_call();
+    RuntimeCallScope scope;
+    try {
+        const RuntimeLaunchKernelFunction real_launch = resolve_runtime_launch_kernel();
+        if (real_launch == nullptr) {
+            return cudaErrorNotSupported;
+        }
+        const cudaError_t result =
+            real_launch(function, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
+        if (!is_reentrant && result == cudaSuccess) {
+            glimmer::interceptor::report_kernel_launch_observed({
+                .api_name = "cudaLaunchKernel",
+                .grid_dim_x = grid_dim.x,
+                .grid_dim_y = grid_dim.y,
+                .grid_dim_z = grid_dim.z,
+                .block_dim_x = block_dim.x,
+                .block_dim_y = block_dim.y,
+                .block_dim_z = block_dim.z,
+                .shared_memory_bytes = shared_memory_bytes,
+                .stream = reinterpret_cast<const void*>(stream),
+            });
+        }
+        return result;
+    } catch (...) {
+        return cudaErrorUnknown;
+    }
+}
+
+extern "C" cudaError_t CUDARTAPI cudaLaunchKernel_ptsz(const void* function, dim3 grid_dim,
+                                                       dim3 block_dim, void** arguments,
+                                                       std::size_t shared_memory_bytes,
+                                                       cudaStream_t stream) {
+    const bool is_reentrant = glimmer::interceptor::is_inside_runtime_call();
+    RuntimeCallScope scope;
+    try {
+        const RuntimeLaunchKernelFunction real_launch = resolve_runtime_launch_kernel_ptsz();
+        if (real_launch == nullptr) {
+            return cudaErrorNotSupported;
+        }
+        const cudaError_t result =
+            real_launch(function, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
+        if (!is_reentrant && result == cudaSuccess) {
+            glimmer::interceptor::report_kernel_launch_observed({
+                .api_name = "cudaLaunchKernel_ptsz",
+                .grid_dim_x = grid_dim.x,
+                .grid_dim_y = grid_dim.y,
+                .grid_dim_z = grid_dim.z,
+                .block_dim_x = block_dim.x,
+                .block_dim_y = block_dim.y,
+                .block_dim_z = block_dim.z,
+                .shared_memory_bytes = shared_memory_bytes,
+                .stream = reinterpret_cast<const void*>(stream),
+            });
+        }
+        return result;
+    } catch (...) {
+        return cudaErrorUnknown;
+    }
+}
+
+// NOLINTBEGIN(bugprone-reserved-identifier, readability-identifier-naming): preserve CUDA compiler
+// ABI names.
+extern "C" cudaError_t CUDARTAPI __cudaLaunchKernel(cudaKernel_t kernel, dim3 grid_dim,
+                                                    dim3 block_dim, void** arguments,
+                                                    std::size_t shared_memory_bytes,
+                                                    cudaStream_t stream) {
+    const bool is_reentrant = glimmer::interceptor::is_inside_runtime_call();
+    RuntimeCallScope scope;
+    try {
+        const RuntimeInternalLaunchKernelFunction real_launch =
+            resolve_runtime_internal_launch_kernel();
+        if (real_launch == nullptr) {
+            return cudaErrorNotSupported;
+        }
+        const cudaError_t result =
+            real_launch(kernel, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
+        if (!is_reentrant && result == cudaSuccess) {
+            glimmer::interceptor::report_kernel_launch_observed({
+                .api_name = "__cudaLaunchKernel",
+                .grid_dim_x = grid_dim.x,
+                .grid_dim_y = grid_dim.y,
+                .grid_dim_z = grid_dim.z,
+                .block_dim_x = block_dim.x,
+                .block_dim_y = block_dim.y,
+                .block_dim_z = block_dim.z,
+                .shared_memory_bytes = shared_memory_bytes,
+                .stream = reinterpret_cast<const void*>(stream),
+            });
+        }
+        return result;
+    } catch (...) {
+        return cudaErrorUnknown;
+    }
+}
+
+extern "C" cudaError_t CUDARTAPI __cudaLaunchKernel_ptsz(cudaKernel_t kernel, dim3 grid_dim,
+                                                         dim3 block_dim, void** arguments,
+                                                         std::size_t shared_memory_bytes,
+                                                         cudaStream_t stream) {
+    const bool is_reentrant = glimmer::interceptor::is_inside_runtime_call();
+    RuntimeCallScope scope;
+    try {
+        const RuntimeInternalLaunchKernelFunction real_launch =
+            resolve_runtime_internal_launch_kernel_ptsz();
+        if (real_launch == nullptr) {
+            return cudaErrorNotSupported;
+        }
+        const cudaError_t result =
+            real_launch(kernel, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
+        if (!is_reentrant && result == cudaSuccess) {
+            glimmer::interceptor::report_kernel_launch_observed({
+                .api_name = "__cudaLaunchKernel_ptsz",
+                .grid_dim_x = grid_dim.x,
+                .grid_dim_y = grid_dim.y,
+                .grid_dim_z = grid_dim.z,
+                .block_dim_x = block_dim.x,
+                .block_dim_y = block_dim.y,
+                .block_dim_z = block_dim.z,
+                .shared_memory_bytes = shared_memory_bytes,
+                .stream = reinterpret_cast<const void*>(stream),
+            });
+        }
+        return result;
+    } catch (...) {
+        return cudaErrorUnknown;
+    }
+}
+// NOLINTEND(bugprone-reserved-identifier, readability-identifier-naming)

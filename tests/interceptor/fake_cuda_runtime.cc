@@ -11,6 +11,10 @@
 #include <cstdint>
 #include <cstring>
 
+#ifdef cudaLaunchKernel
+#undef cudaLaunchKernel
+#endif
+
 namespace {
 
 using DriverAllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes);
@@ -81,6 +85,33 @@ extern "C" cudaError_t CUDARTAPI cudaGetDevice(int* device) {
     *device = 0;
     return cudaSuccess;
 }
+
+extern "C" cudaError_t CUDARTAPI cudaLaunchKernel(const void*, dim3, dim3, void**, std::size_t,
+                                                  cudaStream_t) {
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaLaunchKernel_ptsz(const void* function, dim3 grid_dim,
+                                                       dim3 block_dim, void** arguments,
+                                                       std::size_t shared_memory_bytes,
+                                                       cudaStream_t stream) {
+    return cudaLaunchKernel(function, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
+}
+
+// NOLINTBEGIN(bugprone-reserved-identifier, readability-identifier-naming): preserve CUDA
+// compiler ABI names.
+extern "C" cudaError_t CUDARTAPI __cudaLaunchKernel(cudaKernel_t, dim3, dim3, void**, std::size_t,
+                                                    cudaStream_t) {
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI __cudaLaunchKernel_ptsz(cudaKernel_t kernel, dim3 grid_dim,
+                                                         dim3 block_dim, void** arguments,
+                                                         std::size_t shared_memory_bytes,
+                                                         cudaStream_t stream) {
+    return __cudaLaunchKernel(kernel, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
+}
+// NOLINTEND(bugprone-reserved-identifier, readability-identifier-naming)
 
 extern "C" cudaError_t CUDARTAPI cudaFree(void* device_pointer) {
     const DriverFreeFunction release = resolve_driver_function<DriverFreeFunction>("cuMemFree_v2");
