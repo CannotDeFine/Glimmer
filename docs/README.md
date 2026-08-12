@@ -15,5 +15,8 @@ update trigger.
 | [TESTING.md](TESTING.md) | Defines required test coverage and test levels. | Test policy or infrastructure changes. |
 | [decisions/](decisions/) | Records accepted architecture decisions and their consequences. | A decision affects module boundaries, public behavior, dependencies, or operations. |
 
+The current task-memory isolation decision is recorded in
+[ADR 0008](decisions/0008-task-scoped-memory-isolation.md).
+
 Documentation describes intended behavior, not guesses. Keep current code and
 documentation aligned; mark a planned component as planned until it exists.

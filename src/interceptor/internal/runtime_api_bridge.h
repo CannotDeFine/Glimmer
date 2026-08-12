@@ -7,6 +7,10 @@
 namespace glimmer::interceptor {
 
 using RuntimeMallocFunction = cudaError_t (*)(void** device_pointer, std::size_t memory_bytes);
+using RuntimeMallocManagedFunction = cudaError_t (*)(void** device_pointer,
+                                                     std::size_t memory_bytes, unsigned int flags);
+using RuntimeMallocPitchFunction = cudaError_t (*)(void** device_pointer, std::size_t* pitch,
+                                                   std::size_t width_bytes, std::size_t height);
 using RuntimeGetDeviceFunction = cudaError_t (*)(int* device);
 using RuntimeFreeFunction = cudaError_t (*)(void* device_pointer);
 using RuntimeMemGetInfoFunction = cudaError_t (*)(std::size_t* free_bytes,
@@ -64,6 +68,18 @@ using RuntimeMemPoolImportPointerFunction = cudaError_t (*)(void** pointer_out, 
                                                    RuntimeMallocFunction allocate,
                                                    RuntimeFreeFunction release,
                                                    RuntimeGetDeviceFunction get_device);
+[[nodiscard]] cudaError_t intercept_runtime_malloc_managed(void** device_pointer,
+                                                           std::size_t memory_bytes,
+                                                           unsigned int flags,
+                                                           RuntimeMallocManagedFunction allocate,
+                                                           RuntimeFreeFunction release,
+                                                           RuntimeGetDeviceFunction get_device);
+[[nodiscard]] cudaError_t intercept_runtime_malloc_pitch(void** device_pointer, std::size_t* pitch,
+                                                         std::size_t width_bytes,
+                                                         std::size_t height,
+                                                         RuntimeMallocPitchFunction allocate,
+                                                         RuntimeFreeFunction release,
+                                                         RuntimeGetDeviceFunction get_device);
 [[nodiscard]] cudaError_t intercept_runtime_free(void* device_pointer, RuntimeFreeFunction release);
 [[nodiscard]] cudaError_t intercept_runtime_mem_get_info(std::size_t* free_bytes,
                                                          std::size_t* total_bytes,

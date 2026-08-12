@@ -138,6 +138,11 @@ void test_local_shared_accounting() {
     const auto memory_info = quota->get_memory_info(100, 90);
     expect(memory_info.total_bytes == 100, "shared quota should expose its configured total");
     expect(memory_info.free_bytes == 40, "shared quota should expose committed usage");
+    const auto reduced_physical_info = quota->get_memory_info(50, 50);
+    expect(reduced_physical_info.total_bytes == 50,
+           "shared quota should clamp visible total to physical capacity");
+    expect(reduced_physical_info.free_bytes == 0,
+           "shared quota should not report free bytes below committed usage");
     expect(quota->release(60), "shared release should succeed");
     expect(quota->usage().used_bytes() == 0, "shared release should restore usage");
     expect(quota->is_healthy(), "shared quota should remain healthy after accounting operations");

@@ -11,6 +11,7 @@ include(cmake/ProjectTesting.cmake)
 
 option(GLIMMER_BUILD_CUDA_INTERCEPTOR "Build the optional CUDA Driver API preload library" OFF)
 option(GLIMMER_ENABLE_CUDA_GPU_TESTS "Enable tests that require a CUDA-capable GPU" OFF)
+option(GLIMMER_BUILD_CUDA_WORKLOAD "Build the real-GPU CUDA workload harnesses" OFF)
 
 find_package(Threads REQUIRED)
 
@@ -28,9 +29,17 @@ endif()
 add_subdirectory(3rdparty)
 add_subdirectory(src)
 
-if(GLIMMER_BUILD_CUDA_INTERCEPTOR)
+if(GLIMMER_BUILD_CUDA_INTERCEPTOR OR GLIMMER_BUILD_CUDA_WORKLOAD)
     find_package(CUDAToolkit REQUIRED)
+endif()
+
+if(GLIMMER_BUILD_CUDA_INTERCEPTOR)
     add_subdirectory(src/interceptor)
+endif()
+
+if(GLIMMER_BUILD_CUDA_WORKLOAD)
+    add_subdirectory(examples/cuda_workload)
+    add_subdirectory(examples/cuda_workloads)
 endif()
 
 if(BUILD_TESTING)
@@ -48,6 +57,11 @@ if(GLIMMER_CLANG_FORMAT)
         "${PROJECT_SOURCE_DIR}/src/*.cc"
         "${PROJECT_SOURCE_DIR}/src/*.cpp"
         "${PROJECT_SOURCE_DIR}/src/*.cu"
+        "${PROJECT_SOURCE_DIR}/examples/*.h"
+        "${PROJECT_SOURCE_DIR}/examples/*.hpp"
+        "${PROJECT_SOURCE_DIR}/examples/*.cc"
+        "${PROJECT_SOURCE_DIR}/examples/*.cpp"
+        "${PROJECT_SOURCE_DIR}/examples/*.cu"
         "${PROJECT_SOURCE_DIR}/tests/*.cc"
         "${PROJECT_SOURCE_DIR}/tests/*.cpp"
         "${PROJECT_SOURCE_DIR}/tests/*.cu"

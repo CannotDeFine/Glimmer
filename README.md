@@ -16,7 +16,8 @@ the repository can be moved or cloned to any location without reconfiguration.
 - CMake 3.20+
 - A C++20-capable compiler: GCC or Clang
 - Git, including submodule support
-- CUDA Toolkit and an NVIDIA driver (only for CUDA interceptor builds)
+- CUDA Toolkit for CUDA interceptor or workload builds
+- An NVIDIA driver for CUDA runtime execution and GPU tests
 
 Clone the repository with its third-party dependencies:
 
@@ -56,8 +57,11 @@ cmake --preset lint
 cmake --preset cuda-lint
 ```
 
-The `lint` preset requires `clang-tidy`. The executable is written to `bin/`
-inside the selected build directory.
+The `lint` and `cuda-lint` presets require `clang-tidy`. The executable is
+written to `bin/` inside the selected build directory.
+
+`./scripts/check.sh` also runs ShellCheck for the repository scripts when
+`shellcheck` is installed.
 
 Run the complete pre-commit verification with:
 
@@ -89,11 +93,19 @@ cmake --build --preset cuda-gpu
 ctest --preset cuda-gpu --output-on-failure
 ```
 
-The GPU preset includes both an embedded Driver-PTX workload and a Runtime
-kernel compiled with `nvcc`. To run only the end-to-end kernel checks:
+The GPU preset includes an embedded Driver-PTX workload, a Runtime kernel
+compiled with `nvcc`, the standalone `glimmer_cuda_workload` baseline, and a
+Runtime workload matrix covering async/pool, managed, pitched, and
+multi-stream execution. To run only the end-to-end kernel checks:
 
 ```sh
 ctest --preset cuda-gpu -R 'glimmer_cuda_interceptor_(kernel_gpu_test|runtime_kernel_gpu_test)' --output-on-failure
+```
+
+Run the real Runtime workload matrix with the interceptor:
+
+```sh
+ctest --preset cuda-gpu -R 'glimmer_cuda_(workload_gpu_test|async_workload_gpu_test|managed_workload_gpu_test|pitched_workload_gpu_test|multistream_workload_gpu_test)' --output-on-failure
 ```
 
 To verify a real cross-process shared quota, run:
@@ -109,7 +121,36 @@ env GLIMMER_MEMORY_LIMIT_BYTES=8388608 GLIMMER_SCHEDULER_MODE=observe GLIMMER_TR
 ```
 
 Add `GLIMMER_TRACE_MEMORY_INFO=1` to also print the virtualized total, used,
-and free memory after each successful memory-information query.
+and free memory together with the physical total and free bytes after each
+successful memory-information query.
+
+### Task-scoped memory isolation
+
+In process-local mode, `GLIMMER_MEMORY_LIMIT_BYTES` is the memory ceiling for
+the attached CUDA process. In shared tenant mode, it remains the aggregate
+tenant ceiling. Set `GLIMMER_TASK_MEMORY_LIMIT_BYTES` in shared mode to add a
+narrower per-process task ceiling:
+
+```sh
+env GLIMMER_QUOTA_MODE=shared \
+    GLIMMER_QUOTA_TENANT_ID=demo-tenant \
+    GLIMMER_MEMORY_LIMIT_BYTES=8589934592 \
+    GLIMMER_TASK_MEMORY_LIMIT_BYTES=2147483648 \
+    LD_PRELOAD="$PWD/build/cuda-gpu/lib/libglimmer_cuda_interceptor.so" \
+    ./your_cuda_application
+```
+
+Every covered Driver and Runtime allocation must pass both the tenant and
+task limits. The task limit applies to the CUDA process attached to the
+preload library; multiple logical tasks inside one process are not yet
+independently identifiable. Kernel preemption and time slicing are outside
+this memory-isolation feature. Glimmer also queries the CUDA device capacity
+automatically: the effective visible and enforceable limit is the minimum of
+the configured quota and the device's physical total memory. Allocation
+admission additionally checks the current physical free memory whenever the
+current CUDA context identifies the requested device, so a quota larger than
+the GPU (for example, 8 GiB configured on a 6 GiB device) is clamped to the
+real device capacity.
 
 The root `compile_commands.json` link follows the most recently built preset.
 Use `cuda-lint` last when editor diagnostics must include CUDA interceptor files

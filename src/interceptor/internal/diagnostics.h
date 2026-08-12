@@ -22,6 +22,8 @@ struct MemoryInfoObservation {
     std::int32_t device = 0;
     std::uint64_t total_bytes = 0;
     std::uint64_t free_bytes = 0;
+    std::uint64_t physical_total_bytes = 0;
+    std::uint64_t physical_free_bytes = 0;
 };
 
 void report_diagnostic(const char* message) noexcept;

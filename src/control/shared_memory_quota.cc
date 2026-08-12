@@ -1452,8 +1452,12 @@ MemoryInfo SharedMemoryQuota::get_memory_info(DeviceId device,
     const core::QuotaUsage current_usage = usage(device);
     const core::MemoryBytes visible_total_bytes =
         std::min(current_usage.limit_bytes, physical_total_bytes);
+    const core::MemoryBytes quota_visible_free_bytes =
+        visible_total_bytes > current_usage.used_bytes()
+            ? visible_total_bytes - current_usage.used_bytes()
+            : 0;
     const core::MemoryBytes visible_free_bytes =
-        std::min(current_usage.available_bytes(), physical_free_bytes);
+        std::min(quota_visible_free_bytes, physical_free_bytes);
     return MemoryInfo{
         .total_bytes = visible_total_bytes,
         .free_bytes = std::min(visible_total_bytes, visible_free_bytes),

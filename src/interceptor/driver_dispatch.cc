@@ -5,12 +5,16 @@
 #include "internal/driver_dispatch.h"
 
 #include <dlfcn.h>
+#include <link.h>
+
+#include <string_view>
 
 namespace glimmer::interceptor {
 
 namespace {
 
 thread_local bool g_is_inside_driver_call = false;
+thread_local bool g_is_inside_proc_address_dispatch = false;
 
 class DriverCallScope {
    public:
@@ -26,6 +30,120 @@ class DriverCallScope {
     bool previous_state_;
 };
 
+class ProcAddressDispatchScope {
+   public:
+    ProcAddressDispatchScope() : previous_state_(g_is_inside_proc_address_dispatch) {
+        g_is_inside_proc_address_dispatch = true;
+    }
+
+    ~ProcAddressDispatchScope() {
+        g_is_inside_proc_address_dispatch = previous_state_;
+    }
+
+   private:
+    bool previous_state_;
+};
+
+[[nodiscard]] bool belongs_to_cuda_driver(void* symbol) noexcept {
+    if (symbol == nullptr) {
+        return false;
+    }
+
+    Dl_info symbol_info{};
+    if (dladdr(symbol, &symbol_info) == 0 || symbol_info.dli_fname == nullptr) {
+        return false;
+    }
+    return std::string_view(symbol_info.dli_fname).find("libcuda.so") != std::string_view::npos;
+}
+
+[[nodiscard]] const char* library_path(void* handle) noexcept {
+    if (handle == nullptr) {
+        return nullptr;
+    }
+
+    void* link_map_storage = nullptr;
+    if (dlinfo(handle, RTLD_DI_LINKMAP, reinterpret_cast<void*>(&link_map_storage)) != 0 ||
+        link_map_storage == nullptr) {
+        return nullptr;
+    }
+    const auto* link_map = static_cast<const struct link_map*>(link_map_storage);
+    return link_map->l_name;
+}
+
+struct SecondaryCudaLibrarySearch {
+    std::string_view primary_path;
+    const char* secondary_path = nullptr;
+};
+
+int find_secondary_cuda_library(struct dl_phdr_info* info, std::size_t, void* data) noexcept {
+    if (info == nullptr || data == nullptr || info->dlpi_name == nullptr ||
+        info->dlpi_name[0] == '\0') {
+        return 0;
+    }
+
+    auto* search = static_cast<SecondaryCudaLibrarySearch*>(data);
+    const std::string_view path{info->dlpi_name};
+    if (path.find("libcuda.so") == std::string_view::npos || path == search->primary_path) {
+        return 0;
+    }
+
+    // WSL keeps a small libcuda loader in /usr/lib/wsl/lib and maps the actual
+    // vendor Driver from /usr/lib/wsl/drivers/.../libcuda.so.1.1. The latter
+    // must be preferred because the loader's exported stubs can resolve back
+    // through the preload scope.
+    if (path.find("libcuda.so.1.1") != std::string_view::npos) {
+        search->secondary_path = info->dlpi_name;
+        return 1;
+    }
+    if (search->secondary_path == nullptr) {
+        search->secondary_path = info->dlpi_name;
+    }
+    return 0;
+}
+
+void prime_cuda_driver_symbols(void* primary_handle) noexcept {
+    if (primary_handle == nullptr) {
+        return;
+    }
+
+    // A split Driver may not map its vendor object until the first lookup.
+    // Use the libc resolver directly so that lookup can trigger that mapping
+    // without entering Glimmer's dlsym wrapper.
+    const DlsymFunction real_dlsym = resolve_real_dlsym();
+    if (real_dlsym == nullptr) {
+        return;
+    }
+
+    (void)dlerror();
+    void* symbol = real_dlsym(primary_handle, "cuInit");
+    const char* error = dlerror();
+    if (symbol == nullptr || error != nullptr) {
+        return;
+    }
+}
+
+[[nodiscard]] void* open_cuda_driver() noexcept {
+    constexpr int k_flags = RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND;
+    void* primary_handle = dlopen("libcuda.so.1", k_flags);
+    if (primary_handle == nullptr) {
+        return nullptr;
+    }
+
+    prime_cuda_driver_symbols(primary_handle);
+    const char* primary_path = library_path(primary_handle);
+    SecondaryCudaLibrarySearch search{
+        .primary_path = primary_path == nullptr ? std::string_view{} : primary_path,
+    };
+    dl_iterate_phdr(&find_secondary_cuda_library, &search);
+    if (search.secondary_path != nullptr) {
+        if (void* secondary_handle = dlopen(search.secondary_path, k_flags);
+            secondary_handle != nullptr) {
+            return secondary_handle;
+        }
+    }
+    return primary_handle;
+}
+
 }  // namespace
 
 bool is_inside_driver_call() noexcept {
@@ -34,16 +152,29 @@ bool is_inside_driver_call() noexcept {
 
 DlsymFunction resolve_real_dlsym() noexcept {
     static DlsymFunction real_dlsym = []() noexcept {
-        void* symbol = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
+        // Resolve dlsym from libc itself. RTLD_NEXT depends on the current
+        // link-map position and can resolve back through another interposer
+        // when CUDA and Glimmer are loaded in a different order.
+        void* libc_handle = dlopen("libc.so.6", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+        if (libc_handle == nullptr) {
+            libc_handle = dlopen("libc.so.6", RTLD_NOW | RTLD_LOCAL);
+        }
+        void* symbol =
+            libc_handle == nullptr ? nullptr : dlvsym(libc_handle, "dlsym", "GLIBC_2.2.5");
+        if (symbol == nullptr) {
+            symbol = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
+        }
         return reinterpret_cast<DlsymFunction>(symbol);
     }();
     return real_dlsym;
 }
 
 DriverDispatch::~DriverDispatch() {
-    if (library_handle_ != nullptr) {
-        dlclose(library_handle_);
-    }
+    // Keep libcuda loaded until the process exits. CUDA Runtime may register
+    // later atexit handlers that still call into the Driver after Glimmer's
+    // state is destroyed; unloading it here can turn normal teardown into a
+    // use-after-unload crash. The operating system reclaims this handle at
+    // process exit, which is the lifetime expected for a preload interceptor.
 }
 
 DriverDispatch::DriverDispatch(DriverFunctionTable functions) noexcept
@@ -114,7 +245,16 @@ bool DriverDispatch::initialize() {
     // shared object.  Keep those lookups on the real path; returning Glimmer
     // wrappers from inside the driver's constructor can corrupt its setup.
     DriverCallScope scope;
-    library_handle_ = dlopen("libcuda.so.1", RTLD_LAZY | RTLD_LOCAL);
+    // libcuda calls other Driver entry points internally. With LD_PRELOAD,
+    // ordinary global symbol lookup can bind those internal calls back to our
+    // wrappers (notably cuGetProcAddress), creating recursion when the quota
+    // path queries physical device capacity. DEEPBIND keeps the driver's own
+    // entry points ahead of the preload scope while preserving our explicit
+    // wrapper calls at the application boundary.
+    // Resolve the driver's own relocations before exposing any entry point.
+    // Lazy binding can defer an internal CUDA call until after the preload
+    // scope is active and bind that call back to a Glimmer wrapper.
+    library_handle_ = open_cuda_driver();
     if (library_handle_ == nullptr) {
         return false;
     }
@@ -764,8 +904,18 @@ CUresult DriverDispatch::stream_destroy(CUstream stream) const {
 
 CUresult DriverDispatch::get_proc_address(const char* symbol, void** function_pointer,
                                           int cuda_version, cuuint64_t flags) const {
+    if (g_is_inside_proc_address_dispatch) {
+        if (library_handle_ != nullptr && symbol != nullptr && function_pointer != nullptr) {
+            *function_pointer = resolve_direct_symbol(symbol);
+            return *function_pointer == nullptr ? CUDA_ERROR_NOT_FOUND : CUDA_SUCCESS;
+        }
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    ProcAddressDispatchScope proc_scope;
     DriverCallScope scope;
-    if (get_proc_address_ == nullptr) {
+    if (get_proc_address_ == nullptr ||
+        (library_handle_ != nullptr &&
+         !belongs_to_cuda_driver(reinterpret_cast<void*>(get_proc_address_)))) {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
     return get_proc_address_(symbol, function_pointer, cuda_version, flags);
@@ -774,19 +924,37 @@ CUresult DriverDispatch::get_proc_address(const char* symbol, void** function_po
 CUresult DriverDispatch::get_proc_address_v2(const char* symbol, void** function_pointer,
                                              int cuda_version, cuuint64_t flags,
                                              CUdriverProcAddressQueryResult* symbol_status) const {
+    if (g_is_inside_proc_address_dispatch) {
+        if (library_handle_ != nullptr && symbol != nullptr && function_pointer != nullptr) {
+            *function_pointer = resolve_direct_symbol(symbol);
+            if (symbol_status != nullptr) {
+                *symbol_status = *function_pointer == nullptr ? CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND
+                                                              : CU_GET_PROC_ADDRESS_SUCCESS;
+            }
+            return *function_pointer == nullptr ? CUDA_ERROR_NOT_FOUND : CUDA_SUCCESS;
+        }
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    ProcAddressDispatchScope proc_scope;
     DriverCallScope scope;
-    if (get_proc_address_v2_ == nullptr) {
+    if (get_proc_address_v2_ == nullptr ||
+        (library_handle_ != nullptr &&
+         !belongs_to_cuda_driver(reinterpret_cast<void*>(get_proc_address_v2_)))) {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
     return get_proc_address_v2_(symbol, function_pointer, cuda_version, flags, symbol_status);
 }
 
 bool DriverDispatch::has_get_proc_address() const {
-    return get_proc_address_ != nullptr;
+    return get_proc_address_ != nullptr &&
+           (library_handle_ == nullptr ||
+            belongs_to_cuda_driver(reinterpret_cast<void*>(get_proc_address_)));
 }
 
 bool DriverDispatch::has_get_proc_address_v2() const {
-    return get_proc_address_v2_ != nullptr;
+    return get_proc_address_v2_ != nullptr &&
+           (library_handle_ == nullptr ||
+            belongs_to_cuda_driver(reinterpret_cast<void*>(get_proc_address_v2_)));
 }
 
 bool DriverDispatch::has_launch_kernel() const {
@@ -997,18 +1165,88 @@ bool DriverDispatch::has_stream_destroy() const {
     return stream_destroy_ != nullptr;
 }
 
+void* DriverDispatch::resolve_direct_symbol(const char* name) const {
+    if (name == nullptr) {
+        return nullptr;
+    }
+
+    // This path is used only while the real Driver resolver is already on the
+    // stack. Calling dlsym again here can re-enter the loader and recreate the
+    // recursion we are trying to break. Return the already-resolved Driver
+    // entry points instead.
+    const std::string_view symbol{name};
+    if (symbol == "cuInit") {
+        return reinterpret_cast<void*>(init_);
+    }
+    if (symbol == "cuLaunchKernel") {
+        return reinterpret_cast<void*>(launch_kernel_);
+    }
+    if (symbol == "cuLaunchKernel_ptsz") {
+        return reinterpret_cast<void*>(launch_kernel_ptsz_);
+    }
+    if (symbol == "cuMemAlloc_v2" || symbol == "cuMemAlloc") {
+        return reinterpret_cast<void*>(mem_alloc_);
+    }
+    if (symbol == "cuMemFree_v2" || symbol == "cuMemFree") {
+        return reinterpret_cast<void*>(mem_free_);
+    }
+    if (symbol == "cuMemGetInfo_v2" || symbol == "cuMemGetInfo") {
+        return reinterpret_cast<void*>(mem_get_info_);
+    }
+    if (symbol == "cuDeviceTotalMem_v2" || symbol == "cuDeviceTotalMem") {
+        return reinterpret_cast<void*>(device_total_mem_);
+    }
+    if (symbol == "cuCtxSynchronize") {
+        return reinterpret_cast<void*>(context_synchronize_);
+    }
+    if (symbol == "cuCtxGetCurrent") {
+        return reinterpret_cast<void*>(context_get_current_);
+    }
+    if (symbol == "cuCtxGetDevice") {
+        return reinterpret_cast<void*>(context_get_device_);
+    }
+    if (symbol == "cuCtxDestroy_v2" || symbol == "cuCtxDestroy") {
+        return reinterpret_cast<void*>(context_destroy_);
+    }
+    if (symbol == "cuStreamGetDevice") {
+        return reinterpret_cast<void*>(stream_get_device_);
+    }
+    if (symbol == "cuStreamGetDevice_ptsz") {
+        return reinterpret_cast<void*>(stream_get_device_ptsz_);
+    }
+    if (symbol == "cuStreamGetCtx") {
+        return reinterpret_cast<void*>(stream_get_context_);
+    }
+    if (symbol == "cuStreamGetCtx_ptsz") {
+        return reinterpret_cast<void*>(stream_get_context_ptsz_);
+    }
+    if (symbol == "cuStreamQuery") {
+        return reinterpret_cast<void*>(stream_query_);
+    }
+    if (symbol == "cuStreamQuery_ptsz") {
+        return reinterpret_cast<void*>(stream_query_ptsz_);
+    }
+    if (symbol == "cuStreamSynchronize") {
+        return reinterpret_cast<void*>(stream_synchronize_);
+    }
+    if (symbol == "cuStreamSynchronize_ptsz") {
+        return reinterpret_cast<void*>(stream_synchronize_ptsz_);
+    }
+    if (symbol == "cuStreamDestroy_v2" || symbol == "cuStreamDestroy") {
+        return reinterpret_cast<void*>(stream_destroy_);
+    }
+    return nullptr;
+}
+
 void* DriverDispatch::load_symbol(const char* name) const {
     const DlsymFunction real_dlsym = resolve_real_dlsym();
-    if (real_dlsym == nullptr) {
+    if (real_dlsym == nullptr || library_handle_ == nullptr || name == nullptr) {
         return nullptr;
     }
 
     dlerror();
     void* symbol = real_dlsym(library_handle_, name);
-    if (dlerror() != nullptr) {
-        return nullptr;
-    }
-    return symbol;
+    return dlerror() == nullptr && belongs_to_cuda_driver(symbol) ? symbol : nullptr;
 }
 
 }  // namespace glimmer::interceptor

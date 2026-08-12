@@ -8,7 +8,7 @@ from a prototype into a shared-GPU scheduler.
 - Write source code, comments, documentation, and identifiers in English.
 - Target Linux and C++20 only.
 - Format C++ and CUDA source with the repository `.clang-format` file. Run
-  `cmake --build build --target format-check` before committing.
+  `cmake --build --preset debug --target format-check` before committing.
 - Prefer clear, conventional C++ over clever or overly generic abstractions.
 - Keep functions short enough that their control flow and ownership rules are
   obvious. Extract a named helper when a function combines unrelated steps.

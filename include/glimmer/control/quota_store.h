@@ -35,6 +35,8 @@ class MemoryReservationState {
 
 class ProcessMemoryQuota;
 class SharedMemoryQuota;
+class CompositeQuota;
+class DeviceCapacityQuota;
 
 class MemoryReservation {
    public:
@@ -58,6 +60,8 @@ class MemoryReservation {
    private:
     friend class ProcessMemoryQuota;
     friend class SharedMemoryQuota;
+    friend class CompositeQuota;
+    friend class DeviceCapacityQuota;
 
     explicit MemoryReservation(std::unique_ptr<detail::MemoryReservationState> state) noexcept;
 

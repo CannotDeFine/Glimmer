@@ -188,6 +188,24 @@ if(BUILD_TESTING)
             "GLIMMER_MEMORY_LIMIT_BYTES=4096;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
     )
 
+    add_test(NAME glimmer_cuda_interceptor_physical_capacity_test
+        COMMAND glimmer_cuda_interceptor_fake_driver_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_physical_capacity_test PROPERTIES
+        ENVIRONMENT
+            "GLIMMER_FAKE_PHYSICAL_CAP=1;GLIMMER_MEMORY_LIMIT_BYTES=134217728;GLIMMER_TRACE_MEMORY_INFO=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
+        PASS_REGULAR_EXPRESSION
+            "physical_total_bytes=67108864 physical_free_bytes=67108864"
+    )
+
+    add_test(NAME glimmer_cuda_interceptor_nvml_only_test
+        COMMAND glimmer_cuda_interceptor_fake_driver_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_nvml_only_test PROPERTIES
+        ENVIRONMENT
+            "GLIMMER_FAKE_NVML_ONLY=1;GLIMMER_MEMORY_LIMIT_BYTES=4096;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
+    )
+
     add_test(NAME glimmer_cuda_interceptor_observe_fake_driver_test
         COMMAND glimmer_cuda_interceptor_fake_driver_test
     )
@@ -300,6 +318,14 @@ if(BUILD_TESTING)
     set_tests_properties(glimmer_cuda_interceptor_shared_fake_driver_test PROPERTIES
         ENVIRONMENT
             "GLIMMER_QUOTA_MODE=shared;GLIMMER_QUOTA_TENANT_ID=glimmer-cuda-interceptor-shared;GLIMMER_MEMORY_LIMIT_BYTES=4096;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
+    )
+
+    add_test(NAME glimmer_cuda_interceptor_task_memory_limit_test
+        COMMAND glimmer_cuda_interceptor_fake_driver_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_task_memory_limit_test PROPERTIES
+        ENVIRONMENT
+            "GLIMMER_QUOTA_MODE=shared;GLIMMER_QUOTA_TENANT_ID=glimmer-cuda-interceptor-task-limit;GLIMMER_MEMORY_LIMIT_BYTES=4096;GLIMMER_TASK_MEMORY_LIMIT_BYTES=1024;GLIMMER_FAKE_TASK_LIMIT=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
     )
 
     add_executable(glimmer_cuda_interceptor_gpu_test

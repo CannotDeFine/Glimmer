@@ -14,6 +14,7 @@ distinguishes the current bootstrap from the planned runtime architecture.
 | `src/` | Contains the `glimmer` executable entry point. It currently initializes the process and emits a startup log. |
 | `3rdparty/` | Contains pinned source dependencies. It currently contains `spdlog`. |
 | `scripts/` | Provides convenience commands for local development. |
+| `examples/` | Provides independent real-GPU CUDA workload harnesses; it does not define runtime interfaces. |
 | `tests/` | Contains core, simulated-backend, control, interceptor, and optional CUDA GPU tests. CTest verifies startup and module behavior. |
 | `docs/` | Defines engineering rules, architecture, dependencies, tests, and decisions. |
 
@@ -37,8 +38,16 @@ concrete responsibility and a testable interface.
 | --- | --- | --- |
 | `core` | `include/glimmer/core/`, `src/core/` | Provides the thread-safe quota ledger and task-boundary scheduler with explicit admission, weighted tenant queues, dispatch, completion, cancellation, and failure transitions. It has no CUDA, dynamic-linker, transport, or process-global dependencies. |
 | `backend` | `include/glimmer/backend/`, `src/backend/` | Defines the internal task execution contract and provides a deterministic simulated backend. It does not own tenant fairness, quota policy, or CUDA interception. |
-| `control` | `include/glimmer/control/`, `src/control/` | Defines the quota-store contract, adapts process-local quota requests to `core`, and implements the Linux shared-memory tenant accounting store. It computes tenant-visible memory information and has no CUDA or dynamic-linker dependencies. |
+| `control` | `include/glimmer/control/`, `src/control/` | Defines the quota-store contract, adapts process-local quota requests to `core`, composes aggregate, task, and physical-device capacity quotas, and implements the Linux shared-memory tenant accounting store. It computes tenant/task/device-visible memory information and has no CUDA or dynamic-linker dependencies. |
 | `interceptor` | `src/interceptor/` and `src/interceptor/internal/` | Provides ABI-compatible wrappers for covered CUDA Driver, PTDS stream-ordered Driver, CUDA kernel-launch, Runtime, and memory-pool APIs, routes supported symbol lookups, and owns process-local allocation metadata while using `control` for quota decisions. Kernel launches are forwarded unchanged; `GLIMMER_SCHEDULER_MODE=observe` emits a sampled boundary diagnostic. The `internal/` headers are private implementation interfaces and are not public project headers. |
+| `examples` | `examples/` | Contains independent real-GPU CUDA workload harnesses. Each workload directory owns its source and generated artifacts; examples do not participate in runtime scheduling or CUDA interception. |
+
+`control::CompositeQuota` is the isolation boundary used when a shared tenant
+has a narrower per-process task limit. It admits, commits, cancels, releases,
+and virtualizes memory through both quota stores while keeping shared-memory
+layout details out of the interceptor. The interceptor owns only the
+process-local allocation identity and delegates durable aggregate accounting to
+`control`.
 
 The interceptor is split into focused implementation units:
 
@@ -47,7 +56,7 @@ The interceptor is split into focused implementation units:
 | `driver_api_interceptor.cc` | CUDA Driver admission, quota accounting, context/stream completion, and symbol-resolution policy. |
 | `driver_api_wrappers.cc` | Exported C/CUDA ABI entry points. These wrappers only contain boundary exception handling and delegate to the interceptor implementation. |
 | `runtime_api_interceptor.cc` | CUDA Runtime symbol resolution, Runtime-call reentrancy, compiler-generated and public kernel-launch forwarding, independent Runtime async/pool accounting entry points, and memory-pool import policy. |
-| `driver_dispatch.cc` | Dynamic loading and guarded invocation of real CUDA Driver functions, including PTDS variants and kernel launch entry points. |
+| `driver_dispatch.cc` | Dynamic loading and guarded invocation of real CUDA Driver functions, including PTDS variants, kernel launch entry points, and Linux loader/vendor Driver discovery. |
 | `nvml_dispatch.cc` | Dynamic loading and guarded invocation of the real NVML library and its optional v1/v2 entry points. |
 | `nvml_api_wrappers.cc` | Exported NVML ABI entry points that route to the interceptor's NVML presentation policy. |
 | `symbol_interceptor.cc` | `dlsym` interception, caller classification, and safe delegation to the real loader. |
@@ -82,6 +91,10 @@ library and its tests.
 ## Runtime boundaries
 
 - A tenant is the unit of resource accounting and scheduling fairness.
+- The first transparent task-memory isolation unit is a CUDA process attached
+  to the preload library. A future control-plane lease may bind a logical
+  scheduler task to that process, but a CUDA wrapper must never infer a task
+  identity from an untrusted pointer or launch argument.
 - Multi-process tenant accounting is governed by
   [ADR 0005](decisions/0005-shared-quota-control-plane.md); shared state must
   remain behind the `control` contract and must not leak into CUDA wrappers or

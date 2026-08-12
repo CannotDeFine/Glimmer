@@ -43,6 +43,33 @@ glimmer_enable_clang_tidy(glimmer_control_process_memory_quota_test)
 add_test(NAME glimmer_control_process_memory_quota_test
     COMMAND glimmer_control_process_memory_quota_test)
 
+add_executable(glimmer_control_composite_quota_test control/composite_quota_test.cc)
+
+target_link_libraries(glimmer_control_composite_quota_test
+    PRIVATE
+        Glimmer::control
+)
+
+glimmer_enable_clang_tidy(glimmer_control_composite_quota_test)
+
+add_test(NAME glimmer_control_composite_quota_test
+    COMMAND glimmer_control_composite_quota_test)
+
+add_executable(glimmer_control_device_capacity_quota_test
+    control/device_capacity_quota_test.cc
+)
+
+target_link_libraries(glimmer_control_device_capacity_quota_test
+    PRIVATE
+        Glimmer::control
+)
+
+glimmer_enable_clang_tidy(glimmer_control_device_capacity_quota_test)
+
+add_test(NAME glimmer_control_device_capacity_quota_test
+    COMMAND glimmer_control_device_capacity_quota_test
+)
+
 add_executable(glimmer_control_shared_memory_quota_test
     control/shared_memory_quota_test.cc
 )

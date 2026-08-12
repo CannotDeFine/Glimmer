@@ -57,14 +57,27 @@ run_preset() {
     cmake --preset "${preset}"
     section "${preset}: build"
     cmake --build --preset "${preset}"
-    section "${preset}: format check"
-    cmake --build --preset "${preset}" --target format-check
+    if command -v clang-format >/dev/null 2>&1; then
+        section "${preset}: format check"
+        cmake --build --preset "${preset}" --target format-check
+    else
+        printf '%sWARNING: clang-format is not installed; skipping %s format check.%s\n' \
+            "${COLOR_YELLOW}" "${preset}" "${COLOR_RESET}" >&2
+    fi
     section "${preset}: tests"
     ctest --preset "${preset}" --output-on-failure
 }
 
 section "repository: whitespace check"
 git diff --check
+
+if command -v shellcheck >/dev/null 2>&1; then
+    section "repository: shellcheck"
+    shellcheck scripts/*.sh
+else
+    printf '%sWARNING: shellcheck is not installed; skipping script analysis.%s\n' \
+        "${COLOR_YELLOW}" "${COLOR_RESET}" >&2
+fi
 
 run_preset debug
 
@@ -81,10 +94,10 @@ else
         "${COLOR_YELLOW}" "${COLOR_RESET}" >&2
 fi
 
-if command -v nvcc >/dev/null 2>&1 && [[ -f /usr/local/cuda/include/cuda.h ]]; then
+if command -v nvcc >/dev/null 2>&1 && command -v clang-tidy >/dev/null 2>&1; then
     run_preset cuda-lint
 else
-    printf '%sWARNING: CUDA Toolkit is unavailable; skipping cuda-lint preset.%s\n' \
+    printf '%sWARNING: CUDA Toolkit or clang-tidy is unavailable; skipping cuda-lint preset.%s\n' \
         "${COLOR_YELLOW}" "${COLOR_RESET}" >&2
 fi
 

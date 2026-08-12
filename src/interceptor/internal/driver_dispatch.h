@@ -368,6 +368,7 @@ class DriverDispatch {
     [[nodiscard]] bool has_stream_destroy() const;
 
    private:
+    [[nodiscard]] void* resolve_direct_symbol(const char* name) const;
     [[nodiscard]] void* load_symbol(const char* name) const;
 
     void* library_handle_ = nullptr;

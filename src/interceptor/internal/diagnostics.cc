@@ -109,6 +109,10 @@ void report_memory_info_diagnostic(const MemoryInfoObservation& observation) noe
     cursor = append_number(cursor, end, used_bytes);
     cursor = append_text(cursor, end, " free_bytes=");
     cursor = append_number(cursor, end, observation.free_bytes);
+    cursor = append_text(cursor, end, " physical_total_bytes=");
+    cursor = append_number(cursor, end, observation.physical_total_bytes);
+    cursor = append_text(cursor, end, " physical_free_bytes=");
+    cursor = append_number(cursor, end, observation.physical_free_bytes);
     cursor = append_text(cursor, end, "\n");
     write_message(message, static_cast<std::size_t>(cursor - message));
 }

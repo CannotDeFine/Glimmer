@@ -13,7 +13,9 @@ namespace glimmer::interceptor {
 [[nodiscard]] CUresult intercept_init(unsigned int flags);
 void report_kernel_launch_observed(const KernelLaunchObservation& observation) noexcept;
 void report_memory_info_observed(const char* api_name, std::int32_t device,
-                                 std::uint64_t total_bytes, std::uint64_t free_bytes) noexcept;
+                                 std::uint64_t total_bytes, std::uint64_t free_bytes,
+                                 std::uint64_t physical_total_bytes,
+                                 std::uint64_t physical_free_bytes) noexcept;
 [[nodiscard]] CUresult intercept_launch_kernel(CUfunction function, unsigned int grid_dim_x,
                                                unsigned int grid_dim_y, unsigned int grid_dim_z,
                                                unsigned int block_dim_x, unsigned int block_dim_y,

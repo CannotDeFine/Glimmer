@@ -42,6 +42,8 @@ using glimmer::interceptor::RuntimeGetDeviceFunction;
 using glimmer::interceptor::RuntimeMallocAsyncFunction;
 using glimmer::interceptor::RuntimeMallocFromPoolAsyncFunction;
 using glimmer::interceptor::RuntimeMallocFunction;
+using glimmer::interceptor::RuntimeMallocManagedFunction;
+using glimmer::interceptor::RuntimeMallocPitchFunction;
 using RuntimeLaunchKernelFunction = cudaError_t (*)(const void* function, dim3 grid_dim,
                                                     dim3 block_dim, void** arguments,
                                                     std::size_t shared_memory_bytes,
@@ -75,6 +77,26 @@ using glimmer::interceptor::RuntimeStreamSynchronizeFunction;
         return real_dlsym == nullptr
                    ? nullptr
                    : reinterpret_cast<RuntimeMallocFunction>(real_dlsym(RTLD_NEXT, "cudaMalloc"));
+    }();
+    return function;
+}
+
+[[nodiscard]] RuntimeMallocManagedFunction resolve_runtime_malloc_managed() noexcept {
+    static RuntimeMallocManagedFunction function = []() noexcept {
+        const DlsymFunction real_dlsym = glimmer::interceptor::resolve_real_dlsym();
+        return real_dlsym == nullptr ? nullptr
+                                     : reinterpret_cast<RuntimeMallocManagedFunction>(
+                                           real_dlsym(RTLD_NEXT, "cudaMallocManaged"));
+    }();
+    return function;
+}
+
+[[nodiscard]] RuntimeMallocPitchFunction resolve_runtime_malloc_pitch() noexcept {
+    static RuntimeMallocPitchFunction function = []() noexcept {
+        const DlsymFunction real_dlsym = glimmer::interceptor::resolve_real_dlsym();
+        return real_dlsym == nullptr ? nullptr
+                                     : reinterpret_cast<RuntimeMallocPitchFunction>(
+                                           real_dlsym(RTLD_NEXT, "cudaMallocPitch"));
     }();
     return function;
 }
@@ -475,6 +497,49 @@ extern "C" cudaError_t CUDARTAPI cudaMalloc(void** device_pointer, std::size_t m
         return glimmer::interceptor::intercept_runtime_malloc(device_pointer, memory_bytes,
                                                               real_allocate, resolve_runtime_free(),
                                                               resolve_runtime_get_device());
+    } catch (...) {
+        return cudaErrorUnknown;
+    }
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMallocManaged(void** device_pointer, std::size_t memory_bytes,
+                                                   unsigned int flags) {
+    if (device_pointer == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    const bool is_reentrant = glimmer::interceptor::is_inside_runtime_call();
+    RuntimeCallScope scope;
+    try {
+        const RuntimeMallocManagedFunction real_allocate = resolve_runtime_malloc_managed();
+        if (is_reentrant) {
+            return real_allocate == nullptr ? cudaErrorNotSupported
+                                            : real_allocate(device_pointer, memory_bytes, flags);
+        }
+        return glimmer::interceptor::intercept_runtime_malloc_managed(
+            device_pointer, memory_bytes, flags, real_allocate, resolve_runtime_free(),
+            resolve_runtime_get_device());
+    } catch (...) {
+        return cudaErrorUnknown;
+    }
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMallocPitch(void** device_pointer, std::size_t* pitch,
+                                                 std::size_t width_bytes, std::size_t height) {
+    if (device_pointer == nullptr || pitch == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    const bool is_reentrant = glimmer::interceptor::is_inside_runtime_call();
+    RuntimeCallScope scope;
+    try {
+        const RuntimeMallocPitchFunction real_allocate = resolve_runtime_malloc_pitch();
+        if (is_reentrant) {
+            return real_allocate == nullptr
+                       ? cudaErrorNotSupported
+                       : real_allocate(device_pointer, pitch, width_bytes, height);
+        }
+        return glimmer::interceptor::intercept_runtime_malloc_pitch(
+            device_pointer, pitch, width_bytes, height, real_allocate, resolve_runtime_free(),
+            resolve_runtime_get_device());
     } catch (...) {
         return cudaErrorUnknown;
     }

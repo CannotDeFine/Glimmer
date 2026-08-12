@@ -22,15 +22,20 @@ package is unsuitable.
 ## CUDA interceptor SDK dependency
 
 The optional CUDA interceptor requires NVIDIA CUDA Toolkit headers for the
-CUDA Driver API ABI declarations. The toolkit is a vendor SDK dependency; it
-is discovered with `find_package(CUDAToolkit)` only when
-`GLIMMER_BUILD_CUDA_INTERCEPTOR=ON`. CUDA headers and binaries are not vendored
-in this repository.
+CUDA Driver API ABI declarations. The standalone CUDA workload harnesses also
+require the Toolkit to compile their Runtime programs. The Toolkit is a vendor
+SDK dependency; it is discovered with `find_package(CUDAToolkit)` when either
+`GLIMMER_BUILD_CUDA_INTERCEPTOR=ON` or `GLIMMER_BUILD_CUDA_WORKLOAD=ON`. CUDA
+headers and binaries are not vendored in this repository.
 
 The interceptor resolves `libcuda.so.1` at runtime with the Linux dynamic
-loader rather than linking directly to the NVIDIA Driver. This keeps the
-standard build and no-GPU tests independent of a CUDA installation. CUDA
-integration tests must state the Toolkit and Driver versions they exercise.
+loader rather than linking directly to the NVIDIA Driver. On split loader/vendor
+installations, such as WSL, it also discovers the already-loaded vendor
+`libcuda.so.1.1` object and resolves symbols from that object instead of the
+loader shim. This keeps the standard build and no-GPU tests independent of a
+CUDA installation while avoiding recursive Driver-internal lookups. CUDA
+integration tests must state the Toolkit, Driver, and loader layout they
+exercise when the layout is non-standard.
 
 ## Introducing a dependency
 

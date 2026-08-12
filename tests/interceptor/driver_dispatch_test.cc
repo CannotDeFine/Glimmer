@@ -12,6 +12,7 @@ using glimmer::interceptor::DriverFunctionTable;
 using glimmer::interceptor::is_inside_driver_call;
 
 bool g_guard_failed = false;
+const DriverDispatch* g_recursive_dispatch = nullptr;
 
 bool expect(bool condition, std::string_view message) {
     if (condition) {
@@ -451,6 +452,16 @@ CUresult CUDAAPI fake_get_proc_address_v2(const char*, void** function_pointer, 
     return result;
 }
 
+CUresult CUDAAPI recursive_get_proc_address_v2(const char* symbol, void** function_pointer,
+                                               int cuda_version, cuuint64_t flags,
+                                               CUdriverProcAddressQueryResult* symbol_status) {
+    if (g_recursive_dispatch == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return g_recursive_dispatch->get_proc_address_v2(symbol, function_pointer, cuda_version, flags,
+                                                     symbol_status);
+}
+
 }  // namespace
 
 int main() {
@@ -804,6 +815,17 @@ int main() {
                    function_pointer != nullptr && symbol_status == CU_GET_PROC_ADDRESS_SUCCESS,
                "fake v2 resolver failed");
     all_passed &= expect(!g_guard_failed, "Driver call guard was not active");
+
+    DriverFunctionTable recursive_functions = functions;
+    recursive_functions.get_proc_address_v2 = &recursive_get_proc_address_v2;
+    const DriverDispatch recursive_dispatch(recursive_functions);
+    g_recursive_dispatch = &recursive_dispatch;
+    function_pointer = nullptr;
+    all_passed &=
+        expect(recursive_dispatch.get_proc_address_v2("recursive", &function_pointer, 0, 0,
+                                                      &symbol_status) == CUDA_ERROR_NOT_SUPPORTED,
+               "recursive proc-address dispatch was not rejected");
+    g_recursive_dispatch = nullptr;
 
     DriverFunctionTable legacy_only_functions = functions;
     legacy_only_functions.mem_alloc_async_ptsz = nullptr;

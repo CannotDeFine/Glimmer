@@ -1,4 +1,6 @@
 add_library(glimmer_control
+    composite_quota.cc
+    device_capacity_quota.cc
     process_memory_quota.cc
     shared_memory_quota.cc
 )

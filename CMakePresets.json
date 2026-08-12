@@ -49,7 +49,8 @@
       "inherits": "debug",
       "cacheVariables": {
         "GLIMMER_BUILD_CUDA_INTERCEPTOR": "ON",
-        "GLIMMER_ENABLE_CUDA_GPU_TESTS": "OFF"
+        "GLIMMER_ENABLE_CUDA_GPU_TESTS": "OFF",
+        "GLIMMER_BUILD_CUDA_WORKLOAD": "OFF"
       }
     },
     {
@@ -57,7 +58,8 @@
       "displayName": "CUDA interceptor clang-tidy",
       "inherits": "cuda-debug",
       "cacheVariables": {
-        "GLIMMER_ENABLE_CLANG_TIDY": "ON"
+        "GLIMMER_ENABLE_CLANG_TIDY": "ON",
+        "GLIMMER_BUILD_CUDA_WORKLOAD": "ON"
       }
     },
     {
@@ -65,7 +67,8 @@
       "displayName": "CUDA interceptor with GPU tests",
       "inherits": "cuda-debug",
       "cacheVariables": {
-        "GLIMMER_ENABLE_CUDA_GPU_TESTS": "ON"
+        "GLIMMER_ENABLE_CUDA_GPU_TESTS": "ON",
+        "GLIMMER_BUILD_CUDA_WORKLOAD": "ON"
       }
     }
   ],

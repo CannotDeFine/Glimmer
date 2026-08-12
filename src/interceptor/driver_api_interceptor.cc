@@ -3,6 +3,8 @@
 #endif
 
 #include "glimmer/control/process_memory_quota.h"
+#include "glimmer/control/composite_quota.h"
+#include "glimmer/control/device_capacity_quota.h"
 #include "glimmer/control/shared_memory_quota.h"
 #include "glimmer/core/scheduler_mode.h"
 
@@ -36,7 +38,11 @@ namespace glimmer::interceptor {
 
 namespace {
 
+using glimmer::control::CompositeQuota;
+using glimmer::control::DeviceCapacityQuota;
 using glimmer::control::DeviceId;
+using glimmer::control::DeviceMemoryCapacity;
+using glimmer::control::DeviceMemoryCapacityResolver;
 using glimmer::control::ProcessMemoryQuota;
 using glimmer::control::QuotaStore;
 using glimmer::control::SharedMemoryQuota;
@@ -91,8 +97,11 @@ class ProcAddressV2Scope {
     return state;
 }
 
-[[nodiscard]] std::optional<MemoryBytes> read_quota_limit() {
-    const char* value = std::getenv("GLIMMER_MEMORY_LIMIT_BYTES");
+[[nodiscard]] std::optional<MemoryBytes> read_memory_limit(const char* variable_name) {
+    if (variable_name == nullptr) {
+        return std::nullopt;
+    }
+    const char* value = std::getenv(variable_name);
     if (value == nullptr) {
         return std::nullopt;
     }
@@ -104,6 +113,10 @@ class ProcAddressV2Scope {
         return std::nullopt;
     }
     return limit_bytes;
+}
+
+[[nodiscard]] std::optional<MemoryBytes> read_quota_limit() {
+    return read_memory_limit("GLIMMER_MEMORY_LIMIT_BYTES");
 }
 
 [[nodiscard]] std::optional<glimmer::control::DeviceId> read_quota_device() {
@@ -141,6 +154,44 @@ class ProcAddressV2Scope {
 
 [[nodiscard]] bool read_memory_info_trace_setting() noexcept {
     return read_trace_setting("GLIMMER_TRACE_MEMORY_INFO");
+}
+
+bool resolve_device_capacity(void* context, DeviceId device,
+                             DeviceMemoryCapacity* capacity) noexcept {
+    if (context == nullptr || capacity == nullptr || device < 0) {
+        return false;
+    }
+
+    auto* driver = static_cast<DriverDispatch*>(context);
+    CUdevice current_device = -1;
+    const bool has_matching_context = driver->has_context_queries() &&
+                                      driver->context_get_device(&current_device) == CUDA_SUCCESS &&
+                                      current_device == device;
+    if (has_matching_context) {
+        std::size_t free_bytes = 0;
+        std::size_t total_bytes = 0;
+        if (driver->mem_get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS && total_bytes != 0) {
+            *capacity = DeviceMemoryCapacity{.total_bytes = total_bytes, .free_bytes = free_bytes};
+            return true;
+        }
+    }
+
+    // Without a matching current context, cuMemGetInfo cannot identify the
+    // requested device. Use the device-specific total query only as a
+    // fallback; normal allocation admission follows the context-aware path
+    // above and avoids an unnecessary Driver entry point.
+    std::size_t total_bytes = 0;
+    if (!driver->has_device_total_mem() ||
+        driver->device_total_mem(&total_bytes, static_cast<CUdevice>(device)) != CUDA_SUCCESS ||
+        total_bytes == 0) {
+        return false;
+    }
+    // A total-capacity query is valid without a matching current context. In
+    // that case retain the total-memory boundary and defer the physical-free
+    // check until the allocation path has a matching context and cuMemGetInfo
+    // can safely identify the same device.
+    *capacity = DeviceMemoryCapacity{.total_bytes = total_bytes, .free_bytes = total_bytes};
+    return true;
 }
 
 std::uint64_t next_launch_observation_count(std::atomic<std::uint64_t>& count) noexcept {
@@ -237,10 +288,29 @@ void initialize_state(InterceptorState& state) noexcept {
                     "[glimmer] failed to initialize the shared memory quota\n");
                 return;
             }
+            const char* task_limit_value = std::getenv("GLIMMER_TASK_MEMORY_LIMIT_BYTES");
+            if (task_limit_value != nullptr) {
+                const std::optional<MemoryBytes> task_limit =
+                    read_memory_limit("GLIMMER_TASK_MEMORY_LIMIT_BYTES");
+                if (!task_limit.has_value()) {
+                    state.quota_mode = QuotaMode::kInvalidConfiguration;
+                    glimmer::interceptor::report_diagnostic(
+                        "[glimmer] GLIMMER_TASK_MEMORY_LIMIT_BYTES is invalid\n");
+                    return;
+                }
+                auto task_quota = std::make_unique<ProcessMemoryQuota>(*task_limit);
+                state.quota =
+                    std::make_unique<CompositeQuota>(std::move(state.quota), std::move(task_quota));
+            }
             state.uses_shared_quota = true;
         } else {
             state.quota = std::make_unique<ProcessMemoryQuota>(*limit_bytes);
         }
+
+        auto physical_quota = std::make_unique<DeviceCapacityQuota>(
+            static_cast<DeviceMemoryCapacityResolver>(&resolve_device_capacity), &state.driver);
+        state.quota =
+            std::make_unique<CompositeQuota>(std::move(state.quota), std::move(physical_quota));
         state.quota_mode = QuotaMode::kEnabled;
     } catch (...) {
         state.quota_mode = QuotaMode::kInvalidConfiguration;
@@ -360,24 +430,20 @@ template <typename Availability, typename Invocation>
 
 namespace glimmer::interceptor {
 
-cudaError_t intercept_runtime_malloc(void** device_pointer, std::size_t memory_bytes,
-                                     RuntimeMallocFunction allocate, RuntimeFreeFunction release,
-                                     RuntimeGetDeviceFunction get_device) {
+template <typename Allocate>
+cudaError_t intercept_runtime_malloc_impl(void** device_pointer, std::size_t memory_bytes,
+                                          Allocate&& allocate, RuntimeFreeFunction release,
+                                          RuntimeGetDeviceFunction get_device) {
     InterceptorState& state = get_state();
-    if (allocate == nullptr) {
-        return cudaErrorNotSupported;
-    }
     if (device_pointer == nullptr) {
         return cudaErrorInvalidValue;
     }
     if (!ensure_initialized(state)) {
-        return std::getenv("GLIMMER_MEMORY_LIMIT_BYTES") == nullptr
-                   ? allocate(device_pointer, memory_bytes)
-                   : cudaErrorUnknown;
+        return std::getenv("GLIMMER_MEMORY_LIMIT_BYTES") == nullptr ? allocate() : cudaErrorUnknown;
     }
 
     if (state.quota_mode == QuotaMode::kDisabled) {
-        return allocate(device_pointer, memory_bytes);
+        return allocate();
     }
     if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
         return cudaErrorInvalidValue;
@@ -418,15 +484,12 @@ cudaError_t intercept_runtime_malloc(void** device_pointer, std::size_t memory_b
         return state.quota->is_healthy() ? cudaErrorMemoryAllocation : cudaErrorUnknown;
     }
 
-    const cudaError_t allocation_result = allocate(device_pointer, memory_bytes);
+    const cudaError_t allocation_result = allocate();
     if (allocation_result != cudaSuccess) {
         return allocation_result;
     }
 
     if (*device_pointer == nullptr) {
-        // A successful driver result with no pointer is an ambiguous external
-        // state. Keep the reservation charged because the allocation cannot
-        // be safely released without a pointer.
         reservation->abandon();
         state.allocations.mark_accounting_degraded();
         return cudaErrorUnknown;
@@ -454,9 +517,6 @@ cudaError_t intercept_runtime_malloc(void** device_pointer, std::size_t memory_b
 
     if (!state.allocations.record(make_allocation_identity(*device_pointer, *context),
                                   memory_bytes)) {
-        // A failed record is an accounting invariant violation, even when
-        // external cleanup succeeds. Stop admitting work before attempting
-        // the compensating cleanup.
         state.allocations.mark_accounting_degraded();
         const cudaError_t cleanup_result =
             release == nullptr ? cudaErrorUnknown : release(*device_pointer);
@@ -466,6 +526,197 @@ cudaError_t intercept_runtime_malloc(void** device_pointer, std::size_t memory_b
         }
         if (state.quota == nullptr ||
             !state.quota->release(static_cast<DeviceId>(context->device), memory_bytes)) {
+            state.allocations.mark_accounting_degraded();
+            return cudaErrorUnknown;
+        }
+        return cudaErrorMemoryAllocation;
+    }
+    return cudaSuccess;
+}
+
+cudaError_t intercept_runtime_malloc(void** device_pointer, std::size_t memory_bytes,
+                                     RuntimeMallocFunction allocate, RuntimeFreeFunction release,
+                                     RuntimeGetDeviceFunction get_device) {
+    if (allocate == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    return intercept_runtime_malloc_impl(
+        device_pointer, memory_bytes,
+        [device_pointer, memory_bytes, allocate] { return allocate(device_pointer, memory_bytes); },
+        release, get_device);
+}
+
+cudaError_t intercept_runtime_malloc_managed(void** device_pointer, std::size_t memory_bytes,
+                                             unsigned int flags,
+                                             RuntimeMallocManagedFunction allocate,
+                                             RuntimeFreeFunction release,
+                                             RuntimeGetDeviceFunction get_device) {
+    if (allocate == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    return intercept_runtime_malloc_impl(
+        device_pointer, memory_bytes,
+        [device_pointer, memory_bytes, flags, allocate] {
+            return allocate(device_pointer, memory_bytes, flags);
+        },
+        release, get_device);
+}
+
+cudaError_t intercept_runtime_malloc_pitch(void** device_pointer, std::size_t* pitch,
+                                           std::size_t width_bytes, std::size_t height,
+                                           RuntimeMallocPitchFunction allocate,
+                                           RuntimeFreeFunction release,
+                                           RuntimeGetDeviceFunction get_device) {
+    InterceptorState& state = get_state();
+    if (device_pointer == nullptr || pitch == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (allocate == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    if (!ensure_initialized(state)) {
+        return std::getenv("GLIMMER_MEMORY_LIMIT_BYTES") == nullptr
+                   ? allocate(device_pointer, pitch, width_bytes, height)
+                   : cudaErrorUnknown;
+    }
+
+    if (state.quota_mode == QuotaMode::kDisabled) {
+        return allocate(device_pointer, pitch, width_bytes, height);
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return cudaErrorInvalidValue;
+    }
+    if (state.allocations.is_accounting_degraded()) {
+        return cudaErrorUnknown;
+    }
+    if (state.quota == nullptr || !state.quota->is_healthy()) {
+        return cudaErrorUnknown;
+    }
+
+    DeviceId device = QuotaStore::default_device;
+    bool device_resolved = false;
+    if (get_device != nullptr) {
+        int runtime_device = 0;
+        if (get_device(&runtime_device) == cudaSuccess && runtime_device >= 0) {
+            device = static_cast<DeviceId>(runtime_device);
+            device_resolved = true;
+        }
+    }
+
+    const std::optional<ContextIdentity> context_before_allocation =
+        capture_context_identity(state);
+    if (context_before_allocation.has_value()) {
+        device = static_cast<DeviceId>(context_before_allocation->device);
+        device_resolved = true;
+    } else if (state.uses_shared_quota && !device_resolved) {
+        return cudaErrorInvalidValue;
+    }
+
+    const std::optional<MemoryBytes> requested_bytes =
+        checked_multiply(static_cast<MemoryBytes>(width_bytes), static_cast<MemoryBytes>(height));
+    if (!requested_bytes.has_value()) {
+        return cudaErrorInvalidValue;
+    }
+    auto reservation = state.quota->try_reserve(device, *requested_bytes);
+    if (!reservation.has_value()) {
+        return state.quota->is_healthy() ? cudaErrorMemoryAllocation : cudaErrorUnknown;
+    }
+
+    const cudaError_t allocation_result = allocate(device_pointer, pitch, width_bytes, height);
+    if (allocation_result != cudaSuccess) {
+        return allocation_result;
+    }
+    if (*device_pointer == nullptr) {
+        reservation->abandon();
+        state.allocations.mark_accounting_degraded();
+        return cudaErrorUnknown;
+    }
+    const auto cleanup_allocation = [device_pointer, release] {
+        return release == nullptr ? cudaErrorUnknown : release(*device_pointer);
+    };
+
+    const std::optional<ContextIdentity> context = capture_context_identity(state);
+    if (!context.has_value() || static_cast<DeviceId>(context->device) != device) {
+        const cudaError_t cleanup_result = cleanup_allocation();
+        if (cleanup_result != cudaSuccess) {
+            reservation->abandon();
+            state.allocations.mark_accounting_degraded();
+            return cleanup_result;
+        }
+        return cudaErrorUnknown;
+    }
+
+    const std::optional<MemoryBytes> actual_bytes =
+        checked_multiply(static_cast<MemoryBytes>(*pitch), static_cast<MemoryBytes>(height));
+    if (!actual_bytes.has_value()) {
+        const cudaError_t cleanup_result = cleanup_allocation();
+        if (cleanup_result != cudaSuccess) {
+            reservation->abandon();
+            state.allocations.mark_accounting_degraded();
+            return cleanup_result;
+        }
+        return cudaErrorInvalidValue;
+    }
+
+    std::optional<glimmer::control::MemoryReservation> adjustment;
+    if (*actual_bytes > *requested_bytes) {
+        adjustment = state.quota->try_reserve(device, *actual_bytes - *requested_bytes);
+        if (!adjustment.has_value()) {
+            const cudaError_t cleanup_result = cleanup_allocation();
+            if (cleanup_result != cudaSuccess) {
+                reservation->abandon();
+                state.allocations.mark_accounting_degraded();
+                return cleanup_result;
+            }
+            return state.quota->is_healthy() ? cudaErrorMemoryAllocation : cudaErrorUnknown;
+        }
+    }
+
+    if (!reservation->commit()) {
+        const cudaError_t cleanup_result = cleanup_allocation();
+        if (cleanup_result != cudaSuccess) {
+            reservation->abandon();
+            if (adjustment.has_value()) {
+                adjustment->abandon();
+            }
+        }
+        state.allocations.mark_accounting_degraded();
+        return cleanup_result != cudaSuccess ? cleanup_result : cudaErrorUnknown;
+    }
+
+    MemoryBytes committed_bytes = *requested_bytes;
+    if (adjustment.has_value()) {
+        if (!adjustment->commit()) {
+            const cudaError_t cleanup_result = cleanup_allocation();
+            if (cleanup_result != cudaSuccess) {
+                state.allocations.mark_accounting_degraded();
+                return cleanup_result;
+            }
+            if (!state.quota->release(device, committed_bytes)) {
+                state.allocations.mark_accounting_degraded();
+            }
+            state.allocations.mark_accounting_degraded();
+            return cudaErrorUnknown;
+        }
+        committed_bytes = *actual_bytes;
+    } else if (*actual_bytes < *requested_bytes) {
+        if (!state.quota->release(device, *requested_bytes - *actual_bytes)) {
+            const cudaError_t cleanup_result = cleanup_allocation();
+            state.allocations.mark_accounting_degraded();
+            return cleanup_result == cudaSuccess ? cudaErrorUnknown : cleanup_result;
+        }
+        committed_bytes = *actual_bytes;
+    }
+
+    if (!state.allocations.record(make_allocation_identity(*device_pointer, *context),
+                                  *actual_bytes)) {
+        state.allocations.mark_accounting_degraded();
+        const cudaError_t cleanup_result = cleanup_allocation();
+        if (cleanup_result != cudaSuccess) {
+            state.allocations.mark_accounting_degraded();
+            return cleanup_result;
+        }
+        if (!state.quota->release(device, committed_bytes)) {
             state.allocations.mark_accounting_degraded();
             return cudaErrorUnknown;
         }
@@ -564,6 +815,8 @@ cudaError_t intercept_runtime_mem_get_info(std::size_t* free_bytes, std::size_t*
     }
     const DeviceId device =
         context.has_value() ? static_cast<DeviceId>(context->device) : QuotaStore::default_device;
+    const std::size_t physical_total_bytes = *total_bytes;
+    const std::size_t physical_free_bytes = *free_bytes;
     const glimmer::control::MemoryInfo memory_info =
         state.quota->get_memory_info(device, *total_bytes, *free_bytes);
     if (!state.quota->is_healthy()) {
@@ -572,7 +825,8 @@ cudaError_t intercept_runtime_mem_get_info(std::size_t* free_bytes, std::size_t*
     *total_bytes = static_cast<std::size_t>(memory_info.total_bytes);
     *free_bytes = static_cast<std::size_t>(memory_info.free_bytes);
     report_memory_info_observed("cudaMemGetInfo", device, static_cast<std::uint64_t>(*total_bytes),
-                                static_cast<std::uint64_t>(*free_bytes));
+                                static_cast<std::uint64_t>(*free_bytes), physical_total_bytes,
+                                physical_free_bytes);
     return cudaSuccess;
 }
 
@@ -2222,7 +2476,9 @@ void report_kernel_launch_observed(const KernelLaunchObservation& observation) n
 }
 
 void report_memory_info_observed(const char* api_name, std::int32_t device,
-                                 std::uint64_t total_bytes, std::uint64_t free_bytes) noexcept {
+                                 std::uint64_t total_bytes, std::uint64_t free_bytes,
+                                 std::uint64_t physical_total_bytes,
+                                 std::uint64_t physical_free_bytes) noexcept {
     try {
         InterceptorState& state = get_state();
         if (!state.trace_memory_info) {
@@ -2233,6 +2489,8 @@ void report_memory_info_observed(const char* api_name, std::int32_t device,
             .device = device,
             .total_bytes = total_bytes,
             .free_bytes = free_bytes,
+            .physical_total_bytes = physical_total_bytes,
+            .physical_free_bytes = physical_free_bytes,
         });
     } catch (...) {
         glimmer::interceptor::report_diagnostic("[glimmer] memory info observation failed\n");
@@ -2621,6 +2879,8 @@ CUresult intercept_mem_get_info(std::size_t* free_bytes, std::size_t* total_byte
     }
     const DeviceId device =
         context.has_value() ? static_cast<DeviceId>(context->device) : QuotaStore::default_device;
+    const std::size_t physical_total_bytes = *total_bytes;
+    const std::size_t physical_free_bytes = *free_bytes;
     const glimmer::control::MemoryInfo memory_info =
         state.quota->get_memory_info(device, *total_bytes, *free_bytes);
     if (!state.quota->is_healthy()) {
@@ -2629,7 +2889,8 @@ CUresult intercept_mem_get_info(std::size_t* free_bytes, std::size_t* total_byte
     *total_bytes = static_cast<std::size_t>(memory_info.total_bytes);
     *free_bytes = static_cast<std::size_t>(memory_info.free_bytes);
     report_memory_info_observed("cuMemGetInfo_v2", device, static_cast<std::uint64_t>(*total_bytes),
-                                static_cast<std::uint64_t>(*free_bytes));
+                                static_cast<std::uint64_t>(*free_bytes), physical_total_bytes,
+                                physical_free_bytes);
     return CUDA_SUCCESS;
 }
 
@@ -2747,6 +3008,22 @@ CUresult intercept_get_proc_address_v2(const char* symbol, void** function_point
             result = CUDA_SUCCESS;
             if (symbol_status != nullptr) {
                 *symbol_status = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+            }
+        }
+        if (result == CUDA_ERROR_NOT_SUPPORTED && state.driver.has_get_proc_address()) {
+            // Older driver loaders may export the v2 entry point while only
+            // implementing the legacy resolver for a particular query. Keep
+            // the application-visible lookup compatible with that driver.
+            *function_pointer = nullptr;
+            result = state.driver.get_proc_address(symbol, function_pointer, cuda_version, flags);
+            const bool symbol_not_found = result == CUDA_ERROR_NOT_FOUND;
+            if (symbol_not_found) {
+                result = CUDA_SUCCESS;
+            }
+            if (result == CUDA_SUCCESS && symbol_status != nullptr) {
+                *symbol_status = symbol_not_found || *function_pointer == nullptr
+                                     ? CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND
+                                     : CU_GET_PROC_ADDRESS_SUCCESS;
             }
         }
     } else if (state.driver.has_get_proc_address()) {

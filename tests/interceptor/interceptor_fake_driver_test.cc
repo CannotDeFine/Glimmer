@@ -25,11 +25,13 @@
 namespace {
 
 constexpr std::size_t kQuotaBytes = 4096;
+constexpr std::size_t kFakePhysicalMemoryBytes = std::size_t{64} * 1024 * 1024;
 constexpr std::size_t kDirectAllocationBytes = 3072;
 constexpr std::size_t kRuntimeAllocationBytes = 1024;
 constexpr std::size_t kAsyncAllocationBytes = 1024;
 constexpr std::size_t kRejectedAllocationBytes = 2048;
 constexpr std::size_t kForcedAllocationFailureBytes = 1536;
+constexpr std::size_t kTaskLimitBytes = 1024;
 
 using InitFunction = CUresult (*)(unsigned int flags);
 using LaunchKernelFunction = CUresult (*)(CUfunction function, unsigned int grid_dim_x,
@@ -124,6 +126,10 @@ using GetProcAddressV2Function = CUresult (*)(const char* symbol, void** functio
                                               int cuda_version, cuuint64_t flags,
                                               CUdriverProcAddressQueryResult* symbol_status);
 using RuntimeMallocFunction = cudaError_t (*)(void** device_pointer, std::size_t memory_bytes);
+using RuntimeMallocManagedFunction = cudaError_t (*)(void** device_pointer,
+                                                     std::size_t memory_bytes, unsigned int flags);
+using RuntimeMallocPitchFunction = cudaError_t (*)(void** device_pointer, std::size_t* pitch,
+                                                   std::size_t width_bytes, std::size_t height);
 using RuntimeMallocAsyncFunction = cudaError_t (*)(void** device_pointer, std::size_t memory_bytes,
                                                    cudaStream_t stream);
 using RuntimeLaunchKernelFunction = cudaError_t (*)(const void* function, dim3 grid_dim,
@@ -275,6 +281,120 @@ int run_duplicate_record_failure_test() {
                : EXIT_FAILURE;
 }
 
+int run_task_memory_limit_test() {
+    const char* configured_tenant = std::getenv("GLIMMER_QUOTA_TENANT_ID");
+    if (!expect(configured_tenant != nullptr && *configured_tenant != '\0',
+                "task-limit test tenant was not configured")) {
+        return EXIT_FAILURE;
+    }
+    const std::string tenant_id =
+        std::string(configured_tenant) + "-" + std::to_string(static_cast<long long>(::getpid()));
+    if (!expect(::setenv("GLIMMER_QUOTA_TENANT_ID", tenant_id.c_str(), 1) == 0,
+                "task-limit test tenant could not be isolated") ||
+        !expect(glimmer::control::SharedMemoryQuota::remove_region(tenant_id),
+                "stale task-limit test region could not be removed")) {
+        return EXIT_FAILURE;
+    }
+
+    const InitFunction init = resolve_default<InitFunction>("cuInit");
+    const AllocFunction allocate = resolve_default<AllocFunction>("cuMemAlloc_v2");
+    const FreeFunction release = resolve_default<FreeFunction>("cuMemFree_v2");
+    const MemGetInfoFunction get_info = resolve_default<MemGetInfoFunction>("cuMemGetInfo_v2");
+    if (!expect(init != nullptr && allocate != nullptr && release != nullptr && get_info != nullptr,
+                "task-limit test symbols were not exported")) {
+        return EXIT_FAILURE;
+    }
+
+    CUdeviceptr pointer = 0;
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    const bool allocated =
+        init(0) == CUDA_SUCCESS && allocate(&pointer, kTaskLimitBytes) == CUDA_SUCCESS;
+    const bool rejected = allocate(&pointer, 1) == CUDA_ERROR_OUT_OF_MEMORY && pointer != 0;
+    const bool virtualized = get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS &&
+                             total_bytes == kTaskLimitBytes && free_bytes == 0;
+    const bool released = release(pointer) == CUDA_SUCCESS &&
+                          get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS &&
+                          free_bytes == kTaskLimitBytes;
+    const bool removed = glimmer::control::SharedMemoryQuota::remove_region(tenant_id);
+    return expect(allocated, "task-limit allocation was rejected") &&
+                   expect(rejected, "task-limit allocation was not rejected") &&
+                   expect(virtualized, "task-limit memory view was not virtualized") &&
+                   expect(released, "task-limit release did not restore the task quota") &&
+                   expect(removed, "task-limit region could not be removed")
+               ? EXIT_SUCCESS
+               : EXIT_FAILURE;
+}
+
+int run_physical_capacity_test() {
+    const InitFunction init = resolve_default<InitFunction>("cuInit");
+    const AllocFunction allocate = resolve_default<AllocFunction>("cuMemAlloc_v2");
+    const FreeFunction release = resolve_default<FreeFunction>("cuMemFree_v2");
+    const MemGetInfoFunction get_info = resolve_default<MemGetInfoFunction>("cuMemGetInfo_v2");
+    const DeviceTotalMemFunction get_total =
+        resolve_default<DeviceTotalMemFunction>("cuDeviceTotalMem_v2");
+    if (!expect(init != nullptr && allocate != nullptr && release != nullptr &&
+                    get_info != nullptr && get_total != nullptr,
+                "physical-capacity test symbols were not exported")) {
+        return EXIT_FAILURE;
+    }
+
+    std::size_t total_bytes = 0;
+    std::size_t free_bytes = 0;
+    CUdeviceptr pointer = 0;
+    const bool initialized = init(0) == CUDA_SUCCESS;
+    const bool total_is_physical = initialized && get_total(&total_bytes, 0) == CUDA_SUCCESS &&
+                                   total_bytes == kFakePhysicalMemoryBytes;
+    const bool initial_view_is_physical = get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS &&
+                                          total_bytes == kFakePhysicalMemoryBytes &&
+                                          free_bytes == kFakePhysicalMemoryBytes;
+    const bool allocated = allocate(&pointer, kFakePhysicalMemoryBytes) == CUDA_SUCCESS;
+    const bool exhausted_view = get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS &&
+                                total_bytes == kFakePhysicalMemoryBytes && free_bytes == 0;
+    CUdeviceptr rejected_pointer = 0x1234;
+    const bool rejected =
+        allocate(&rejected_pointer, 1) == CUDA_ERROR_OUT_OF_MEMORY && rejected_pointer == 0x1234;
+    const bool released = release(pointer) == CUDA_SUCCESS &&
+                          get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS &&
+                          free_bytes == kFakePhysicalMemoryBytes;
+    return expect(total_is_physical, "configured quota was not clamped to physical total") &&
+                   expect(initial_view_is_physical,
+                          "initial memory view did not expose physical capacity") &&
+                   expect(allocated, "allocation at the physical capacity was rejected") &&
+                   expect(exhausted_view, "physical exhaustion was not reflected in the view") &&
+                   expect(rejected, "allocation beyond physical capacity was not rejected") &&
+                   expect(released, "physical-capacity release did not restore the view")
+               ? EXIT_SUCCESS
+               : EXIT_FAILURE;
+}
+
+int run_nvml_only_virtualization_test() {
+    const NvmlInitFunction nvml_init = resolve_default<NvmlInitFunction>("nvmlInit_v2");
+    const NvmlShutdownFunction nvml_shutdown =
+        resolve_default<NvmlShutdownFunction>("nvmlShutdown");
+    const NvmlDeviceGetHandleByIndexFunction get_handle =
+        resolve_default<NvmlDeviceGetHandleByIndexFunction>("nvmlDeviceGetHandleByIndex_v2");
+    const NvmlDeviceGetMemoryInfoFunction get_memory_info =
+        resolve_default<NvmlDeviceGetMemoryInfoFunction>("nvmlDeviceGetMemoryInfo");
+    if (!expect(nvml_init != nullptr && nvml_shutdown != nullptr && get_handle != nullptr &&
+                    get_memory_info != nullptr,
+                "NVML-only test symbols were not exported")) {
+        return EXIT_FAILURE;
+    }
+
+    nvmlDevice_t device = nullptr;
+    nvmlMemory_t memory{};
+    const bool virtualized =
+        nvml_init() == NVML_SUCCESS && get_handle(0, &device) == NVML_SUCCESS &&
+        get_memory_info(device, &memory) == NVML_SUCCESS && memory.total == kQuotaBytes &&
+        memory.free == kQuotaBytes && memory.used == 0;
+    const bool shutdown = nvml_shutdown() == NVML_SUCCESS;
+    return expect(virtualized, "NVML-only virtualization required CUDA Driver initialization") &&
+                   expect(shutdown, "NVML-only test shutdown failed")
+               ? EXIT_SUCCESS
+               : EXIT_FAILURE;
+}
+
 int run_async_null_pointer_test(bool runtime) {
     const char* configured_tenant = std::getenv("GLIMMER_QUOTA_TENANT_ID");
     if (!expect(configured_tenant != nullptr && *configured_tenant != '\0',
@@ -389,6 +509,15 @@ int run_async_null_pointer_test(bool runtime) {
 }  // namespace
 
 int main() {
+    if (std::getenv("GLIMMER_FAKE_NVML_ONLY") != nullptr) {
+        return run_nvml_only_virtualization_test();
+    }
+    if (std::getenv("GLIMMER_FAKE_PHYSICAL_CAP") != nullptr) {
+        return run_physical_capacity_test();
+    }
+    if (std::getenv("GLIMMER_FAKE_TASK_LIMIT") != nullptr) {
+        return run_task_memory_limit_test();
+    }
     if (std::getenv("GLIMMER_FAKE_DUPLICATE_POINTER") != nullptr) {
         return run_duplicate_record_failure_test();
     }
@@ -839,6 +968,10 @@ int main() {
     all_passed &= expect(runtime_handle != nullptr, "fake CUDA runtime could not be loaded");
     const RuntimeMallocFunction runtime_allocate =
         resolve_default<RuntimeMallocFunction>("cudaMalloc");
+    const RuntimeMallocManagedFunction runtime_managed_allocate =
+        resolve_default<RuntimeMallocManagedFunction>("cudaMallocManaged");
+    const RuntimeMallocPitchFunction runtime_pitch_allocate =
+        resolve_default<RuntimeMallocPitchFunction>("cudaMallocPitch");
     const RuntimeLaunchKernelFunction runtime_launch_kernel =
         resolve_default<RuntimeLaunchKernelFunction>("cudaLaunchKernel");
     const RuntimeLaunchKernelFunction runtime_launch_kernel_ptsz =
@@ -915,7 +1048,8 @@ int main() {
         resolve_default<RuntimeMemPoolImportPointerFunction>("cudaMemPoolImportPointer");
     void* runtime_pointer = nullptr;
     all_passed &= expect(
-        runtime_allocate != nullptr && runtime_async_allocate != nullptr &&
+        runtime_allocate != nullptr && runtime_managed_allocate != nullptr &&
+            runtime_pitch_allocate != nullptr && runtime_async_allocate != nullptr &&
             runtime_launch_kernel != nullptr && runtime_launch_kernel_ptsz != nullptr &&
             runtime_internal_launch_kernel != nullptr &&
             runtime_internal_launch_kernel_ptsz != nullptr &&
@@ -939,6 +1073,12 @@ int main() {
         all_passed &=
             expect(dlsym(runtime_handle, "cudaMalloc") == reinterpret_cast<void*>(runtime_allocate),
                    "explicit CUDA Runtime handle did not return the interceptor wrapper");
+        all_passed &= expect(dlsym(runtime_handle, "cudaMallocManaged") ==
+                                 reinterpret_cast<void*>(runtime_managed_allocate),
+                             "explicit CUDA Runtime handle did not return the managed wrapper");
+        all_passed &= expect(dlsym(runtime_handle, "cudaMallocPitch") ==
+                                 reinterpret_cast<void*>(runtime_pitch_allocate),
+                             "explicit CUDA Runtime handle did not return the pitch wrapper");
         all_passed &= expect(dlsym(runtime_handle, "cudaLaunchKernel") ==
                                  reinterpret_cast<void*>(runtime_launch_kernel),
                              "explicit CUDA Runtime handle did not return the launch wrapper");
@@ -973,6 +1113,47 @@ int main() {
     all_passed &= expect(
         runtime_get_info(&free_bytes, &total_bytes) == cudaSuccess && free_bytes == kQuotaBytes,
         "runtime release did not restore quota");
+
+    void* runtime_managed_pointer = nullptr;
+    all_passed &= expect(runtime_managed_allocate(&runtime_managed_pointer, kRuntimeAllocationBytes,
+                                                  cudaMemAttachGlobal) == cudaSuccess,
+                         "Runtime managed allocation was rejected");
+    all_passed &= expect(runtime_get_info(&free_bytes, &total_bytes) == cudaSuccess &&
+                             free_bytes == kQuotaBytes - kRuntimeAllocationBytes,
+                         "Runtime managed allocation was not accounted");
+    all_passed &= expect(runtime_release(runtime_managed_pointer) == cudaSuccess,
+                         "Runtime managed allocation was not freed");
+    void* rejected_managed_pointer = nullptr;
+    all_passed &=
+        expect(runtime_managed_allocate(&rejected_managed_pointer, kQuotaBytes + 1,
+                                        cudaMemAttachGlobal) == cudaErrorMemoryAllocation &&
+                   rejected_managed_pointer == nullptr,
+               "Runtime managed quota rejection was not enforced");
+
+    constexpr std::size_t k_runtime_pitch_width_bytes = 500;
+    constexpr std::size_t k_runtime_pitch_height = 2;
+    constexpr std::size_t k_runtime_pitch_bytes = 512 * k_runtime_pitch_height;
+    void* runtime_pitch_pointer = nullptr;
+    std::size_t runtime_pitch = 0;
+    const cudaError_t runtime_pitch_result =
+        runtime_pitch_allocate(&runtime_pitch_pointer, &runtime_pitch, k_runtime_pitch_width_bytes,
+                               k_runtime_pitch_height);
+    all_passed &= expect(runtime_pitch_result == cudaSuccess && runtime_pitch == 512,
+                         "Runtime pitched allocation was rejected");
+    all_passed &= expect(runtime_get_info(&free_bytes, &total_bytes) == cudaSuccess &&
+                             free_bytes == kQuotaBytes - k_runtime_pitch_bytes,
+                         "Runtime pitched allocation was not accounted using the physical pitch");
+    all_passed &= expect(runtime_release(runtime_pitch_pointer) == cudaSuccess,
+                         "Runtime pitched allocation was not freed");
+    void* rejected_pitch_pointer = nullptr;
+    std::size_t rejected_pitch = 0;
+    all_passed &= expect(runtime_pitch_allocate(&rejected_pitch_pointer, &rejected_pitch,
+                                                kQuotaBytes + 1, 1) == cudaErrorMemoryAllocation &&
+                             rejected_pitch_pointer == nullptr,
+                         "Runtime pitched quota rejection was not enforced");
+    all_passed &= expect(
+        runtime_get_info(&free_bytes, &total_bytes) == cudaSuccess && free_bytes == kQuotaBytes,
+        "Runtime managed or pitched release did not restore quota");
 
     void* runtime_async_pointer = nullptr;
     all_passed &= expect(runtime_async_allocate(&runtime_async_pointer, kAsyncAllocationBytes,

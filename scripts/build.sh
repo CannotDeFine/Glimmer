@@ -19,8 +19,9 @@ fi
 cmake --preset debug
 cmake --build --preset debug
 
-# clangd usually looks for compile_commands.json in the project root.  Copying
-# instead of creating a symbolic link keeps this script usable on more systems.
+# clangd usually looks for compile_commands.json in the project root.  The CMake
+# target creates a link; this copy step also refreshes a regular-file fallback
+# when a tool or generator has replaced that link.
 if [[ -f "${BUILD_DIR}/compile_commands.json" ]]; then
     cmake -E copy_if_different \
         "${BUILD_DIR}/compile_commands.json" \

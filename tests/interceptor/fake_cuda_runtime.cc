@@ -18,6 +18,11 @@
 namespace {
 
 using DriverAllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes);
+using DriverManagedAllocFunction = CUresult (*)(CUdeviceptr* device_pointer,
+                                                std::size_t memory_bytes, unsigned int flags);
+using DriverPitchAllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t* pitch,
+                                              std::size_t width_bytes, std::size_t height,
+                                              unsigned int element_size_bytes);
 using DriverAllocAsyncFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes,
                                               CUstream stream);
 using DriverPoolAllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes,
@@ -71,6 +76,46 @@ extern "C" cudaError_t CUDARTAPI cudaMalloc(void** device_pointer, std::size_t m
 
     CUdeviceptr driver_pointer = 0;
     const CUresult result = allocate(&driver_pointer, memory_bytes);
+    if (result != CUDA_SUCCESS) {
+        return cudaErrorMemoryAllocation;
+    }
+    *device_pointer = to_runtime_pointer(driver_pointer);
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMallocManaged(void** device_pointer, std::size_t memory_bytes,
+                                                   unsigned int flags) {
+    if (device_pointer == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    const DriverManagedAllocFunction allocate =
+        resolve_driver_function<DriverManagedAllocFunction>("cuMemAllocManaged");
+    if (allocate == nullptr) {
+        return cudaErrorNotSupported;
+    }
+
+    CUdeviceptr driver_pointer = 0;
+    const CUresult result = allocate(&driver_pointer, memory_bytes, flags);
+    if (result != CUDA_SUCCESS) {
+        return cudaErrorMemoryAllocation;
+    }
+    *device_pointer = to_runtime_pointer(driver_pointer);
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMallocPitch(void** device_pointer, std::size_t* pitch,
+                                                 std::size_t width_bytes, std::size_t height) {
+    if (device_pointer == nullptr || pitch == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    const DriverPitchAllocFunction allocate =
+        resolve_driver_function<DriverPitchAllocFunction>("cuMemAllocPitch_v2");
+    if (allocate == nullptr) {
+        return cudaErrorNotSupported;
+    }
+
+    CUdeviceptr driver_pointer = 0;
+    const CUresult result = allocate(&driver_pointer, pitch, width_bytes, height, 1);
     if (result != CUDA_SUCCESS) {
         return cudaErrorMemoryAllocation;
     }

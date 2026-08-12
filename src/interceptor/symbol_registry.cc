@@ -171,6 +171,10 @@ extern "C" CUresult CUDAAPI cuGetProcAddress_v2(const char* symbol, void** funct
                                                 int cuda_version, cuuint64_t flags,
                                                 CUdriverProcAddressQueryResult* symbol_status);
 extern "C" cudaError_t CUDARTAPI cudaMalloc(void** device_pointer, std::size_t memory_bytes);
+extern "C" cudaError_t CUDARTAPI cudaMallocManaged(void** device_pointer, std::size_t memory_bytes,
+                                                   unsigned int flags);
+extern "C" cudaError_t CUDARTAPI cudaMallocPitch(void** device_pointer, std::size_t* pitch,
+                                                 std::size_t width_bytes, std::size_t height);
 extern "C" cudaError_t CUDARTAPI cudaLaunchKernel(const void* function, dim3 grid_dim,
                                                   dim3 block_dim, void** arguments,
                                                   std::size_t shared_memory_bytes,
@@ -270,7 +274,7 @@ struct InterceptorSymbol {
     void* wrapper;
 };
 
-const std::array<InterceptorSymbol, 116> kInterceptorSymbols{{
+const std::array<InterceptorSymbol, 118> kInterceptorSymbols{{
     {"cuInit", reinterpret_cast<void*>(&cuInit)},
     {"cuLaunchKernel", reinterpret_cast<void*>(&cuLaunchKernel)},
     {"cuLaunchKernel_ptsz", reinterpret_cast<void*>(&cuLaunchKernel_ptsz)},
@@ -344,6 +348,8 @@ const std::array<InterceptorSymbol, 116> kInterceptorSymbols{{
     {"cuGetProcAddress", reinterpret_cast<void*>(&cuGetProcAddress)},
     {"cuGetProcAddress_v2", reinterpret_cast<void*>(&cuGetProcAddress_v2)},
     {"cudaMalloc", reinterpret_cast<void*>(&cudaMalloc)},
+    {"cudaMallocManaged", reinterpret_cast<void*>(&cudaMallocManaged)},
+    {"cudaMallocPitch", reinterpret_cast<void*>(&cudaMallocPitch)},
     {"cudaLaunchKernel", reinterpret_cast<void*>(&cudaLaunchKernel)},
     {"cudaLaunchKernel_ptsz", reinterpret_cast<void*>(&cudaLaunchKernel_ptsz)},
     {"__cudaLaunchKernel", reinterpret_cast<void*>(&__cudaLaunchKernel)},
