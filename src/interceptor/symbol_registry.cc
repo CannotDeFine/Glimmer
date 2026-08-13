@@ -28,6 +28,27 @@
 #ifdef cuStreamDestroy
 #undef cuStreamDestroy
 #endif
+#ifdef cuIpcOpenMemHandle
+#undef cuIpcOpenMemHandle
+#endif
+#ifdef cuArrayCreate
+#undef cuArrayCreate
+#endif
+#ifdef cuArray3DCreate
+#undef cuArray3DCreate
+#endif
+#ifdef cuGraphicsResourceGetMappedPointer
+#undef cuGraphicsResourceGetMappedPointer
+#endif
+#ifdef cuGraphicsResourceGetMappedPointer_v2
+#undef cuGraphicsResourceGetMappedPointer_v2
+#endif
+#ifdef cuGraphicsResourceSetMapFlags
+#undef cuGraphicsResourceSetMapFlags
+#endif
+#ifdef cuGraphicsResourceSetMapFlags_v2
+#undef cuGraphicsResourceSetMapFlags_v2
+#endif
 #ifdef cuMemGetAddressRange
 #undef cuMemGetAddressRange
 #endif
@@ -95,6 +116,8 @@ extern "C" CUresult CUDAAPI cuMemAddressFree(CUdeviceptr device_pointer, std::si
 extern "C" CUresult CUDAAPI cuMemMap(CUdeviceptr device_pointer, std::size_t memory_bytes,
                                      std::size_t offset, CUmemGenericAllocationHandle handle,
                                      unsigned long long flags);
+extern "C" CUresult CUDAAPI cuMemMapArrayAsync(CUarrayMapInfo* map_info_list, unsigned int count,
+                                               CUstream stream);
 extern "C" CUresult CUDAAPI cuMemUnmap(CUdeviceptr device_pointer, std::size_t memory_bytes);
 extern "C" CUresult CUDAAPI cuMemSetAccess(CUdeviceptr device_pointer, std::size_t memory_bytes,
                                            const CUmemAccessDesc* access_descriptors,
@@ -114,6 +137,55 @@ extern "C" CUresult CUDAAPI cuMemExportToShareableHandle(void* shareable_handle,
 extern "C" CUresult CUDAAPI cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* handle,
                                                            void* os_handle,
                                                            CUmemAllocationHandleType handle_type);
+extern "C" CUresult CUDAAPI cuIpcGetMemHandle(CUipcMemHandle* handle, CUdeviceptr device_pointer);
+extern "C" CUresult CUDAAPI cuIpcOpenMemHandle(CUdeviceptr* device_pointer, CUipcMemHandle handle,
+                                               unsigned int flags);
+extern "C" CUresult CUDAAPI cuIpcOpenMemHandle_v2(CUdeviceptr* device_pointer,
+                                                  CUipcMemHandle handle, unsigned int flags);
+extern "C" CUresult CUDAAPI cuIpcCloseMemHandle(CUdeviceptr device_pointer);
+extern "C" CUresult CUDAAPI cuImportExternalMemory(
+    CUexternalMemory* external_memory, const CUDA_EXTERNAL_MEMORY_HANDLE_DESC* handle_desc);
+extern "C" CUresult CUDAAPI
+cuExternalMemoryGetMappedBuffer(CUdeviceptr* device_pointer, CUexternalMemory external_memory,
+                                const CUDA_EXTERNAL_MEMORY_BUFFER_DESC* buffer_desc);
+extern "C" CUresult CUDAAPI cuExternalMemoryGetMappedMipmappedArray(
+    CUmipmappedArray* mipmap, CUexternalMemory external_memory,
+    const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC* mipmap_desc);
+extern "C" CUresult CUDAAPI cuDestroyExternalMemory(CUexternalMemory external_memory);
+extern "C" CUresult CUDAAPI cuArrayCreate(CUarray* array, const CUDA_ARRAY_DESCRIPTOR* descriptor);
+extern "C" CUresult CUDAAPI cuArrayCreate_v2(CUarray* array,
+                                             const CUDA_ARRAY_DESCRIPTOR* descriptor);
+extern "C" CUresult CUDAAPI cuArray3DCreate(CUarray* array,
+                                            const CUDA_ARRAY3D_DESCRIPTOR* descriptor);
+extern "C" CUresult CUDAAPI cuArray3DCreate_v2(CUarray* array,
+                                               const CUDA_ARRAY3D_DESCRIPTOR* descriptor);
+extern "C" CUresult CUDAAPI cuArrayDestroy(CUarray array);
+extern "C" CUresult CUDAAPI cuMipmappedArrayCreate(CUmipmappedArray* mipmap,
+                                                   const CUDA_ARRAY3D_DESCRIPTOR* descriptor,
+                                                   unsigned int level_count);
+extern "C" CUresult CUDAAPI cuMipmappedArrayDestroy(CUmipmappedArray mipmap);
+extern "C" CUresult CUDAAPI cuGraphicsUnregisterResource(CUgraphicsResource resource);
+extern "C" CUresult CUDAAPI cuGraphicsSubResourceGetMappedArray(CUarray* array,
+                                                                CUgraphicsResource resource,
+                                                                unsigned int array_index,
+                                                                unsigned int mip_level);
+extern "C" CUresult CUDAAPI cuGraphicsResourceGetMappedMipmappedArray(CUmipmappedArray* mipmap,
+                                                                      CUgraphicsResource resource);
+extern "C" CUresult CUDAAPI cuGraphicsResourceGetMappedPointer_v2(CUdeviceptr* device_pointer,
+                                                                  std::size_t* size,
+                                                                  CUgraphicsResource resource);
+extern "C" CUresult CUDAAPI cuGraphicsResourceGetMappedPointer(CUdeviceptr* device_pointer,
+                                                               std::size_t* size,
+                                                               CUgraphicsResource resource);
+extern "C" CUresult CUDAAPI cuGraphicsResourceSetMapFlags_v2(CUgraphicsResource resource,
+                                                             unsigned int flags);
+extern "C" CUresult CUDAAPI cuGraphicsResourceSetMapFlags(CUgraphicsResource resource,
+                                                          unsigned int flags);
+extern "C" CUresult CUDAAPI cuGraphicsMapResources(unsigned int count,
+                                                   CUgraphicsResource* resources, CUstream stream);
+extern "C" CUresult CUDAAPI cuGraphicsUnmapResources(unsigned int count,
+                                                     CUgraphicsResource* resources,
+                                                     CUstream stream);
 extern "C" CUresult CUDAAPI cuMemGetAllocationGranularity(std::size_t* granularity,
                                                           const CUmemAllocationProp* prop,
                                                           CUmemAllocationGranularity_flags option);
@@ -175,6 +247,8 @@ extern "C" cudaError_t CUDARTAPI cudaMallocManaged(void** device_pointer, std::s
                                                    unsigned int flags);
 extern "C" cudaError_t CUDARTAPI cudaMallocPitch(void** device_pointer, std::size_t* pitch,
                                                  std::size_t width_bytes, std::size_t height);
+extern "C" cudaError_t CUDARTAPI cudaMalloc3D(struct cudaPitchedPtr* pitched_device_pointer,
+                                              struct cudaExtent extent);
 extern "C" cudaError_t CUDARTAPI cudaLaunchKernel(const void* function, dim3 grid_dim,
                                                   dim3 block_dim, void** arguments,
                                                   std::size_t shared_memory_bytes,
@@ -207,6 +281,52 @@ extern "C" cudaError_t CUDARTAPI cudaMallocFromPoolAsync_ptsz(void** device_poin
                                                               cudaMemPool_t pool,
                                                               cudaStream_t stream);
 extern "C" cudaError_t CUDARTAPI cudaFree(void* device_pointer);
+extern "C" cudaError_t CUDARTAPI cudaIpcGetMemHandle(cudaIpcMemHandle_t* handle,
+                                                     void* device_pointer);
+extern "C" cudaError_t CUDARTAPI cudaIpcOpenMemHandle(void** device_pointer,
+                                                      cudaIpcMemHandle_t handle,
+                                                      unsigned int flags);
+extern "C" cudaError_t CUDARTAPI cudaIpcCloseMemHandle(void* device_pointer);
+extern "C" cudaError_t CUDARTAPI cudaImportExternalMemory(
+    cudaExternalMemory_t* external_memory, const struct cudaExternalMemoryHandleDesc* handle_desc);
+extern "C" cudaError_t CUDARTAPI
+cudaExternalMemoryGetMappedBuffer(void** device_pointer, cudaExternalMemory_t external_memory,
+                                  const struct cudaExternalMemoryBufferDesc* buffer_desc);
+extern "C" cudaError_t CUDARTAPI cudaExternalMemoryGetMappedMipmappedArray(
+    cudaMipmappedArray_t* mipmap, cudaExternalMemory_t external_memory,
+    const struct cudaExternalMemoryMipmappedArrayDesc* mipmap_desc);
+extern "C" cudaError_t CUDARTAPI cudaDestroyExternalMemory(cudaExternalMemory_t external_memory);
+extern "C" cudaError_t CUDARTAPI cudaMallocArray(cudaArray_t* array,
+                                                 const struct cudaChannelFormatDesc* descriptor,
+                                                 std::size_t width, std::size_t height,
+                                                 unsigned int flags);
+extern "C" cudaError_t CUDARTAPI cudaMalloc3DArray(cudaArray_t* array,
+                                                   const struct cudaChannelFormatDesc* descriptor,
+                                                   struct cudaExtent extent, unsigned int flags);
+extern "C" cudaError_t CUDARTAPI cudaMallocMipmappedArray(
+    cudaMipmappedArray_t* mipmap, const struct cudaChannelFormatDesc* descriptor,
+    struct cudaExtent extent, unsigned int level_count, unsigned int flags);
+extern "C" cudaError_t CUDARTAPI cudaFreeArray(cudaArray_t array);
+extern "C" cudaError_t CUDARTAPI cudaFreeMipmappedArray(cudaMipmappedArray_t mipmap);
+extern "C" cudaError_t CUDARTAPI cudaGraphicsUnregisterResource(cudaGraphicsResource_t resource);
+extern "C" cudaError_t CUDARTAPI cudaGraphicsResourceSetMapFlags(cudaGraphicsResource_t resource,
+                                                                 unsigned int flags);
+extern "C" cudaError_t CUDARTAPI cudaGraphicsMapResources(int count,
+                                                          cudaGraphicsResource_t* resources,
+                                                          cudaStream_t stream);
+extern "C" cudaError_t CUDARTAPI cudaGraphicsUnmapResources(int count,
+                                                            cudaGraphicsResource_t* resources,
+                                                            cudaStream_t stream);
+extern "C" cudaError_t CUDARTAPI cudaGraphicsResourceGetMappedPointer(
+    void** device_pointer, std::size_t* size, cudaGraphicsResource_t resource);
+extern "C" cudaError_t CUDARTAPI
+cudaGraphicsSubResourceGetMappedArray(cudaArray_t* array, cudaGraphicsResource_t resource,
+                                      unsigned int array_index, unsigned int mip_level);
+extern "C" cudaError_t CUDARTAPI cudaGraphicsResourceGetMappedMipmappedArray(
+    cudaMipmappedArray_t* mipmap, cudaGraphicsResource_t resource);
+extern "C" cudaError_t CUDARTAPI cudaGraphAddMemAllocNode(
+    cudaGraphNode_t* graph_node, cudaGraph_t graph, const cudaGraphNode_t* dependencies,
+    std::size_t dependency_count, struct cudaMemAllocNodeParams* parameters);
 extern "C" cudaError_t CUDARTAPI cudaFreeAsync(void* device_pointer, cudaStream_t stream);
 extern "C" cudaError_t CUDARTAPI cudaFreeAsync_ptsz(void* device_pointer, cudaStream_t stream);
 extern "C" cudaError_t CUDARTAPI cudaMemGetInfo(std::size_t* free_bytes, std::size_t* total_bytes);
@@ -274,7 +394,7 @@ struct InterceptorSymbol {
     void* wrapper;
 };
 
-const std::array<InterceptorSymbol, 118> kInterceptorSymbols{{
+const std::array<InterceptorSymbol, 164> kInterceptorSymbols{{
     {"cuInit", reinterpret_cast<void*>(&cuInit)},
     {"cuLaunchKernel", reinterpret_cast<void*>(&cuLaunchKernel)},
     {"cuLaunchKernel_ptsz", reinterpret_cast<void*>(&cuLaunchKernel_ptsz)},
@@ -302,6 +422,7 @@ const std::array<InterceptorSymbol, 118> kInterceptorSymbols{{
     {"cuMemAddressReserve", reinterpret_cast<void*>(&cuMemAddressReserve)},
     {"cuMemAddressFree", reinterpret_cast<void*>(&cuMemAddressFree)},
     {"cuMemMap", reinterpret_cast<void*>(&cuMemMap)},
+    {"cuMemMapArrayAsync", reinterpret_cast<void*>(&cuMemMapArrayAsync)},
     {"cuMemUnmap", reinterpret_cast<void*>(&cuMemUnmap)},
     {"cuMemSetAccess", reinterpret_cast<void*>(&cuMemSetAccess)},
     {"cuMemGetAddressRange", reinterpret_cast<void*>(&cuMemGetAddressRange_v2)},
@@ -309,6 +430,36 @@ const std::array<InterceptorSymbol, 118> kInterceptorSymbols{{
     {"cuMemGetAccess", reinterpret_cast<void*>(&cuMemGetAccess)},
     {"cuMemExportToShareableHandle", reinterpret_cast<void*>(&cuMemExportToShareableHandle)},
     {"cuMemImportFromShareableHandle", reinterpret_cast<void*>(&cuMemImportFromShareableHandle)},
+    {"cuIpcGetMemHandle", reinterpret_cast<void*>(&cuIpcGetMemHandle)},
+    {"cuIpcOpenMemHandle", reinterpret_cast<void*>(&cuIpcOpenMemHandle)},
+    {"cuIpcOpenMemHandle_v2", reinterpret_cast<void*>(&cuIpcOpenMemHandle_v2)},
+    {"cuIpcCloseMemHandle", reinterpret_cast<void*>(&cuIpcCloseMemHandle)},
+    {"cuImportExternalMemory", reinterpret_cast<void*>(&cuImportExternalMemory)},
+    {"cuExternalMemoryGetMappedBuffer", reinterpret_cast<void*>(&cuExternalMemoryGetMappedBuffer)},
+    {"cuExternalMemoryGetMappedMipmappedArray",
+     reinterpret_cast<void*>(&cuExternalMemoryGetMappedMipmappedArray)},
+    {"cuDestroyExternalMemory", reinterpret_cast<void*>(&cuDestroyExternalMemory)},
+    {"cuArrayCreate", reinterpret_cast<void*>(&cuArrayCreate)},
+    {"cuArrayCreate_v2", reinterpret_cast<void*>(&cuArrayCreate_v2)},
+    {"cuArray3DCreate", reinterpret_cast<void*>(&cuArray3DCreate)},
+    {"cuArray3DCreate_v2", reinterpret_cast<void*>(&cuArray3DCreate_v2)},
+    {"cuArrayDestroy", reinterpret_cast<void*>(&cuArrayDestroy)},
+    {"cuMipmappedArrayCreate", reinterpret_cast<void*>(&cuMipmappedArrayCreate)},
+    {"cuMipmappedArrayDestroy", reinterpret_cast<void*>(&cuMipmappedArrayDestroy)},
+    {"cuGraphicsUnregisterResource", reinterpret_cast<void*>(&cuGraphicsUnregisterResource)},
+    {"cuGraphicsSubResourceGetMappedArray",
+     reinterpret_cast<void*>(&cuGraphicsSubResourceGetMappedArray)},
+    {"cuGraphicsResourceGetMappedMipmappedArray",
+     reinterpret_cast<void*>(&cuGraphicsResourceGetMappedMipmappedArray)},
+    {"cuGraphicsResourceGetMappedPointer",
+     reinterpret_cast<void*>(&cuGraphicsResourceGetMappedPointer)},
+    {"cuGraphicsResourceGetMappedPointer_v2",
+     reinterpret_cast<void*>(&cuGraphicsResourceGetMappedPointer_v2)},
+    {"cuGraphicsResourceSetMapFlags", reinterpret_cast<void*>(&cuGraphicsResourceSetMapFlags)},
+    {"cuGraphicsResourceSetMapFlags_v2",
+     reinterpret_cast<void*>(&cuGraphicsResourceSetMapFlags_v2)},
+    {"cuGraphicsMapResources", reinterpret_cast<void*>(&cuGraphicsMapResources)},
+    {"cuGraphicsUnmapResources", reinterpret_cast<void*>(&cuGraphicsUnmapResources)},
     {"cuMemGetAllocationGranularity", reinterpret_cast<void*>(&cuMemGetAllocationGranularity)},
     {"cuMemGetAllocationPropertiesFromHandle",
      reinterpret_cast<void*>(&cuMemGetAllocationPropertiesFromHandle)},
@@ -350,6 +501,7 @@ const std::array<InterceptorSymbol, 118> kInterceptorSymbols{{
     {"cudaMalloc", reinterpret_cast<void*>(&cudaMalloc)},
     {"cudaMallocManaged", reinterpret_cast<void*>(&cudaMallocManaged)},
     {"cudaMallocPitch", reinterpret_cast<void*>(&cudaMallocPitch)},
+    {"cudaMalloc3D", reinterpret_cast<void*>(&cudaMalloc3D)},
     {"cudaLaunchKernel", reinterpret_cast<void*>(&cudaLaunchKernel)},
     {"cudaLaunchKernel_ptsz", reinterpret_cast<void*>(&cudaLaunchKernel_ptsz)},
     {"__cudaLaunchKernel", reinterpret_cast<void*>(&__cudaLaunchKernel)},
@@ -359,6 +511,31 @@ const std::array<InterceptorSymbol, 118> kInterceptorSymbols{{
     {"cudaMallocFromPoolAsync", reinterpret_cast<void*>(&cudaMallocFromPoolAsync)},
     {"cudaMallocFromPoolAsync_ptsz", reinterpret_cast<void*>(&cudaMallocFromPoolAsync_ptsz)},
     {"cudaFree", reinterpret_cast<void*>(&cudaFree)},
+    {"cudaIpcGetMemHandle", reinterpret_cast<void*>(&cudaIpcGetMemHandle)},
+    {"cudaIpcOpenMemHandle", reinterpret_cast<void*>(&cudaIpcOpenMemHandle)},
+    {"cudaIpcCloseMemHandle", reinterpret_cast<void*>(&cudaIpcCloseMemHandle)},
+    {"cudaImportExternalMemory", reinterpret_cast<void*>(&cudaImportExternalMemory)},
+    {"cudaExternalMemoryGetMappedBuffer",
+     reinterpret_cast<void*>(&cudaExternalMemoryGetMappedBuffer)},
+    {"cudaExternalMemoryGetMappedMipmappedArray",
+     reinterpret_cast<void*>(&cudaExternalMemoryGetMappedMipmappedArray)},
+    {"cudaDestroyExternalMemory", reinterpret_cast<void*>(&cudaDestroyExternalMemory)},
+    {"cudaMallocArray", reinterpret_cast<void*>(&cudaMallocArray)},
+    {"cudaMalloc3DArray", reinterpret_cast<void*>(&cudaMalloc3DArray)},
+    {"cudaMallocMipmappedArray", reinterpret_cast<void*>(&cudaMallocMipmappedArray)},
+    {"cudaFreeArray", reinterpret_cast<void*>(&cudaFreeArray)},
+    {"cudaFreeMipmappedArray", reinterpret_cast<void*>(&cudaFreeMipmappedArray)},
+    {"cudaGraphicsUnregisterResource", reinterpret_cast<void*>(&cudaGraphicsUnregisterResource)},
+    {"cudaGraphicsResourceSetMapFlags", reinterpret_cast<void*>(&cudaGraphicsResourceSetMapFlags)},
+    {"cudaGraphicsMapResources", reinterpret_cast<void*>(&cudaGraphicsMapResources)},
+    {"cudaGraphicsUnmapResources", reinterpret_cast<void*>(&cudaGraphicsUnmapResources)},
+    {"cudaGraphicsResourceGetMappedPointer",
+     reinterpret_cast<void*>(&cudaGraphicsResourceGetMappedPointer)},
+    {"cudaGraphicsSubResourceGetMappedArray",
+     reinterpret_cast<void*>(&cudaGraphicsSubResourceGetMappedArray)},
+    {"cudaGraphicsResourceGetMappedMipmappedArray",
+     reinterpret_cast<void*>(&cudaGraphicsResourceGetMappedMipmappedArray)},
+    {"cudaGraphAddMemAllocNode", reinterpret_cast<void*>(&cudaGraphAddMemAllocNode)},
     {"cudaFreeAsync", reinterpret_cast<void*>(&cudaFreeAsync)},
     {"cudaFreeAsync_ptsz", reinterpret_cast<void*>(&cudaFreeAsync_ptsz)},
     {"cudaMemGetInfo", reinterpret_cast<void*>(&cudaMemGetInfo)},

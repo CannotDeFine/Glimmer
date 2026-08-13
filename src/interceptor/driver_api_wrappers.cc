@@ -27,6 +27,42 @@
 #ifdef cuMemGetInfo
 #undef cuMemGetInfo
 #endif
+#ifdef cuIpcGetMemHandle
+#undef cuIpcGetMemHandle
+#endif
+#ifdef cuIpcOpenMemHandle
+#undef cuIpcOpenMemHandle
+#endif
+#ifdef cuIpcOpenMemHandle_v2
+#undef cuIpcOpenMemHandle_v2
+#endif
+#ifdef cuIpcCloseMemHandle
+#undef cuIpcCloseMemHandle
+#endif
+#ifdef cuArrayCreate
+#undef cuArrayCreate
+#endif
+#ifdef cuArrayCreate_v2
+#undef cuArrayCreate_v2
+#endif
+#ifdef cuArray3DCreate
+#undef cuArray3DCreate
+#endif
+#ifdef cuArray3DCreate_v2
+#undef cuArray3DCreate_v2
+#endif
+#ifdef cuGraphicsResourceGetMappedPointer
+#undef cuGraphicsResourceGetMappedPointer
+#endif
+#ifdef cuGraphicsResourceGetMappedPointer_v2
+#undef cuGraphicsResourceGetMappedPointer_v2
+#endif
+#ifdef cuGraphicsResourceSetMapFlags
+#undef cuGraphicsResourceSetMapFlags
+#endif
+#ifdef cuGraphicsResourceSetMapFlags_v2
+#undef cuGraphicsResourceSetMapFlags_v2
+#endif
 #ifdef cuCtxDestroy
 #undef cuCtxDestroy
 #endif
@@ -237,6 +273,13 @@ extern "C" CUresult CUDAAPI cuMemMap(CUdeviceptr device_pointer, std::size_t mem
     });
 }
 
+extern "C" CUresult CUDAAPI cuMemMapArrayAsync(CUarrayMapInfo* map_info_list, unsigned int count,
+                                               CUstream stream) {
+    return guard_cuda_boundary([map_info_list, count, stream] {
+        return glimmer::interceptor::intercept_mem_map_array_async(map_info_list, count, stream);
+    });
+}
+
 extern "C" CUresult CUDAAPI cuMemUnmap(CUdeviceptr device_pointer, std::size_t memory_bytes) {
     return guard_cuda_boundary([device_pointer, memory_bytes] {
         return glimmer::interceptor::intercept_mem_unmap(device_pointer, memory_bytes);
@@ -291,6 +334,169 @@ extern "C" CUresult CUDAAPI cuMemImportFromShareableHandle(CUmemGenericAllocatio
     return guard_cuda_boundary([handle, os_handle, handle_type] {
         return glimmer::interceptor::intercept_mem_import_from_shareable_handle(handle, os_handle,
                                                                                 handle_type);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuIpcGetMemHandle(CUipcMemHandle* handle, CUdeviceptr device_pointer) {
+    return guard_cuda_boundary([handle, device_pointer] {
+        return glimmer::interceptor::intercept_ipc_get_mem_handle(handle, device_pointer);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuIpcOpenMemHandle_v2(CUdeviceptr* device_pointer,
+                                                  CUipcMemHandle handle, unsigned int flags) {
+    return guard_cuda_boundary([device_pointer, handle, flags] {
+        return glimmer::interceptor::intercept_ipc_open_mem_handle(device_pointer, handle, flags);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuIpcOpenMemHandle(CUdeviceptr* device_pointer, CUipcMemHandle handle,
+                                               unsigned int flags) {
+    return cuIpcOpenMemHandle_v2(device_pointer, handle, flags);
+}
+
+extern "C" CUresult CUDAAPI cuIpcCloseMemHandle(CUdeviceptr device_pointer) {
+    return guard_cuda_boundary([device_pointer] {
+        return glimmer::interceptor::intercept_ipc_close_mem_handle(device_pointer);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuImportExternalMemory(
+    CUexternalMemory* external_memory, const CUDA_EXTERNAL_MEMORY_HANDLE_DESC* handle_desc) {
+    return guard_cuda_boundary([external_memory, handle_desc] {
+        return glimmer::interceptor::intercept_import_external_memory(external_memory, handle_desc);
+    });
+}
+
+extern "C" CUresult CUDAAPI
+cuExternalMemoryGetMappedBuffer(CUdeviceptr* device_pointer, CUexternalMemory external_memory,
+                                const CUDA_EXTERNAL_MEMORY_BUFFER_DESC* buffer_desc) {
+    return guard_cuda_boundary([device_pointer, external_memory, buffer_desc] {
+        return glimmer::interceptor::intercept_external_memory_get_mapped_buffer(
+            device_pointer, external_memory, buffer_desc);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuExternalMemoryGetMappedMipmappedArray(
+    CUmipmappedArray* mipmap, CUexternalMemory external_memory,
+    const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC* mipmap_desc) {
+    return guard_cuda_boundary([mipmap, external_memory, mipmap_desc] {
+        return glimmer::interceptor::intercept_external_memory_get_mapped_mipmapped_array(
+            mipmap, external_memory, mipmap_desc);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuDestroyExternalMemory(CUexternalMemory external_memory) {
+    return guard_cuda_boundary([external_memory] {
+        return glimmer::interceptor::intercept_destroy_external_memory(external_memory);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuArrayCreate_v2(CUarray* array,
+                                             const CUDA_ARRAY_DESCRIPTOR* descriptor) {
+    return guard_cuda_boundary([array, descriptor] {
+        return glimmer::interceptor::intercept_array_create(array, descriptor);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuArrayCreate(CUarray* array, const CUDA_ARRAY_DESCRIPTOR* descriptor) {
+    return cuArrayCreate_v2(array, descriptor);
+}
+
+extern "C" CUresult CUDAAPI cuArray3DCreate_v2(CUarray* array,
+                                               const CUDA_ARRAY3D_DESCRIPTOR* descriptor) {
+    return guard_cuda_boundary([array, descriptor] {
+        return glimmer::interceptor::intercept_array_3d_create(array, descriptor);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuArray3DCreate(CUarray* array,
+                                            const CUDA_ARRAY3D_DESCRIPTOR* descriptor) {
+    return cuArray3DCreate_v2(array, descriptor);
+}
+
+extern "C" CUresult CUDAAPI cuArrayDestroy(CUarray array) {
+    return guard_cuda_boundary(
+        [array] { return glimmer::interceptor::intercept_array_destroy(array); });
+}
+
+extern "C" CUresult CUDAAPI cuMipmappedArrayCreate(CUmipmappedArray* mipmap,
+                                                   const CUDA_ARRAY3D_DESCRIPTOR* descriptor,
+                                                   unsigned int level_count) {
+    return guard_cuda_boundary([mipmap, descriptor, level_count] {
+        return glimmer::interceptor::intercept_mipmapped_array_create(mipmap, descriptor,
+                                                                      level_count);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuMipmappedArrayDestroy(CUmipmappedArray mipmap) {
+    return guard_cuda_boundary(
+        [mipmap] { return glimmer::interceptor::intercept_mipmapped_array_destroy(mipmap); });
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsUnregisterResource(CUgraphicsResource resource) {
+    return guard_cuda_boundary([resource] {
+        return glimmer::interceptor::intercept_graphics_unregister_resource(resource);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsSubResourceGetMappedArray(CUarray* array,
+                                                                CUgraphicsResource resource,
+                                                                unsigned int array_index,
+                                                                unsigned int mip_level) {
+    return guard_cuda_boundary([array, resource, array_index, mip_level] {
+        return glimmer::interceptor::intercept_graphics_subresource_get_mapped_array(
+            array, resource, array_index, mip_level);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsResourceGetMappedMipmappedArray(CUmipmappedArray* mipmap,
+                                                                      CUgraphicsResource resource) {
+    return guard_cuda_boundary([mipmap, resource] {
+        return glimmer::interceptor::intercept_graphics_resource_get_mapped_mipmapped_array(
+            mipmap, resource);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsResourceGetMappedPointer_v2(CUdeviceptr* device_pointer,
+                                                                  std::size_t* size,
+                                                                  CUgraphicsResource resource) {
+    return guard_cuda_boundary([device_pointer, size, resource] {
+        return glimmer::interceptor::intercept_graphics_resource_get_mapped_pointer(device_pointer,
+                                                                                    size, resource);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsResourceGetMappedPointer(CUdeviceptr* device_pointer,
+                                                               std::size_t* size,
+                                                               CUgraphicsResource resource) {
+    return cuGraphicsResourceGetMappedPointer_v2(device_pointer, size, resource);
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsResourceSetMapFlags_v2(CUgraphicsResource resource,
+                                                             unsigned int flags) {
+    return guard_cuda_boundary([resource, flags] {
+        return glimmer::interceptor::intercept_graphics_resource_set_map_flags(resource, flags);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsResourceSetMapFlags(CUgraphicsResource resource,
+                                                          unsigned int flags) {
+    return cuGraphicsResourceSetMapFlags_v2(resource, flags);
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsMapResources(unsigned int count,
+                                                   CUgraphicsResource* resources, CUstream stream) {
+    return guard_cuda_boundary([count, resources, stream] {
+        return glimmer::interceptor::intercept_graphics_map_resources(count, resources, stream);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsUnmapResources(unsigned int count,
+                                                     CUgraphicsResource* resources,
+                                                     CUstream stream) {
+    return guard_cuda_boundary([count, resources, stream] {
+        return glimmer::interceptor::intercept_graphics_unmap_resources(count, resources, stream);
     });
 }
 

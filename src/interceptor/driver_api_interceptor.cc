@@ -424,6 +424,23 @@ template <typename Availability, typename Invocation>
     return std::forward<Invocation>(invoke)();
 }
 
+template <typename Invocation>
+[[nodiscard]] cudaError_t forward_untracked_runtime_call(InterceptorState& state,
+                                                         Invocation&& invoke) {
+    if (!ensure_initialized(state)) {
+        return std::getenv("GLIMMER_MEMORY_LIMIT_BYTES") == nullptr
+                   ? std::forward<Invocation>(invoke)()
+                   : cudaErrorUnknown;
+    }
+    if (state.quota_mode == QuotaMode::kEnabled) {
+        return cudaErrorNotSupported;
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return cudaErrorInvalidValue;
+    }
+    return std::forward<Invocation>(invoke)();
+}
+
 }  // namespace
 
 }  // namespace glimmer::interceptor
@@ -562,17 +579,14 @@ cudaError_t intercept_runtime_malloc_managed(void** device_pointer, std::size_t 
         release, get_device);
 }
 
-cudaError_t intercept_runtime_malloc_pitch(void** device_pointer, std::size_t* pitch,
-                                           std::size_t width_bytes, std::size_t height,
-                                           RuntimeMallocPitchFunction allocate,
-                                           RuntimeFreeFunction release,
-                                           RuntimeGetDeviceFunction get_device) {
+template <typename Allocate>
+cudaError_t intercept_runtime_malloc_pitch_impl(void** device_pointer, std::size_t* pitch,
+                                                std::size_t width_bytes, std::size_t height,
+                                                Allocate&& allocate, RuntimeFreeFunction release,
+                                                RuntimeGetDeviceFunction get_device) {
     InterceptorState& state = get_state();
     if (device_pointer == nullptr || pitch == nullptr) {
         return cudaErrorInvalidValue;
-    }
-    if (allocate == nullptr) {
-        return cudaErrorNotSupported;
     }
     if (!ensure_initialized(state)) {
         return std::getenv("GLIMMER_MEMORY_LIMIT_BYTES") == nullptr
@@ -725,6 +739,62 @@ cudaError_t intercept_runtime_malloc_pitch(void** device_pointer, std::size_t* p
     return cudaSuccess;
 }
 
+cudaError_t intercept_runtime_malloc_pitch(void** device_pointer, std::size_t* pitch,
+                                           std::size_t width_bytes, std::size_t height,
+                                           RuntimeMallocPitchFunction allocate,
+                                           RuntimeFreeFunction release,
+                                           RuntimeGetDeviceFunction get_device) {
+    if (allocate == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    return intercept_runtime_malloc_pitch_impl(
+        device_pointer, pitch, width_bytes, height,
+        [device_pointer, pitch, width_bytes, height, allocate](void**, std::size_t*, std::size_t,
+                                                               std::size_t) {
+            return allocate(device_pointer, pitch, width_bytes, height);
+        },
+        release, get_device);
+}
+
+cudaError_t intercept_runtime_malloc_3d(struct cudaPitchedPtr* pitched_device_pointer,
+                                        struct cudaExtent extent, RuntimeMalloc3DFunction allocate,
+                                        RuntimeFreeFunction release,
+                                        RuntimeGetDeviceFunction get_device) {
+    if (pitched_device_pointer == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    *pitched_device_pointer = {};
+    if (allocate == nullptr) {
+        return cudaErrorNotSupported;
+    }
+
+    const std::optional<MemoryBytes> row_count = checked_multiply(
+        static_cast<MemoryBytes>(extent.height), static_cast<MemoryBytes>(extent.depth));
+    if (!row_count.has_value()) {
+        return cudaErrorInvalidValue;
+    }
+
+    cudaPitchedPtr allocation{};
+    void* device_pointer = nullptr;
+    std::size_t pitch = 0;
+    const cudaError_t result = intercept_runtime_malloc_pitch_impl(
+        &device_pointer, &pitch, extent.width, *row_count,
+        [&allocation, &device_pointer, &pitch, extent, allocate](void**, std::size_t*, std::size_t,
+                                                                 std::size_t) {
+            const cudaError_t allocation_result = allocate(&allocation, extent);
+            if (allocation_result == cudaSuccess) {
+                device_pointer = allocation.ptr;
+                pitch = allocation.pitch;
+            }
+            return allocation_result;
+        },
+        release, get_device);
+    if (result == cudaSuccess) {
+        *pitched_device_pointer = allocation;
+    }
+    return result;
+}
+
 cudaError_t intercept_runtime_free(void* device_pointer, RuntimeFreeFunction release) {
     InterceptorState& state = get_state();
     if (release == nullptr) {
@@ -781,6 +851,261 @@ cudaError_t intercept_runtime_free(void* device_pointer, RuntimeFreeFunction rel
         return cudaErrorUnknown;
     }
     return cudaSuccess;
+}
+
+cudaError_t intercept_runtime_ipc_get_mem_handle(cudaIpcMemHandle_t* handle, void* device_pointer,
+                                                 RuntimeIpcGetMemHandleFunction get_handle) {
+    if (handle == nullptr || device_pointer == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (get_handle == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    return get_handle(handle, device_pointer);
+}
+
+cudaError_t intercept_runtime_ipc_open_mem_handle(void** device_pointer, cudaIpcMemHandle_t handle,
+                                                  unsigned int flags,
+                                                  RuntimeIpcOpenMemHandleFunction open_handle) {
+    if (device_pointer == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (open_handle == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    InterceptorState& state = get_state();
+    return forward_untracked_runtime_call(
+        state, [&] { return open_handle(device_pointer, handle, flags); });
+}
+
+cudaError_t intercept_runtime_ipc_close_mem_handle(void* device_pointer,
+                                                   RuntimeIpcCloseMemHandleFunction close_handle) {
+    if (device_pointer == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (close_handle == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    return close_handle(device_pointer);
+}
+
+cudaError_t intercept_runtime_import_external_memory(
+    cudaExternalMemory_t* external_memory, const struct cudaExternalMemoryHandleDesc* handle_desc,
+    RuntimeImportExternalMemoryFunction import_memory) {
+    if (external_memory == nullptr || handle_desc == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (import_memory == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    InterceptorState& state = get_state();
+    return forward_untracked_runtime_call(
+        state, [&] { return import_memory(external_memory, handle_desc); });
+}
+
+cudaError_t intercept_runtime_external_memory_get_mapped_buffer(
+    void** device_pointer, cudaExternalMemory_t external_memory,
+    const struct cudaExternalMemoryBufferDesc* buffer_desc,
+    RuntimeExternalMemoryGetMappedBufferFunction get_buffer) {
+    if (device_pointer == nullptr || external_memory == nullptr || buffer_desc == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (get_buffer == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    InterceptorState& state = get_state();
+    return forward_untracked_runtime_call(
+        state, [&] { return get_buffer(device_pointer, external_memory, buffer_desc); });
+}
+
+cudaError_t intercept_runtime_external_memory_get_mapped_mipmapped_array(
+    cudaMipmappedArray_t* mipmap, cudaExternalMemory_t external_memory,
+    const struct cudaExternalMemoryMipmappedArrayDesc* mipmap_desc,
+    RuntimeExternalMemoryGetMappedMipmappedArrayFunction get_mipmap) {
+    if (mipmap == nullptr || external_memory == nullptr || mipmap_desc == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (get_mipmap == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    InterceptorState& state = get_state();
+    return forward_untracked_runtime_call(
+        state, [&] { return get_mipmap(mipmap, external_memory, mipmap_desc); });
+}
+
+cudaError_t intercept_runtime_destroy_external_memory(
+    cudaExternalMemory_t external_memory, RuntimeDestroyExternalMemoryFunction destroy_memory) {
+    if (external_memory == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (destroy_memory == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    return destroy_memory(external_memory);
+}
+
+cudaError_t intercept_runtime_malloc_array(cudaArray_t* array,
+                                           const struct cudaChannelFormatDesc* descriptor,
+                                           std::size_t width, std::size_t height,
+                                           unsigned int flags,
+                                           RuntimeMallocArrayFunction allocate) {
+    if (array == nullptr || descriptor == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (allocate == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    InterceptorState& state = get_state();
+    return forward_untracked_runtime_call(
+        state, [&] { return allocate(array, descriptor, width, height, flags); });
+}
+
+cudaError_t intercept_runtime_malloc_3d_array(cudaArray_t* array,
+                                              const struct cudaChannelFormatDesc* descriptor,
+                                              struct cudaExtent extent, unsigned int flags,
+                                              RuntimeMalloc3DArrayFunction allocate) {
+    if (array == nullptr || descriptor == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (allocate == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    InterceptorState& state = get_state();
+    return forward_untracked_runtime_call(
+        state, [&] { return allocate(array, descriptor, extent, flags); });
+}
+
+cudaError_t intercept_runtime_malloc_mipmapped_array(cudaMipmappedArray_t* mipmap,
+                                                     const struct cudaChannelFormatDesc* descriptor,
+                                                     struct cudaExtent extent,
+                                                     unsigned int level_count, unsigned int flags,
+                                                     RuntimeMallocMipmappedArrayFunction allocate) {
+    if (mipmap == nullptr || descriptor == nullptr || level_count == 0) {
+        return cudaErrorInvalidValue;
+    }
+    if (allocate == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    InterceptorState& state = get_state();
+    return forward_untracked_runtime_call(
+        state, [&] { return allocate(mipmap, descriptor, extent, level_count, flags); });
+}
+
+cudaError_t intercept_runtime_free_array(cudaArray_t array, RuntimeFreeArrayFunction release) {
+    if (array == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    return release == nullptr ? cudaErrorNotSupported : release(array);
+}
+
+cudaError_t intercept_runtime_free_mipmapped_array(cudaMipmappedArray_t mipmap,
+                                                   RuntimeFreeMipmappedArrayFunction release) {
+    if (mipmap == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    return release == nullptr ? cudaErrorNotSupported : release(mipmap);
+}
+
+cudaError_t intercept_runtime_graph_add_mem_alloc_node(
+    cudaGraphNode_t* graph_node, cudaGraph_t graph, const cudaGraphNode_t* dependencies,
+    std::size_t dependency_count, struct cudaMemAllocNodeParams* parameters,
+    RuntimeGraphAddMemAllocNodeFunction add_node) {
+    if (graph_node == nullptr || graph == nullptr || parameters == nullptr ||
+        (dependency_count != 0 && dependencies == nullptr)) {
+        return cudaErrorInvalidValue;
+    }
+    if (add_node == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    InterceptorState& state = get_state();
+    // Graph memory nodes allocate outside the ordinary malloc/free ABI. We
+    // reject them until their lifetime can be charged across graph launch,
+    // auto-free, update, and process-exit transitions.
+    return forward_untracked_runtime_call(state, [&] {
+        return add_node(graph_node, graph, dependencies, dependency_count, parameters);
+    });
+}
+
+cudaError_t intercept_runtime_graphics_unregister_resource(
+    cudaGraphicsResource_t resource, RuntimeGraphicsUnregisterResourceFunction unregister) {
+    if (resource == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    return unregister == nullptr ? cudaErrorNotSupported : unregister(resource);
+}
+
+cudaError_t intercept_runtime_graphics_resource_set_map_flags(
+    cudaGraphicsResource_t resource, unsigned int flags,
+    RuntimeGraphicsResourceSetMapFlagsFunction set_flags) {
+    if (resource == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    return set_flags == nullptr ? cudaErrorNotSupported : set_flags(resource, flags);
+}
+
+cudaError_t intercept_runtime_graphics_map_resources(
+    int count, cudaGraphicsResource_t* resources, cudaStream_t stream,
+    RuntimeGraphicsMapResourcesFunction map_resources) {
+    if (count < 0 || (count != 0 && resources == nullptr)) {
+        return cudaErrorInvalidValue;
+    }
+    if (map_resources == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    InterceptorState& state = get_state();
+    return forward_untracked_runtime_call(state,
+                                          [&] { return map_resources(count, resources, stream); });
+}
+
+cudaError_t intercept_runtime_graphics_unmap_resources(
+    int count, cudaGraphicsResource_t* resources, cudaStream_t stream,
+    RuntimeGraphicsUnmapResourcesFunction unmap_resources) {
+    if (count < 0 || (count != 0 && resources == nullptr)) {
+        return cudaErrorInvalidValue;
+    }
+    return unmap_resources == nullptr ? cudaErrorNotSupported
+                                      : unmap_resources(count, resources, stream);
+}
+
+cudaError_t intercept_runtime_graphics_resource_get_mapped_pointer(
+    void** device_pointer, std::size_t* size, cudaGraphicsResource_t resource,
+    RuntimeGraphicsResourceGetMappedPointerFunction get_pointer) {
+    if (device_pointer == nullptr || size == nullptr || resource == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (get_pointer == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    InterceptorState& state = get_state();
+    return forward_untracked_runtime_call(
+        state, [&] { return get_pointer(device_pointer, size, resource); });
+}
+
+cudaError_t intercept_runtime_graphics_subresource_get_mapped_array(
+    cudaArray_t* array, cudaGraphicsResource_t resource, unsigned int array_index,
+    unsigned int mip_level, RuntimeGraphicsSubResourceGetMappedArrayFunction get_array) {
+    if (array == nullptr || resource == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (get_array == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    InterceptorState& state = get_state();
+    return forward_untracked_runtime_call(
+        state, [&] { return get_array(array, resource, array_index, mip_level); });
+}
+
+cudaError_t intercept_runtime_graphics_resource_get_mapped_mipmapped_array(
+    cudaMipmappedArray_t* mipmap, cudaGraphicsResource_t resource,
+    RuntimeGraphicsResourceGetMappedMipmappedArrayFunction get_mipmap) {
+    if (mipmap == nullptr || resource == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (get_mipmap == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    InterceptorState& state = get_state();
+    return forward_untracked_runtime_call(state, [&] { return get_mipmap(mipmap, resource); });
 }
 
 cudaError_t intercept_runtime_mem_get_info(std::size_t* free_bytes, std::size_t* total_bytes,
@@ -1642,6 +1967,30 @@ CUresult intercept_mem_map(CUdeviceptr device_pointer, std::size_t memory_bytes,
     return state.driver.mem_map(device_pointer, memory_bytes, offset, handle, flags);
 }
 
+CUresult intercept_mem_map_array_async(CUarrayMapInfo* map_info_list, unsigned int count,
+                                       CUstream stream) {
+    if (count != 0 && map_info_list == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return state.driver.mem_map_array_async(map_info_list, count, stream);
+    }
+    if (!ensure_initialized(state) || !state.driver.has_mem_map_array_async()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kEnabled) {
+        // Sparse and deferred-mapping arrays can map tile-pool memory through
+        // this API without exposing a stable allocation size at this boundary.
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return state.driver.mem_map_array_async(map_info_list, count, stream);
+}
+
 CUresult intercept_mem_unmap(CUdeviceptr device_pointer, std::size_t memory_bytes) {
     InterceptorState& state = get_state();
     if (glimmer::interceptor::is_inside_driver_call() ||
@@ -1736,6 +2085,351 @@ CUresult intercept_mem_import_from_shareable_handle(CUmemGenericAllocationHandle
         return CUDA_ERROR_INVALID_VALUE;
     }
     return state.driver.mem_import_from_shareable_handle(handle, os_handle, handle_type);
+}
+
+CUresult intercept_ipc_get_mem_handle(CUipcMemHandle* handle, CUdeviceptr device_pointer) {
+    if (handle == nullptr || device_pointer == 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    return forward_optional_driver_call(
+        state, [&state] { return state.driver.has_ipc_get_mem_handle(); },
+        [&state, handle, device_pointer] {
+            return state.driver.ipc_get_mem_handle(handle, device_pointer);
+        });
+}
+
+CUresult intercept_ipc_open_mem_handle(CUdeviceptr* device_pointer, CUipcMemHandle handle,
+                                       unsigned int flags) {
+    if (device_pointer == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return state.driver.ipc_open_mem_handle(device_pointer, handle, flags);
+    }
+    if (!ensure_initialized(state) || !state.driver.has_ipc_open_mem_handle()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kEnabled) {
+        // An IPC handle refers to physical memory owned and accounted by
+        // another process. Without a trusted cross-process allocation record,
+        // accepting it would let the importing process bypass its quota.
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return state.driver.ipc_open_mem_handle(device_pointer, handle, flags);
+}
+
+CUresult intercept_ipc_close_mem_handle(CUdeviceptr device_pointer) {
+    if (device_pointer == 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    return forward_optional_driver_call(
+        state, [&state] { return state.driver.has_ipc_close_mem_handle(); },
+        [&state, device_pointer] { return state.driver.ipc_close_mem_handle(device_pointer); });
+}
+
+CUresult intercept_import_external_memory(CUexternalMemory* external_memory,
+                                          const CUDA_EXTERNAL_MEMORY_HANDLE_DESC* handle_desc) {
+    if (external_memory == nullptr || handle_desc == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return state.driver.import_external_memory(external_memory, handle_desc);
+    }
+    if (!ensure_initialized(state) || !state.driver.has_import_external_memory()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kEnabled) {
+        // External memory is allocated and owned by another API or process.
+        // Its size and tenant ownership are not authenticated at this ABI.
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return state.driver.import_external_memory(external_memory, handle_desc);
+}
+
+CUresult intercept_external_memory_get_mapped_buffer(
+    CUdeviceptr* device_pointer, CUexternalMemory external_memory,
+    const CUDA_EXTERNAL_MEMORY_BUFFER_DESC* buffer_desc) {
+    if (device_pointer == nullptr || external_memory == nullptr || buffer_desc == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return state.driver.external_memory_get_mapped_buffer(device_pointer, external_memory,
+                                                              buffer_desc);
+    }
+    if (!ensure_initialized(state) || !state.driver.has_external_memory_get_mapped_buffer()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kEnabled) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return state.driver.external_memory_get_mapped_buffer(device_pointer, external_memory,
+                                                          buffer_desc);
+}
+
+CUresult intercept_external_memory_get_mapped_mipmapped_array(
+    CUmipmappedArray* mipmap, CUexternalMemory external_memory,
+    const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC* mipmap_desc) {
+    if (mipmap == nullptr || external_memory == nullptr || mipmap_desc == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return state.driver.external_memory_get_mapped_mipmapped_array(mipmap, external_memory,
+                                                                       mipmap_desc);
+    }
+    if (!ensure_initialized(state) ||
+        !state.driver.has_external_memory_get_mapped_mipmapped_array()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kEnabled) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return state.driver.external_memory_get_mapped_mipmapped_array(mipmap, external_memory,
+                                                                   mipmap_desc);
+}
+
+CUresult intercept_destroy_external_memory(CUexternalMemory external_memory) {
+    if (external_memory == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    return forward_optional_driver_call(
+        state, [&state] { return state.driver.has_destroy_external_memory(); },
+        [&state, external_memory] {
+            return state.driver.destroy_external_memory(external_memory);
+        });
+}
+
+CUresult intercept_array_create(CUarray* array, const CUDA_ARRAY_DESCRIPTOR* descriptor) {
+    if (array == nullptr || descriptor == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return state.driver.array_create(array, descriptor);
+    }
+    if (!ensure_initialized(state) || !state.driver.has_array_create()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kEnabled) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return state.driver.array_create(array, descriptor);
+}
+
+CUresult intercept_array_3d_create(CUarray* array, const CUDA_ARRAY3D_DESCRIPTOR* descriptor) {
+    if (array == nullptr || descriptor == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return state.driver.array_3d_create(array, descriptor);
+    }
+    if (!ensure_initialized(state) || !state.driver.has_array_3d_create()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kEnabled) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return state.driver.array_3d_create(array, descriptor);
+}
+
+CUresult intercept_array_destroy(CUarray array) {
+    if (array == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    return forward_optional_driver_call(
+        state, [&state] { return state.driver.has_array_destroy(); },
+        [&state, array] { return state.driver.array_destroy(array); });
+}
+
+CUresult intercept_mipmapped_array_create(CUmipmappedArray* mipmap,
+                                          const CUDA_ARRAY3D_DESCRIPTOR* descriptor,
+                                          unsigned int level_count) {
+    if (mipmap == nullptr || descriptor == nullptr || level_count == 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return state.driver.mipmapped_array_create(mipmap, descriptor, level_count);
+    }
+    if (!ensure_initialized(state) || !state.driver.has_mipmapped_array_create()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kEnabled) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return state.driver.mipmapped_array_create(mipmap, descriptor, level_count);
+}
+
+CUresult intercept_mipmapped_array_destroy(CUmipmappedArray mipmap) {
+    if (mipmap == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    return forward_optional_driver_call(
+        state, [&state] { return state.driver.has_mipmapped_array_destroy(); },
+        [&state, mipmap] { return state.driver.mipmapped_array_destroy(mipmap); });
+}
+
+CUresult intercept_graphics_unregister_resource(CUgraphicsResource resource) {
+    if (resource == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    return forward_optional_driver_call(
+        state, [&state] { return state.driver.has_graphics_unregister_resource(); },
+        [&state, resource] { return state.driver.graphics_unregister_resource(resource); });
+}
+
+CUresult intercept_graphics_subresource_get_mapped_array(CUarray* array,
+                                                         CUgraphicsResource resource,
+                                                         unsigned int array_index,
+                                                         unsigned int mip_level) {
+    if (array == nullptr || resource == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    if (is_inside_driver_call() || is_inside_runtime_call()) {
+        return state.driver.graphics_subresource_get_mapped_array(array, resource, array_index,
+                                                                  mip_level);
+    }
+    if (!ensure_initialized(state) || !state.driver.has_graphics_subresource_get_mapped_array()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kEnabled) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return state.driver.graphics_subresource_get_mapped_array(array, resource, array_index,
+                                                              mip_level);
+}
+
+CUresult intercept_graphics_resource_get_mapped_mipmapped_array(CUmipmappedArray* mipmap,
+                                                                CUgraphicsResource resource) {
+    if (mipmap == nullptr || resource == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    if (is_inside_driver_call() || is_inside_runtime_call()) {
+        return state.driver.graphics_resource_get_mapped_mipmapped_array(mipmap, resource);
+    }
+    if (!ensure_initialized(state) ||
+        !state.driver.has_graphics_resource_get_mapped_mipmapped_array()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kEnabled) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return state.driver.graphics_resource_get_mapped_mipmapped_array(mipmap, resource);
+}
+
+CUresult intercept_graphics_resource_get_mapped_pointer(CUdeviceptr* device_pointer,
+                                                        std::size_t* size,
+                                                        CUgraphicsResource resource) {
+    if (device_pointer == nullptr || size == nullptr || resource == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    if (is_inside_driver_call() || is_inside_runtime_call()) {
+        return state.driver.graphics_resource_get_mapped_pointer(device_pointer, size, resource);
+    }
+    if (!ensure_initialized(state) || !state.driver.has_graphics_resource_get_mapped_pointer()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kEnabled) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return state.driver.graphics_resource_get_mapped_pointer(device_pointer, size, resource);
+}
+
+CUresult intercept_graphics_resource_set_map_flags(CUgraphicsResource resource,
+                                                   unsigned int flags) {
+    if (resource == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    return forward_optional_driver_call(
+        state, [&state] { return state.driver.has_graphics_resource_set_map_flags(); },
+        [&state, resource, flags] {
+            return state.driver.graphics_resource_set_map_flags(resource, flags);
+        });
+}
+
+CUresult intercept_graphics_map_resources(unsigned int count, CUgraphicsResource* resources,
+                                          CUstream stream) {
+    if (count != 0 && resources == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    if (is_inside_driver_call() || is_inside_runtime_call()) {
+        return state.driver.graphics_map_resources(count, resources, stream);
+    }
+    if (!ensure_initialized(state) || !state.driver.has_graphics_map_resources()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kEnabled) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return state.driver.graphics_map_resources(count, resources, stream);
+}
+
+CUresult intercept_graphics_unmap_resources(unsigned int count, CUgraphicsResource* resources,
+                                            CUstream stream) {
+    if (count != 0 && resources == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    return forward_optional_driver_call(
+        state, [&state] { return state.driver.has_graphics_unmap_resources(); },
+        [&state, count, resources, stream] {
+            return state.driver.graphics_unmap_resources(count, resources, stream);
+        });
 }
 
 CUresult intercept_mem_get_allocation_granularity(std::size_t* granularity,

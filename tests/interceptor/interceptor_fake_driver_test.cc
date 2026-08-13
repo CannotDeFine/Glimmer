@@ -17,6 +17,7 @@
 #include <cstring>
 #include <bit>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <sys/wait.h>
@@ -56,6 +57,8 @@ using AddressFreeFunction = CUresult (*)(CUdeviceptr device_pointer, std::size_t
 using MapFunction = CUresult (*)(CUdeviceptr device_pointer, std::size_t memory_bytes,
                                  std::size_t offset, CUmemGenericAllocationHandle handle,
                                  unsigned long long flags);
+using MapArrayAsyncFunction = CUresult (*)(CUarrayMapInfo* map_info_list, unsigned int count,
+                                           CUstream stream);
 using UnmapFunction = CUresult (*)(CUdeviceptr device_pointer, std::size_t memory_bytes);
 using SetAccessFunction = CUresult (*)(CUdeviceptr device_pointer, std::size_t memory_bytes,
                                        const CUmemAccessDesc* access_descriptors,
@@ -70,6 +73,43 @@ using ExportHandleFunction = CUresult (*)(void* shareable_handle,
                                           unsigned long long flags);
 using ImportHandleFunction = CUresult (*)(CUmemGenericAllocationHandle* handle, void* os_handle,
                                           CUmemAllocationHandleType handle_type);
+using IpcGetMemHandleFunction = CUresult (*)(CUipcMemHandle* handle, CUdeviceptr device_pointer);
+using IpcOpenMemHandleFunction = CUresult (*)(CUdeviceptr* device_pointer, CUipcMemHandle handle,
+                                              unsigned int flags);
+using IpcCloseMemHandleFunction = CUresult (*)(CUdeviceptr device_pointer);
+using ImportExternalMemoryFunction = CUresult (*)(
+    CUexternalMemory* external_memory, const CUDA_EXTERNAL_MEMORY_HANDLE_DESC* handle_desc);
+using ExternalMemoryGetMappedBufferFunction =
+    CUresult (*)(CUdeviceptr* device_pointer, CUexternalMemory external_memory,
+                 const CUDA_EXTERNAL_MEMORY_BUFFER_DESC* buffer_desc);
+using ExternalMemoryGetMappedMipmappedArrayFunction =
+    CUresult (*)(CUmipmappedArray* mipmap, CUexternalMemory external_memory,
+                 const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC* mipmap_desc);
+using DestroyExternalMemoryFunction = CUresult (*)(CUexternalMemory external_memory);
+using ArrayCreateFunction = CUresult (*)(CUarray* array, const CUDA_ARRAY_DESCRIPTOR* descriptor);
+using Array3DCreateFunction = CUresult (*)(CUarray* array,
+                                           const CUDA_ARRAY3D_DESCRIPTOR* descriptor);
+using ArrayDestroyFunction = CUresult (*)(CUarray array);
+using MipmappedArrayCreateFunction = CUresult (*)(CUmipmappedArray* mipmap,
+                                                  const CUDA_ARRAY3D_DESCRIPTOR* descriptor,
+                                                  unsigned int level_count);
+using MipmappedArrayDestroyFunction = CUresult (*)(CUmipmappedArray mipmap);
+using GraphicsUnregisterResourceFunction = CUresult (*)(CUgraphicsResource resource);
+using GraphicsSubResourceGetMappedArrayFunction = CUresult (*)(CUarray* array,
+                                                               CUgraphicsResource resource,
+                                                               unsigned int array_index,
+                                                               unsigned int mip_level);
+using GraphicsResourceGetMappedMipmappedArrayFunction = CUresult (*)(CUmipmappedArray* mipmap,
+                                                                     CUgraphicsResource resource);
+using GraphicsResourceGetMappedPointerFunction = CUresult (*)(CUdeviceptr* device_pointer,
+                                                              std::size_t* size,
+                                                              CUgraphicsResource resource);
+using GraphicsResourceSetMapFlagsFunction = CUresult (*)(CUgraphicsResource resource,
+                                                         unsigned int flags);
+using GraphicsMapResourcesFunction = CUresult (*)(unsigned int count, CUgraphicsResource* resources,
+                                                  CUstream stream);
+using GraphicsUnmapResourcesFunction = CUresult (*)(unsigned int count,
+                                                    CUgraphicsResource* resources, CUstream stream);
 using GetGranularityFunction = CUresult (*)(std::size_t* granularity,
                                             const CUmemAllocationProp* prop,
                                             CUmemAllocationGranularity_flags option);
@@ -130,6 +170,8 @@ using RuntimeMallocManagedFunction = cudaError_t (*)(void** device_pointer,
                                                      std::size_t memory_bytes, unsigned int flags);
 using RuntimeMallocPitchFunction = cudaError_t (*)(void** device_pointer, std::size_t* pitch,
                                                    std::size_t width_bytes, std::size_t height);
+using RuntimeMalloc3DFunction = cudaError_t (*)(struct cudaPitchedPtr* pitched_device_pointer,
+                                                struct cudaExtent extent);
 using RuntimeMallocAsyncFunction = cudaError_t (*)(void** device_pointer, std::size_t memory_bytes,
                                                    cudaStream_t stream);
 using RuntimeLaunchKernelFunction = cudaError_t (*)(const void* function, dim3 grid_dim,
@@ -144,6 +186,52 @@ using RuntimeMallocFromPoolAsyncFunction = cudaError_t (*)(void** device_pointer
                                                            std::size_t memory_bytes,
                                                            cudaMemPool_t pool, cudaStream_t stream);
 using RuntimeFreeFunction = cudaError_t (*)(void* device_pointer);
+using RuntimeIpcGetMemHandleFunction = cudaError_t (*)(cudaIpcMemHandle_t* handle,
+                                                       void* device_pointer);
+using RuntimeIpcOpenMemHandleFunction = cudaError_t (*)(void** device_pointer,
+                                                        cudaIpcMemHandle_t handle,
+                                                        unsigned int flags);
+using RuntimeIpcCloseMemHandleFunction = cudaError_t (*)(void* device_pointer);
+using RuntimeImportExternalMemoryFunction = cudaError_t (*)(
+    cudaExternalMemory_t* external_memory, const struct cudaExternalMemoryHandleDesc* handle_desc);
+using RuntimeExternalMemoryGetMappedBufferFunction =
+    cudaError_t (*)(void** device_pointer, cudaExternalMemory_t external_memory,
+                    const struct cudaExternalMemoryBufferDesc* buffer_desc);
+using RuntimeExternalMemoryGetMappedMipmappedArrayFunction =
+    cudaError_t (*)(cudaMipmappedArray_t* mipmap, cudaExternalMemory_t external_memory,
+                    const struct cudaExternalMemoryMipmappedArrayDesc* mipmap_desc);
+using RuntimeDestroyExternalMemoryFunction = cudaError_t (*)(cudaExternalMemory_t external_memory);
+using RuntimeMallocArrayFunction = cudaError_t (*)(cudaArray_t* array,
+                                                   const struct cudaChannelFormatDesc* descriptor,
+                                                   std::size_t width, std::size_t height,
+                                                   unsigned int flags);
+using RuntimeMalloc3DArrayFunction = cudaError_t (*)(cudaArray_t* array,
+                                                     const struct cudaChannelFormatDesc* descriptor,
+                                                     struct cudaExtent extent, unsigned int flags);
+using RuntimeMallocMipmappedArrayFunction =
+    cudaError_t (*)(cudaMipmappedArray_t* mipmap, const struct cudaChannelFormatDesc* descriptor,
+                    struct cudaExtent extent, unsigned int level_count, unsigned int flags);
+using RuntimeFreeArrayFunction = cudaError_t (*)(cudaArray_t array);
+using RuntimeFreeMipmappedArrayFunction = cudaError_t (*)(cudaMipmappedArray_t mipmap);
+using RuntimeGraphicsUnregisterResourceFunction = cudaError_t (*)(cudaGraphicsResource_t resource);
+using RuntimeGraphicsResourceSetMapFlagsFunction = cudaError_t (*)(cudaGraphicsResource_t resource,
+                                                                   unsigned int flags);
+using RuntimeGraphicsMapResourcesFunction = cudaError_t (*)(int count,
+                                                            cudaGraphicsResource_t* resources,
+                                                            cudaStream_t stream);
+using RuntimeGraphicsUnmapResourcesFunction = cudaError_t (*)(int count,
+                                                              cudaGraphicsResource_t* resources,
+                                                              cudaStream_t stream);
+using RuntimeGraphicsResourceGetMappedPointerFunction =
+    cudaError_t (*)(void** device_pointer, std::size_t* size, cudaGraphicsResource_t resource);
+using RuntimeGraphicsSubResourceGetMappedArrayFunction =
+    cudaError_t (*)(cudaArray_t* array, cudaGraphicsResource_t resource, unsigned int array_index,
+                    unsigned int mip_level);
+using RuntimeGraphicsResourceGetMappedMipmappedArrayFunction =
+    cudaError_t (*)(cudaMipmappedArray_t* mipmap, cudaGraphicsResource_t resource);
+using RuntimeGraphAddMemAllocNodeFunction = cudaError_t (*)(
+    cudaGraphNode_t* graph_node, cudaGraph_t graph, const cudaGraphNode_t* dependencies,
+    std::size_t dependency_count, struct cudaMemAllocNodeParams* parameters);
 using RuntimeFreeAsyncFunction = cudaError_t (*)(void* device_pointer, cudaStream_t stream);
 using RuntimeDeviceSynchronizeFunction = cudaError_t (*)();
 using RuntimeStreamSynchronizeFunction = cudaError_t (*)(cudaStream_t stream);
@@ -506,6 +594,35 @@ int run_async_null_pointer_test(bool runtime) {
                : EXIT_FAILURE;
 }
 
+int run_runtime_untracked_initialization_test() {
+    void* runtime_handle = dlopen("libcudart.so", RTLD_NOW | RTLD_GLOBAL);
+    const RuntimeIpcOpenMemHandleFunction open_handle =
+        resolve_default<RuntimeIpcOpenMemHandleFunction>("cudaIpcOpenMemHandle");
+    const RuntimeMallocArrayFunction allocate_array =
+        resolve_default<RuntimeMallocArrayFunction>("cudaMallocArray");
+    if (!expect(runtime_handle != nullptr && open_handle != nullptr && allocate_array != nullptr,
+                "initial Runtime untracked-path test symbols were not exported")) {
+        if (runtime_handle != nullptr) {
+            dlclose(runtime_handle);
+        }
+        return EXIT_FAILURE;
+    }
+
+    void* imported_pointer = nullptr;
+    cudaIpcMemHandle_t handle{};
+    const bool ipc_rejected = open_handle(&imported_pointer, handle, 0) == cudaErrorNotSupported &&
+                              imported_pointer == nullptr;
+    cudaChannelFormatDesc descriptor{};
+    cudaArray_t array = nullptr;
+    const bool array_rejected =
+        allocate_array(&array, &descriptor, 1, 1, 0) == cudaErrorNotSupported && array == nullptr;
+    dlclose(runtime_handle);
+    return expect(ipc_rejected && array_rejected,
+                  "Runtime untracked paths bypassed quota before initialization")
+               ? EXIT_SUCCESS
+               : EXIT_FAILURE;
+}
+
 }  // namespace
 
 int main() {
@@ -523,6 +640,9 @@ int main() {
     }
     if (std::getenv("GLIMMER_FAKE_NULL_SUCCESS_POINTER") != nullptr) {
         return run_async_null_pointer_test(std::getenv("GLIMMER_NULL_SUCCESS_RUNTIME") != nullptr);
+    }
+    if (std::getenv("GLIMMER_FAKE_RUNTIME_UNTRACKED_FIRST") != nullptr) {
+        return run_runtime_untracked_initialization_test();
     }
 
     bool all_passed = true;
@@ -565,6 +685,8 @@ int main() {
     const AddressFreeFunction address_free =
         resolve_default<AddressFreeFunction>("cuMemAddressFree");
     const MapFunction map = resolve_default<MapFunction>("cuMemMap");
+    const MapArrayAsyncFunction map_array_async =
+        resolve_default<MapArrayAsyncFunction>("cuMemMapArrayAsync");
     const UnmapFunction unmap = resolve_default<UnmapFunction>("cuMemUnmap");
     const SetAccessFunction set_access = resolve_default<SetAccessFunction>("cuMemSetAccess");
     const GetAddressRangeFunction get_address_range =
@@ -574,6 +696,51 @@ int main() {
         resolve_default<ExportHandleFunction>("cuMemExportToShareableHandle");
     const ImportHandleFunction import_handle =
         resolve_default<ImportHandleFunction>("cuMemImportFromShareableHandle");
+    const IpcGetMemHandleFunction ipc_get_handle =
+        resolve_default<IpcGetMemHandleFunction>("cuIpcGetMemHandle");
+    const IpcOpenMemHandleFunction ipc_open_handle =
+        resolve_default<IpcOpenMemHandleFunction>("cuIpcOpenMemHandle");
+    const IpcOpenMemHandleFunction ipc_open_handle_v2 =
+        resolve_default<IpcOpenMemHandleFunction>("cuIpcOpenMemHandle_v2");
+    const IpcCloseMemHandleFunction ipc_close_handle =
+        resolve_default<IpcCloseMemHandleFunction>("cuIpcCloseMemHandle");
+    const ImportExternalMemoryFunction import_external_memory =
+        resolve_default<ImportExternalMemoryFunction>("cuImportExternalMemory");
+    const ExternalMemoryGetMappedBufferFunction get_external_buffer =
+        resolve_default<ExternalMemoryGetMappedBufferFunction>("cuExternalMemoryGetMappedBuffer");
+    const ExternalMemoryGetMappedMipmappedArrayFunction get_external_mipmap =
+        resolve_default<ExternalMemoryGetMappedMipmappedArrayFunction>(
+            "cuExternalMemoryGetMappedMipmappedArray");
+    const DestroyExternalMemoryFunction destroy_external_memory =
+        resolve_default<DestroyExternalMemoryFunction>("cuDestroyExternalMemory");
+    const ArrayCreateFunction array_create = resolve_default<ArrayCreateFunction>("cuArrayCreate");
+    const ArrayCreateFunction array_create_v2 =
+        resolve_default<ArrayCreateFunction>("cuArrayCreate_v2");
+    const Array3DCreateFunction array_3d_create =
+        resolve_default<Array3DCreateFunction>("cuArray3DCreate");
+    const ArrayDestroyFunction array_destroy =
+        resolve_default<ArrayDestroyFunction>("cuArrayDestroy");
+    const MipmappedArrayCreateFunction mipmapped_array_create =
+        resolve_default<MipmappedArrayCreateFunction>("cuMipmappedArrayCreate");
+    const MipmappedArrayDestroyFunction mipmapped_array_destroy =
+        resolve_default<MipmappedArrayDestroyFunction>("cuMipmappedArrayDestroy");
+    const GraphicsUnregisterResourceFunction graphics_unregister_resource =
+        resolve_default<GraphicsUnregisterResourceFunction>("cuGraphicsUnregisterResource");
+    const GraphicsSubResourceGetMappedArrayFunction graphics_get_mapped_array =
+        resolve_default<GraphicsSubResourceGetMappedArrayFunction>(
+            "cuGraphicsSubResourceGetMappedArray");
+    const GraphicsResourceGetMappedMipmappedArrayFunction graphics_get_mapped_mipmap =
+        resolve_default<GraphicsResourceGetMappedMipmappedArrayFunction>(
+            "cuGraphicsResourceGetMappedMipmappedArray");
+    const GraphicsResourceGetMappedPointerFunction graphics_get_mapped_pointer =
+        resolve_default<GraphicsResourceGetMappedPointerFunction>(
+            "cuGraphicsResourceGetMappedPointer_v2");
+    const GraphicsResourceSetMapFlagsFunction graphics_set_map_flags =
+        resolve_default<GraphicsResourceSetMapFlagsFunction>("cuGraphicsResourceSetMapFlags_v2");
+    const GraphicsMapResourcesFunction graphics_map_resources =
+        resolve_default<GraphicsMapResourcesFunction>("cuGraphicsMapResources");
+    const GraphicsUnmapResourcesFunction graphics_unmap_resources =
+        resolve_default<GraphicsUnmapResourcesFunction>("cuGraphicsUnmapResources");
     const GetGranularityFunction get_granularity =
         resolve_default<GetGranularityFunction>("cuMemGetAllocationGranularity");
     const GetPropertiesFunction get_properties =
@@ -658,13 +825,23 @@ int main() {
             async_allocate_ptsz != nullptr && pool_async_allocate != nullptr &&
             pool_async_allocate_ptsz != nullptr && vmm_create != nullptr &&
             vmm_release != nullptr && address_reserve != nullptr && address_free != nullptr &&
-            map != nullptr && unmap != nullptr && set_access != nullptr &&
-            get_address_range != nullptr && get_access != nullptr && export_handle != nullptr &&
-            import_handle != nullptr && get_granularity != nullptr && get_properties != nullptr &&
-            retain_handle != nullptr && pool_trim != nullptr && pool_set_attribute != nullptr &&
-            pool_get_attribute != nullptr && pool_set_access != nullptr &&
-            pool_get_access != nullptr && pool_create != nullptr && pool_destroy != nullptr &&
-            device_get_pool != nullptr && device_set_pool != nullptr &&
+            map != nullptr && map_array_async != nullptr && unmap != nullptr &&
+            set_access != nullptr && get_address_range != nullptr && get_access != nullptr &&
+            export_handle != nullptr && import_handle != nullptr && ipc_get_handle != nullptr &&
+            ipc_open_handle != nullptr && ipc_open_handle_v2 != nullptr &&
+            ipc_close_handle != nullptr && get_granularity != nullptr &&
+            import_external_memory != nullptr && get_external_buffer != nullptr &&
+            get_external_mipmap != nullptr && destroy_external_memory != nullptr &&
+            array_create != nullptr && array_create_v2 != nullptr && array_3d_create != nullptr &&
+            array_destroy != nullptr && mipmapped_array_create != nullptr &&
+            mipmapped_array_destroy != nullptr && graphics_unregister_resource != nullptr &&
+            graphics_get_mapped_array != nullptr && graphics_get_mapped_mipmap != nullptr &&
+            graphics_get_mapped_pointer != nullptr && graphics_set_map_flags != nullptr &&
+            graphics_map_resources != nullptr && graphics_unmap_resources != nullptr &&
+            get_properties != nullptr && retain_handle != nullptr && pool_trim != nullptr &&
+            pool_set_attribute != nullptr && pool_get_attribute != nullptr &&
+            pool_set_access != nullptr && pool_get_access != nullptr && pool_create != nullptr &&
+            pool_destroy != nullptr && device_get_pool != nullptr && device_set_pool != nullptr &&
             device_get_default_pool != nullptr && get_default_pool != nullptr &&
             get_pool != nullptr && set_pool != nullptr && pool_export_handle != nullptr &&
             pool_import_handle != nullptr && pool_export_pointer != nullptr &&
@@ -722,6 +899,94 @@ int main() {
     all_passed &= expect(get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS &&
                              free_bytes == kQuotaBytes && total_bytes == kQuotaBytes,
                          "initial memory info was incorrect");
+
+    CUipcMemHandle ipc_handle{};
+    all_passed &= expect(ipc_get_handle(&ipc_handle, 0x100000U) == CUDA_SUCCESS,
+                         "IPC handle export was not forwarded");
+    CUdeviceptr imported_ipc_pointer = 0;
+    all_passed &=
+        expect(ipc_open_handle(&imported_ipc_pointer, ipc_handle, 0) == CUDA_ERROR_NOT_SUPPORTED &&
+                   imported_ipc_pointer == 0,
+               "IPC memory import was not rejected under quota");
+    all_passed &=
+        expect(ipc_close_handle(0x60000000U) == CUDA_SUCCESS, "IPC memory close was not forwarded");
+
+    CUDA_EXTERNAL_MEMORY_HANDLE_DESC external_handle_desc{};
+    CUexternalMemory external_memory = nullptr;
+    all_passed &= expect(import_external_memory(&external_memory, &external_handle_desc) ==
+                                 CUDA_ERROR_NOT_SUPPORTED &&
+                             external_memory == nullptr,
+                         "external memory import was not rejected under quota");
+    CUDA_EXTERNAL_MEMORY_BUFFER_DESC external_buffer_desc{};
+    CUdeviceptr external_device_pointer = 0;
+    all_passed &= expect(get_external_buffer(&external_device_pointer,
+                                             reinterpret_cast<CUexternalMemory>(0x62000000U),
+                                             &external_buffer_desc) == CUDA_ERROR_NOT_SUPPORTED &&
+                             external_device_pointer == 0,
+                         "external memory buffer mapping was not rejected under quota");
+    CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC external_mipmap_desc{};
+    CUmipmappedArray external_mipmap = nullptr;
+    all_passed &= expect(
+        get_external_mipmap(&external_mipmap, reinterpret_cast<CUexternalMemory>(0x62000000U),
+                            &external_mipmap_desc) == CUDA_ERROR_NOT_SUPPORTED &&
+            external_mipmap == nullptr,
+        "external memory mipmap mapping was not rejected under quota");
+    all_passed &= expect(
+        destroy_external_memory(reinterpret_cast<CUexternalMemory>(0x62000000U)) == CUDA_SUCCESS,
+        "external memory destruction was not forwarded");
+    CUDA_ARRAY_DESCRIPTOR array_descriptor{};
+    CUarray array = nullptr;
+    all_passed &= expect(
+        array_create(&array, &array_descriptor) == CUDA_ERROR_NOT_SUPPORTED && array == nullptr,
+        "CUDA array allocation was not rejected under quota");
+    CUDA_ARRAY3D_DESCRIPTOR array_3d_descriptor{};
+    CUarray array_3d = nullptr;
+    all_passed &=
+        expect(array_3d_create(&array_3d, &array_3d_descriptor) == CUDA_ERROR_NOT_SUPPORTED &&
+                   array_3d == nullptr,
+               "CUDA 3D array allocation was not rejected under quota");
+    CUmipmappedArray mipmapped_array = nullptr;
+    all_passed &= expect(mipmapped_array_create(&mipmapped_array, &array_3d_descriptor, 1) ==
+                                 CUDA_ERROR_NOT_SUPPORTED &&
+                             mipmapped_array == nullptr,
+                         "CUDA mipmapped array allocation was not rejected under quota");
+    all_passed &= expect(array_destroy(reinterpret_cast<CUarray>(0x63000000U)) == CUDA_SUCCESS,
+                         "CUDA array destruction was not forwarded");
+    all_passed &= expect(
+        mipmapped_array_destroy(reinterpret_cast<CUmipmappedArray>(0x63000000U)) == CUDA_SUCCESS,
+        "CUDA mipmapped array destruction was not forwarded");
+
+    CUarrayMapInfo sparse_map_info{};
+    all_passed &= expect(map_array_async(&sparse_map_info, 1, nullptr) == CUDA_ERROR_NOT_SUPPORTED,
+                         "CUDA sparse array mapping was not rejected under quota");
+
+    CUgraphicsResource graphics_resource = reinterpret_cast<CUgraphicsResource>(0x64000000U);
+    CUdeviceptr graphics_pointer = 0;
+    std::size_t graphics_size = 0;
+    all_passed &=
+        expect(graphics_map_resources(1, &graphics_resource, nullptr) == CUDA_ERROR_NOT_SUPPORTED,
+               "CUDA graphics mapping was not rejected under quota");
+    all_passed &=
+        expect(graphics_get_mapped_pointer(&graphics_pointer, &graphics_size, graphics_resource) ==
+                       CUDA_ERROR_NOT_SUPPORTED &&
+                   graphics_pointer == 0 && graphics_size == 0,
+               "CUDA graphics mapped pointer was not rejected under quota");
+    CUarray graphics_array = nullptr;
+    all_passed &= expect(graphics_get_mapped_array(&graphics_array, graphics_resource, 0, 0) ==
+                                 CUDA_ERROR_NOT_SUPPORTED &&
+                             graphics_array == nullptr,
+                         "CUDA graphics mapped array was not rejected under quota");
+    CUmipmappedArray graphics_mipmap = nullptr;
+    all_passed &= expect(graphics_get_mapped_mipmap(&graphics_mipmap, graphics_resource) ==
+                                 CUDA_ERROR_NOT_SUPPORTED &&
+                             graphics_mipmap == nullptr,
+                         "CUDA graphics mapped mipmap was not rejected under quota");
+    all_passed &= expect(graphics_set_map_flags(graphics_resource, 0) == CUDA_SUCCESS,
+                         "CUDA graphics map flags were not forwarded");
+    all_passed &= expect(graphics_unmap_resources(1, &graphics_resource, nullptr) == CUDA_SUCCESS,
+                         "CUDA graphics unmapping was not forwarded");
+    all_passed &= expect(graphics_unregister_resource(graphics_resource) == CUDA_SUCCESS,
+                         "CUDA graphics resource destruction was not forwarded");
 
     nvmlDevice_t nvml_device = nullptr;
     unsigned int nvml_count = 0;
@@ -972,6 +1237,8 @@ int main() {
         resolve_default<RuntimeMallocManagedFunction>("cudaMallocManaged");
     const RuntimeMallocPitchFunction runtime_pitch_allocate =
         resolve_default<RuntimeMallocPitchFunction>("cudaMallocPitch");
+    const RuntimeMalloc3DFunction runtime_3d_allocate =
+        resolve_default<RuntimeMalloc3DFunction>("cudaMalloc3D");
     const RuntimeLaunchKernelFunction runtime_launch_kernel =
         resolve_default<RuntimeLaunchKernelFunction>("cudaLaunchKernel");
     const RuntimeLaunchKernelFunction runtime_launch_kernel_ptsz =
@@ -992,6 +1259,54 @@ int main() {
     const RuntimeMallocFromPoolAsyncFunction runtime_pool_async_allocate_ptsz =
         resolve_default<RuntimeMallocFromPoolAsyncFunction>("cudaMallocFromPoolAsync_ptsz");
     const RuntimeFreeFunction runtime_release = resolve_default<RuntimeFreeFunction>("cudaFree");
+    const RuntimeIpcGetMemHandleFunction runtime_ipc_get_handle =
+        resolve_default<RuntimeIpcGetMemHandleFunction>("cudaIpcGetMemHandle");
+    const RuntimeIpcOpenMemHandleFunction runtime_ipc_open_handle =
+        resolve_default<RuntimeIpcOpenMemHandleFunction>("cudaIpcOpenMemHandle");
+    const RuntimeIpcCloseMemHandleFunction runtime_ipc_close_handle =
+        resolve_default<RuntimeIpcCloseMemHandleFunction>("cudaIpcCloseMemHandle");
+    const RuntimeImportExternalMemoryFunction runtime_import_external_memory =
+        resolve_default<RuntimeImportExternalMemoryFunction>("cudaImportExternalMemory");
+    const RuntimeExternalMemoryGetMappedBufferFunction runtime_get_external_buffer =
+        resolve_default<RuntimeExternalMemoryGetMappedBufferFunction>(
+            "cudaExternalMemoryGetMappedBuffer");
+    const RuntimeExternalMemoryGetMappedMipmappedArrayFunction runtime_get_external_mipmap =
+        resolve_default<RuntimeExternalMemoryGetMappedMipmappedArrayFunction>(
+            "cudaExternalMemoryGetMappedMipmappedArray");
+    const RuntimeDestroyExternalMemoryFunction runtime_destroy_external_memory =
+        resolve_default<RuntimeDestroyExternalMemoryFunction>("cudaDestroyExternalMemory");
+    const RuntimeMallocArrayFunction runtime_array_create =
+        resolve_default<RuntimeMallocArrayFunction>("cudaMallocArray");
+    const RuntimeMalloc3DArrayFunction runtime_array_3d_create =
+        resolve_default<RuntimeMalloc3DArrayFunction>("cudaMalloc3DArray");
+    const RuntimeMallocMipmappedArrayFunction runtime_mipmapped_array_create =
+        resolve_default<RuntimeMallocMipmappedArrayFunction>("cudaMallocMipmappedArray");
+    const RuntimeFreeArrayFunction runtime_array_destroy =
+        resolve_default<RuntimeFreeArrayFunction>("cudaFreeArray");
+    const RuntimeFreeMipmappedArrayFunction runtime_mipmapped_array_destroy =
+        resolve_default<RuntimeFreeMipmappedArrayFunction>("cudaFreeMipmappedArray");
+    const RuntimeGraphicsUnregisterResourceFunction runtime_graphics_unregister_resource =
+        resolve_default<RuntimeGraphicsUnregisterResourceFunction>(
+            "cudaGraphicsUnregisterResource");
+    const RuntimeGraphicsResourceSetMapFlagsFunction runtime_graphics_set_map_flags =
+        resolve_default<RuntimeGraphicsResourceSetMapFlagsFunction>(
+            "cudaGraphicsResourceSetMapFlags");
+    const RuntimeGraphicsMapResourcesFunction runtime_graphics_map_resources =
+        resolve_default<RuntimeGraphicsMapResourcesFunction>("cudaGraphicsMapResources");
+    const RuntimeGraphicsUnmapResourcesFunction runtime_graphics_unmap_resources =
+        resolve_default<RuntimeGraphicsUnmapResourcesFunction>("cudaGraphicsUnmapResources");
+    const RuntimeGraphicsResourceGetMappedPointerFunction runtime_graphics_get_mapped_pointer =
+        resolve_default<RuntimeGraphicsResourceGetMappedPointerFunction>(
+            "cudaGraphicsResourceGetMappedPointer");
+    const RuntimeGraphicsSubResourceGetMappedArrayFunction runtime_graphics_get_mapped_array =
+        resolve_default<RuntimeGraphicsSubResourceGetMappedArrayFunction>(
+            "cudaGraphicsSubResourceGetMappedArray");
+    const RuntimeGraphicsResourceGetMappedMipmappedArrayFunction
+        runtime_graphics_get_mapped_mipmap =
+            resolve_default<RuntimeGraphicsResourceGetMappedMipmappedArrayFunction>(
+                "cudaGraphicsResourceGetMappedMipmappedArray");
+    const RuntimeGraphAddMemAllocNodeFunction runtime_graph_add_mem_alloc_node =
+        resolve_default<RuntimeGraphAddMemAllocNodeFunction>("cudaGraphAddMemAllocNode");
     const RuntimeFreeAsyncFunction runtime_async_release =
         resolve_default<RuntimeFreeAsyncFunction>("cudaFreeAsync");
     const RuntimeFreeAsyncFunction runtime_async_release_ptsz =
@@ -1049,14 +1364,28 @@ int main() {
     void* runtime_pointer = nullptr;
     all_passed &= expect(
         runtime_allocate != nullptr && runtime_managed_allocate != nullptr &&
-            runtime_pitch_allocate != nullptr && runtime_async_allocate != nullptr &&
-            runtime_launch_kernel != nullptr && runtime_launch_kernel_ptsz != nullptr &&
-            runtime_internal_launch_kernel != nullptr &&
+            runtime_pitch_allocate != nullptr && runtime_3d_allocate != nullptr &&
+            runtime_async_allocate != nullptr && runtime_launch_kernel != nullptr &&
+            runtime_launch_kernel_ptsz != nullptr && runtime_internal_launch_kernel != nullptr &&
             runtime_internal_launch_kernel_ptsz != nullptr &&
             runtime_async_allocate_ptsz != nullptr && runtime_release != nullptr &&
             runtime_pool_async_allocate != nullptr && runtime_pool_async_allocate_ptsz != nullptr &&
             runtime_async_release != nullptr && runtime_async_release_ptsz != nullptr &&
-            runtime_device_synchronize != nullptr && runtime_stream_synchronize != nullptr &&
+            runtime_ipc_get_handle != nullptr && runtime_ipc_open_handle != nullptr &&
+            runtime_ipc_close_handle != nullptr && runtime_device_synchronize != nullptr &&
+            runtime_import_external_memory != nullptr && runtime_get_external_buffer != nullptr &&
+            runtime_get_external_mipmap != nullptr && runtime_destroy_external_memory != nullptr &&
+            runtime_array_create != nullptr && runtime_array_3d_create != nullptr &&
+            runtime_mipmapped_array_create != nullptr && runtime_array_destroy != nullptr &&
+            runtime_mipmapped_array_destroy != nullptr &&
+            runtime_graphics_unregister_resource != nullptr &&
+            runtime_graphics_set_map_flags != nullptr &&
+            runtime_graphics_map_resources != nullptr &&
+            runtime_graphics_unmap_resources != nullptr &&
+            runtime_graphics_get_mapped_pointer != nullptr &&
+            runtime_graphics_get_mapped_array != nullptr &&
+            runtime_graphics_get_mapped_mipmap != nullptr &&
+            runtime_graph_add_mem_alloc_node != nullptr && runtime_stream_synchronize != nullptr &&
             runtime_stream_synchronize_ptsz != nullptr && runtime_stream_query != nullptr &&
             runtime_stream_query_ptsz != nullptr && runtime_stream_destroy != nullptr &&
             runtime_get_info != nullptr && runtime_device_get_default_pool != nullptr &&
@@ -1079,6 +1408,9 @@ int main() {
         all_passed &= expect(dlsym(runtime_handle, "cudaMallocPitch") ==
                                  reinterpret_cast<void*>(runtime_pitch_allocate),
                              "explicit CUDA Runtime handle did not return the pitch wrapper");
+        all_passed &= expect(
+            dlsym(runtime_handle, "cudaMalloc3D") == reinterpret_cast<void*>(runtime_3d_allocate),
+            "explicit CUDA Runtime handle did not return the 3D wrapper");
         all_passed &= expect(dlsym(runtime_handle, "cudaLaunchKernel") ==
                                  reinterpret_cast<void*>(runtime_launch_kernel),
                              "explicit CUDA Runtime handle did not return the launch wrapper");
@@ -1093,6 +1425,109 @@ int main() {
     }
     all_passed &= expect(runtime_allocate(&runtime_pointer, kRuntimeAllocationBytes) == cudaSuccess,
                          "runtime allocation was rejected");
+    cudaIpcMemHandle_t runtime_ipc_handle{};
+    all_passed &=
+        expect(runtime_ipc_get_handle(&runtime_ipc_handle, runtime_pointer) == cudaSuccess,
+               "Runtime IPC handle export was not forwarded");
+    void* runtime_ipc_pointer = nullptr;
+    all_passed &= expect(runtime_ipc_open_handle(&runtime_ipc_pointer, runtime_ipc_handle, 0) ==
+                                 cudaErrorNotSupported &&
+                             runtime_ipc_pointer == nullptr,
+                         "Runtime IPC import was not rejected under quota");
+    all_passed &=
+        expect(runtime_ipc_close_handle(reinterpret_cast<void*>(0x71000000U)) == cudaSuccess,
+               "Runtime IPC close was not forwarded");
+    cudaExternalMemory_t runtime_external_memory = nullptr;
+    cudaExternalMemoryHandleDesc runtime_external_handle_desc{};
+    all_passed &= expect(
+        runtime_import_external_memory(&runtime_external_memory, &runtime_external_handle_desc) ==
+                cudaErrorNotSupported &&
+            runtime_external_memory == nullptr,
+        "Runtime external memory import was not rejected under quota");
+    cudaExternalMemoryBufferDesc runtime_external_buffer_desc{};
+    void* runtime_external_pointer = nullptr;
+    all_passed &=
+        expect(runtime_get_external_buffer(
+                   &runtime_external_pointer, reinterpret_cast<cudaExternalMemory_t>(0x72000000U),
+                   &runtime_external_buffer_desc) == cudaErrorNotSupported &&
+                   runtime_external_pointer == nullptr,
+               "Runtime external buffer mapping was not rejected under quota");
+    cudaExternalMemoryMipmappedArrayDesc runtime_external_mipmap_desc{};
+    cudaMipmappedArray_t runtime_external_mipmap = nullptr;
+    all_passed &=
+        expect(runtime_get_external_mipmap(
+                   &runtime_external_mipmap, reinterpret_cast<cudaExternalMemory_t>(0x72000000U),
+                   &runtime_external_mipmap_desc) == cudaErrorNotSupported &&
+                   runtime_external_mipmap == nullptr,
+               "Runtime external mipmap mapping was not rejected under quota");
+    all_passed &= expect(runtime_destroy_external_memory(
+                             reinterpret_cast<cudaExternalMemory_t>(0x72000000U)) == cudaSuccess,
+                         "Runtime external memory destruction was not forwarded");
+    cudaChannelFormatDesc runtime_array_descriptor{};
+    cudaArray_t runtime_array = nullptr;
+    all_passed &= expect(runtime_array_create(&runtime_array, &runtime_array_descriptor, 1, 1, 0) ==
+                                 cudaErrorNotSupported &&
+                             runtime_array == nullptr,
+                         "Runtime CUDA array allocation was not rejected under quota");
+    cudaExtent runtime_array_extent{1, 1, 1};
+    cudaArray_t runtime_array_3d = nullptr;
+    all_passed &=
+        expect(runtime_array_3d_create(&runtime_array_3d, &runtime_array_descriptor,
+                                       runtime_array_extent, 0) == cudaErrorNotSupported &&
+                   runtime_array_3d == nullptr,
+               "Runtime CUDA 3D array allocation was not rejected under quota");
+    cudaMipmappedArray_t runtime_mipmapped_array = nullptr;
+    all_passed &= expect(
+        runtime_mipmapped_array_create(&runtime_mipmapped_array, &runtime_array_descriptor,
+                                       runtime_array_extent, 1, 0) == cudaErrorNotSupported &&
+            runtime_mipmapped_array == nullptr,
+        "Runtime CUDA mipmapped array allocation was not rejected under quota");
+    all_passed &=
+        expect(runtime_array_destroy(reinterpret_cast<cudaArray_t>(0x73000000U)) == cudaSuccess,
+               "Runtime CUDA array destruction was not forwarded");
+    all_passed &= expect(runtime_mipmapped_array_destroy(
+                             reinterpret_cast<cudaMipmappedArray_t>(0x73000000U)) == cudaSuccess,
+                         "Runtime CUDA mipmapped array destruction was not forwarded");
+    cudaGraphicsResource_t runtime_graphics_resource =
+        reinterpret_cast<cudaGraphicsResource_t>(0x75000000U);
+    all_passed &= expect(runtime_graphics_map_resources(1, &runtime_graphics_resource, nullptr) ==
+                             cudaErrorNotSupported,
+                         "Runtime graphics mapping was not rejected under quota");
+    void* runtime_graphics_pointer = nullptr;
+    std::size_t runtime_graphics_size = 0;
+    all_passed &= expect(
+        runtime_graphics_get_mapped_pointer(&runtime_graphics_pointer, &runtime_graphics_size,
+                                            runtime_graphics_resource) == cudaErrorNotSupported &&
+            runtime_graphics_pointer == nullptr && runtime_graphics_size == 0,
+        "Runtime graphics mapped pointer was not rejected under quota");
+    cudaArray_t runtime_graphics_array = nullptr;
+    all_passed &=
+        expect(runtime_graphics_get_mapped_array(&runtime_graphics_array, runtime_graphics_resource,
+                                                 0, 0) == cudaErrorNotSupported &&
+                   runtime_graphics_array == nullptr,
+               "Runtime graphics mapped array was not rejected under quota");
+    cudaMipmappedArray_t runtime_graphics_mipmap = nullptr;
+    all_passed &=
+        expect(runtime_graphics_get_mapped_mipmap(
+                   &runtime_graphics_mipmap, runtime_graphics_resource) == cudaErrorNotSupported &&
+                   runtime_graphics_mipmap == nullptr,
+               "Runtime graphics mapped mipmap was not rejected under quota");
+    all_passed &=
+        expect(runtime_graphics_set_map_flags(runtime_graphics_resource, 0) == cudaSuccess,
+               "Runtime graphics map flags were not forwarded");
+    all_passed &= expect(
+        runtime_graphics_unmap_resources(1, &runtime_graphics_resource, nullptr) == cudaSuccess,
+        "Runtime graphics unmapping was not forwarded");
+    all_passed &=
+        expect(runtime_graphics_unregister_resource(runtime_graphics_resource) == cudaSuccess,
+               "Runtime graphics resource destruction was not forwarded");
+    cudaGraphNode_t graph_node = nullptr;
+    cudaMemAllocNodeParams graph_parameters{};
+    all_passed &= expect(
+        runtime_graph_add_mem_alloc_node(&graph_node, reinterpret_cast<cudaGraph_t>(0x74000000U),
+                                         nullptr, 0, &graph_parameters) == cudaErrorNotSupported &&
+            graph_node == nullptr,
+        "CUDA graph memory node was not rejected under quota");
     all_passed &= expect(runtime_launch_kernel(nullptr, dim3{1, 1, 1}, dim3{1, 1, 1}, nullptr, 0,
                                                nullptr) == cudaSuccess,
                          "Runtime cudaLaunchKernel forwarding failed");
@@ -1154,6 +1589,35 @@ int main() {
     all_passed &= expect(
         runtime_get_info(&free_bytes, &total_bytes) == cudaSuccess && free_bytes == kQuotaBytes,
         "Runtime managed or pitched release did not restore quota");
+
+    constexpr cudaExtent k_runtime_3d_extent{500, 2, 2};
+    constexpr std::size_t k_runtime_3d_bytes =
+        512 * k_runtime_3d_extent.height * k_runtime_3d_extent.depth;
+    cudaPitchedPtr runtime_3d_allocation{};
+    all_passed &=
+        expect(runtime_3d_allocate(&runtime_3d_allocation, k_runtime_3d_extent) == cudaSuccess &&
+                   runtime_3d_allocation.pitch == 512 && runtime_3d_allocation.ptr != nullptr,
+               "Runtime 3D pitched allocation was rejected");
+    all_passed &= expect(runtime_get_info(&free_bytes, &total_bytes) == cudaSuccess &&
+                             free_bytes == kQuotaBytes - k_runtime_3d_bytes,
+                         "Runtime 3D allocation was not accounted using physical pitch");
+    all_passed &= expect(runtime_release(runtime_3d_allocation.ptr) == cudaSuccess,
+                         "Runtime 3D allocation was not freed");
+    cudaPitchedPtr rejected_3d_allocation{};
+    constexpr cudaExtent k_rejected_3d_extent{kQuotaBytes + 1, 1, 1};
+    all_passed &= expect(runtime_3d_allocate(&rejected_3d_allocation, k_rejected_3d_extent) ==
+                                 cudaErrorMemoryAllocation &&
+                             rejected_3d_allocation.ptr == nullptr,
+                         "Runtime 3D quota rejection was not enforced");
+    cudaPitchedPtr overflow_3d_allocation{};
+    const cudaExtent overflow_3d_extent{1, std::numeric_limits<std::size_t>::max(), 2};
+    all_passed &= expect(
+        runtime_3d_allocate(&overflow_3d_allocation, overflow_3d_extent) == cudaErrorInvalidValue &&
+            overflow_3d_allocation.ptr == nullptr,
+        "Runtime 3D extent overflow was not rejected");
+    all_passed &= expect(
+        runtime_get_info(&free_bytes, &total_bytes) == cudaSuccess && free_bytes == kQuotaBytes,
+        "Runtime 3D release did not restore quota");
 
     void* runtime_async_pointer = nullptr;
     all_passed &= expect(runtime_async_allocate(&runtime_async_pointer, kAsyncAllocationBytes,
@@ -1481,11 +1945,59 @@ int main() {
     queried_symbol = nullptr;
     query_status = {};
     all_passed &= expect(get_proc_v2 != nullptr &&
+                             get_proc_v2("cuMemMapArrayAsync", &queried_symbol, CUDA_VERSION, 0,
+                                         &query_status) == CUDA_SUCCESS &&
+                             queried_symbol == reinterpret_cast<void*>(map_array_async) &&
+                             query_status == CU_GET_PROC_ADDRESS_SUCCESS,
+                         "v2 cuGetProcAddress did not return the sparse array mapping wrapper");
+
+    queried_symbol = nullptr;
+    query_status = {};
+    all_passed &= expect(get_proc_v2 != nullptr &&
                              get_proc_v2("cuMemGetAllocationGranularity", &queried_symbol,
                                          CUDA_VERSION, 0, &query_status) == CUDA_SUCCESS &&
                              queried_symbol == reinterpret_cast<void*>(get_granularity) &&
                              query_status == CU_GET_PROC_ADDRESS_SUCCESS,
                          "v2 cuGetProcAddress did not return the VMM query wrapper");
+
+    queried_symbol = nullptr;
+    query_status = {};
+    all_passed &= expect(get_proc_v2 != nullptr &&
+                             get_proc_v2("cuIpcOpenMemHandle_v2", &queried_symbol, CUDA_VERSION, 0,
+                                         &query_status) == CUDA_SUCCESS &&
+                             queried_symbol == reinterpret_cast<void*>(ipc_open_handle_v2) &&
+                             query_status == CU_GET_PROC_ADDRESS_SUCCESS,
+                         "v2 cuGetProcAddress did not return the IPC wrapper");
+    queried_symbol = nullptr;
+    query_status = {};
+    all_passed &= expect(legacy_get_proc != nullptr &&
+                             legacy_get_proc("cuImportExternalMemory", &queried_symbol,
+                                             CUDA_VERSION, 0) == CUDA_SUCCESS &&
+                             queried_symbol == reinterpret_cast<void*>(import_external_memory),
+                         "legacy cuGetProcAddress did not return the external-memory wrapper");
+    queried_symbol = nullptr;
+    query_status = {};
+    all_passed &= expect(get_proc_v2 != nullptr &&
+                             get_proc_v2("cuArrayCreate_v2", &queried_symbol, CUDA_VERSION, 0,
+                                         &query_status) == CUDA_SUCCESS &&
+                             queried_symbol == reinterpret_cast<void*>(array_create_v2) &&
+                             query_status == CU_GET_PROC_ADDRESS_SUCCESS,
+                         "v2 cuGetProcAddress did not return the array wrapper");
+    queried_symbol = nullptr;
+    query_status = {};
+    all_passed &= expect(get_proc_v2 != nullptr &&
+                             get_proc_v2("cuGraphicsMapResources", &queried_symbol, CUDA_VERSION, 0,
+                                         &query_status) == CUDA_SUCCESS &&
+                             queried_symbol == reinterpret_cast<void*>(graphics_map_resources) &&
+                             query_status == CU_GET_PROC_ADDRESS_SUCCESS,
+                         "v2 cuGetProcAddress did not return the graphics mapping wrapper");
+    queried_symbol = nullptr;
+    query_status = {};
+    all_passed &= expect(legacy_get_proc != nullptr &&
+                             legacy_get_proc("cuGraphicsResourceGetMappedPointer_v2",
+                                             &queried_symbol, CUDA_VERSION, 0) == CUDA_SUCCESS &&
+                             queried_symbol == reinterpret_cast<void*>(graphics_get_mapped_pointer),
+                         "legacy cuGetProcAddress did not return the graphics pointer wrapper");
 
     if (runtime_handle != nullptr) {
         dlclose(runtime_handle);

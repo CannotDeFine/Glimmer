@@ -10,6 +10,36 @@
 #ifdef cuStreamDestroy
 #undef cuStreamDestroy
 #endif
+#ifdef cuIpcOpenMemHandle
+#undef cuIpcOpenMemHandle
+#endif
+#ifdef cuIpcOpenMemHandle_v2
+#undef cuIpcOpenMemHandle_v2
+#endif
+#ifdef cuArrayCreate
+#undef cuArrayCreate
+#endif
+#ifdef cuArrayCreate_v2
+#undef cuArrayCreate_v2
+#endif
+#ifdef cuArray3DCreate
+#undef cuArray3DCreate
+#endif
+#ifdef cuArray3DCreate_v2
+#undef cuArray3DCreate_v2
+#endif
+#ifdef cuGraphicsResourceGetMappedPointer
+#undef cuGraphicsResourceGetMappedPointer
+#endif
+#ifdef cuGraphicsResourceGetMappedPointer_v2
+#undef cuGraphicsResourceGetMappedPointer_v2
+#endif
+#ifdef cuGraphicsResourceSetMapFlags
+#undef cuGraphicsResourceSetMapFlags
+#endif
+#ifdef cuGraphicsResourceSetMapFlags_v2
+#undef cuGraphicsResourceSetMapFlags_v2
+#endif
 
 #include <dlfcn.h>
 
@@ -42,6 +72,9 @@ bool g_context_alive = true;
 std::uint8_t g_context_token = 0;
 std::uint8_t g_default_pool_token = 0;
 std::uint8_t g_custom_pool_token = 0;
+std::uint8_t g_external_memory_token = 0;
+std::uint8_t g_array_token = 0;
+std::uint8_t g_graphics_resource_token = 0;
 std::uint64_t g_pool_release_threshold = 0;
 
 CUcontext fake_context() {
@@ -283,6 +316,11 @@ extern "C" CUresult CUDAAPI cuMemMap(CUdeviceptr device_pointer, std::size_t mem
     return CUDA_SUCCESS;
 }
 
+extern "C" CUresult CUDAAPI cuMemMapArrayAsync(CUarrayMapInfo* map_info_list, unsigned int count,
+                                               CUstream) {
+    return count != 0 && map_info_list == nullptr ? CUDA_ERROR_INVALID_VALUE : CUDA_SUCCESS;
+}
+
 extern "C" CUresult CUDAAPI cuMemUnmap(CUdeviceptr device_pointer, std::size_t memory_bytes) {
     if (device_pointer == 0 || memory_bytes == 0) {
         return CUDA_ERROR_INVALID_VALUE;
@@ -342,6 +380,170 @@ extern "C" CUresult CUDAAPI cuMemImportFromShareableHandle(CUmemGenericAllocatio
     *handle = g_next_vmm_handle++;
     g_vmm_allocations.emplace(*handle, FakeVmmAllocation{.memory_bytes = 0, .reference_count = 1});
     return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuIpcGetMemHandle(CUipcMemHandle* handle, CUdeviceptr device_pointer) {
+    if (handle == nullptr || device_pointer == 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *handle = {};
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuIpcOpenMemHandle_v2(CUdeviceptr* device_pointer, CUipcMemHandle,
+                                                  unsigned int) {
+    if (device_pointer == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *device_pointer = 0x60000000U;
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuIpcOpenMemHandle(CUdeviceptr* device_pointer, CUipcMemHandle handle,
+                                               unsigned int flags) {
+    return cuIpcOpenMemHandle_v2(device_pointer, handle, flags);
+}
+
+extern "C" CUresult CUDAAPI cuIpcCloseMemHandle(CUdeviceptr device_pointer) {
+    return device_pointer == 0 ? CUDA_ERROR_INVALID_VALUE : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuImportExternalMemory(
+    CUexternalMemory* external_memory, const CUDA_EXTERNAL_MEMORY_HANDLE_DESC* handle_desc) {
+    if (external_memory == nullptr || handle_desc == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *external_memory = reinterpret_cast<CUexternalMemory>(&g_external_memory_token);
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI
+cuExternalMemoryGetMappedBuffer(CUdeviceptr* device_pointer, CUexternalMemory external_memory,
+                                const CUDA_EXTERNAL_MEMORY_BUFFER_DESC* buffer_desc) {
+    if (device_pointer == nullptr || external_memory == nullptr || buffer_desc == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *device_pointer = 0x61000000U;
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuExternalMemoryGetMappedMipmappedArray(
+    CUmipmappedArray* mipmap, CUexternalMemory external_memory,
+    const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC* mipmap_desc) {
+    if (mipmap == nullptr || external_memory == nullptr || mipmap_desc == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *mipmap = reinterpret_cast<CUmipmappedArray>(&g_external_memory_token);
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuDestroyExternalMemory(CUexternalMemory external_memory) {
+    return external_memory == nullptr ? CUDA_ERROR_INVALID_HANDLE : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuArrayCreate_v2(CUarray* array,
+                                             const CUDA_ARRAY_DESCRIPTOR* descriptor) {
+    if (array == nullptr || descriptor == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *array = reinterpret_cast<CUarray>(&g_array_token);
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuArrayCreate(CUarray* array, const CUDA_ARRAY_DESCRIPTOR* descriptor) {
+    return cuArrayCreate_v2(array, descriptor);
+}
+
+extern "C" CUresult CUDAAPI cuArray3DCreate_v2(CUarray* array,
+                                               const CUDA_ARRAY3D_DESCRIPTOR* descriptor) {
+    if (array == nullptr || descriptor == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *array = reinterpret_cast<CUarray>(&g_array_token);
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuArray3DCreate(CUarray* array,
+                                            const CUDA_ARRAY3D_DESCRIPTOR* descriptor) {
+    return cuArray3DCreate_v2(array, descriptor);
+}
+
+extern "C" CUresult CUDAAPI cuArrayDestroy(CUarray array) {
+    return array == nullptr ? CUDA_ERROR_INVALID_HANDLE : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMipmappedArrayCreate(CUmipmappedArray* mipmap,
+                                                   const CUDA_ARRAY3D_DESCRIPTOR* descriptor,
+                                                   unsigned int level_count) {
+    if (mipmap == nullptr || descriptor == nullptr || level_count == 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *mipmap = reinterpret_cast<CUmipmappedArray>(&g_array_token);
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuMipmappedArrayDestroy(CUmipmappedArray mipmap) {
+    return mipmap == nullptr ? CUDA_ERROR_INVALID_HANDLE : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsUnregisterResource(CUgraphicsResource resource) {
+    return resource == nullptr ? CUDA_ERROR_INVALID_HANDLE : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsSubResourceGetMappedArray(CUarray* array,
+                                                                CUgraphicsResource resource,
+                                                                unsigned int, unsigned int) {
+    if (array == nullptr || resource == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *array = reinterpret_cast<CUarray>(&g_graphics_resource_token);
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsResourceGetMappedMipmappedArray(CUmipmappedArray* mipmap,
+                                                                      CUgraphicsResource resource) {
+    if (mipmap == nullptr || resource == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *mipmap = reinterpret_cast<CUmipmappedArray>(&g_graphics_resource_token);
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsResourceGetMappedPointer_v2(CUdeviceptr* device_pointer,
+                                                                  std::size_t* size,
+                                                                  CUgraphicsResource resource) {
+    if (device_pointer == nullptr || size == nullptr || resource == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *device_pointer = 0x63000000U;
+    *size = 4096;
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsResourceGetMappedPointer(CUdeviceptr* device_pointer,
+                                                               std::size_t* size,
+                                                               CUgraphicsResource resource) {
+    return cuGraphicsResourceGetMappedPointer_v2(device_pointer, size, resource);
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsResourceSetMapFlags_v2(CUgraphicsResource resource,
+                                                             unsigned int) {
+    return resource == nullptr ? CUDA_ERROR_INVALID_HANDLE : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsResourceSetMapFlags(CUgraphicsResource resource,
+                                                          unsigned int flags) {
+    return cuGraphicsResourceSetMapFlags_v2(resource, flags);
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsMapResources(unsigned int count,
+                                                   CUgraphicsResource* resources, CUstream) {
+    return count != 0 && resources == nullptr ? CUDA_ERROR_INVALID_VALUE : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuGraphicsUnmapResources(unsigned int count,
+                                                     CUgraphicsResource* resources, CUstream) {
+    return count != 0 && resources == nullptr ? CUDA_ERROR_INVALID_VALUE : CUDA_SUCCESS;
 }
 
 extern "C" CUresult CUDAAPI cuMemGetAllocationGranularity(std::size_t* granularity,
@@ -712,6 +914,9 @@ void* lookup_symbol(const char* symbol) {
     if (std::string_view(symbol) == "cuMemMap") {
         return reinterpret_cast<void*>(&cuMemMap);
     }
+    if (std::string_view(symbol) == "cuMemMapArrayAsync") {
+        return reinterpret_cast<void*>(&cuMemMapArrayAsync);
+    }
     if (std::string_view(symbol) == "cuMemUnmap") {
         return reinterpret_cast<void*>(&cuMemUnmap);
     }
@@ -730,6 +935,70 @@ void* lookup_symbol(const char* symbol) {
     }
     if (std::string_view(symbol) == "cuMemImportFromShareableHandle") {
         return reinterpret_cast<void*>(&cuMemImportFromShareableHandle);
+    }
+    if (std::string_view(symbol) == "cuIpcGetMemHandle") {
+        return reinterpret_cast<void*>(&cuIpcGetMemHandle);
+    }
+    if (std::string_view(symbol) == "cuIpcOpenMemHandle") {
+        return reinterpret_cast<void*>(&cuIpcOpenMemHandle);
+    }
+    if (std::string_view(symbol) == "cuIpcOpenMemHandle_v2") {
+        return reinterpret_cast<void*>(&cuIpcOpenMemHandle_v2);
+    }
+    if (std::string_view(symbol) == "cuIpcCloseMemHandle") {
+        return reinterpret_cast<void*>(&cuIpcCloseMemHandle);
+    }
+    if (std::string_view(symbol) == "cuImportExternalMemory") {
+        return reinterpret_cast<void*>(&cuImportExternalMemory);
+    }
+    if (std::string_view(symbol) == "cuExternalMemoryGetMappedBuffer") {
+        return reinterpret_cast<void*>(&cuExternalMemoryGetMappedBuffer);
+    }
+    if (std::string_view(symbol) == "cuExternalMemoryGetMappedMipmappedArray") {
+        return reinterpret_cast<void*>(&cuExternalMemoryGetMappedMipmappedArray);
+    }
+    if (std::string_view(symbol) == "cuDestroyExternalMemory") {
+        return reinterpret_cast<void*>(&cuDestroyExternalMemory);
+    }
+    if (std::string_view(symbol) == "cuArrayCreate" ||
+        std::string_view(symbol) == "cuArrayCreate_v2") {
+        return reinterpret_cast<void*>(&cuArrayCreate);
+    }
+    if (std::string_view(symbol) == "cuArray3DCreate" ||
+        std::string_view(symbol) == "cuArray3DCreate_v2") {
+        return reinterpret_cast<void*>(&cuArray3DCreate);
+    }
+    if (std::string_view(symbol) == "cuArrayDestroy") {
+        return reinterpret_cast<void*>(&cuArrayDestroy);
+    }
+    if (std::string_view(symbol) == "cuMipmappedArrayCreate") {
+        return reinterpret_cast<void*>(&cuMipmappedArrayCreate);
+    }
+    if (std::string_view(symbol) == "cuMipmappedArrayDestroy") {
+        return reinterpret_cast<void*>(&cuMipmappedArrayDestroy);
+    }
+    if (std::string_view(symbol) == "cuGraphicsUnregisterResource") {
+        return reinterpret_cast<void*>(&cuGraphicsUnregisterResource);
+    }
+    if (std::string_view(symbol) == "cuGraphicsSubResourceGetMappedArray") {
+        return reinterpret_cast<void*>(&cuGraphicsSubResourceGetMappedArray);
+    }
+    if (std::string_view(symbol) == "cuGraphicsResourceGetMappedMipmappedArray") {
+        return reinterpret_cast<void*>(&cuGraphicsResourceGetMappedMipmappedArray);
+    }
+    if (std::string_view(symbol) == "cuGraphicsResourceGetMappedPointer" ||
+        std::string_view(symbol) == "cuGraphicsResourceGetMappedPointer_v2") {
+        return reinterpret_cast<void*>(&cuGraphicsResourceGetMappedPointer_v2);
+    }
+    if (std::string_view(symbol) == "cuGraphicsResourceSetMapFlags" ||
+        std::string_view(symbol) == "cuGraphicsResourceSetMapFlags_v2") {
+        return reinterpret_cast<void*>(&cuGraphicsResourceSetMapFlags_v2);
+    }
+    if (std::string_view(symbol) == "cuGraphicsMapResources") {
+        return reinterpret_cast<void*>(&cuGraphicsMapResources);
+    }
+    if (std::string_view(symbol) == "cuGraphicsUnmapResources") {
+        return reinterpret_cast<void*>(&cuGraphicsUnmapResources);
     }
     if (std::string_view(symbol) == "cuMemGetAllocationGranularity") {
         return reinterpret_cast<void*>(&cuMemGetAllocationGranularity);

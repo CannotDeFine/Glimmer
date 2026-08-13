@@ -288,6 +288,14 @@ if(BUILD_TESTING)
             "LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
     )
 
+    add_test(NAME glimmer_cuda_interceptor_runtime_untracked_initialization_test
+        COMMAND glimmer_cuda_interceptor_fake_driver_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_runtime_untracked_initialization_test PROPERTIES
+        ENVIRONMENT
+            "GLIMMER_FAKE_RUNTIME_UNTRACKED_FIRST=1;GLIMMER_MEMORY_LIMIT_BYTES=4096;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
+    )
+
     add_test(NAME glimmer_cuda_interceptor_duplicate_record_failure_test
         COMMAND glimmer_cuda_interceptor_fake_driver_test
     )

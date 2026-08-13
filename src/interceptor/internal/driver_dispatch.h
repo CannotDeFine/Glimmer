@@ -36,6 +36,8 @@ using MemAddressFreeFunction = CUresult (*)(CUdeviceptr device_pointer, std::siz
 using MemMapFunction = CUresult (*)(CUdeviceptr device_pointer, std::size_t memory_bytes,
                                     std::size_t offset, CUmemGenericAllocationHandle handle,
                                     unsigned long long flags);
+using MemMapArrayAsyncFunction = CUresult (*)(CUarrayMapInfo* map_info_list, unsigned int count,
+                                              CUstream stream);
 using MemUnmapFunction = CUresult (*)(CUdeviceptr device_pointer, std::size_t memory_bytes);
 using MemSetAccessFunction = CUresult (*)(CUdeviceptr device_pointer, std::size_t memory_bytes,
                                           const CUmemAccessDesc* access_descriptors,
@@ -52,6 +54,43 @@ using MemExportToShareableHandleFunction = CUresult (*)(void* shareable_handle,
 using MemImportFromShareableHandleFunction = CUresult (*)(CUmemGenericAllocationHandle* handle,
                                                           void* os_handle,
                                                           CUmemAllocationHandleType handle_type);
+using IpcGetMemHandleFunction = CUresult (*)(CUipcMemHandle* handle, CUdeviceptr device_pointer);
+using IpcOpenMemHandleFunction = CUresult (*)(CUdeviceptr* device_pointer, CUipcMemHandle handle,
+                                              unsigned int flags);
+using IpcCloseMemHandleFunction = CUresult (*)(CUdeviceptr device_pointer);
+using ImportExternalMemoryFunction = CUresult (*)(
+    CUexternalMemory* external_memory, const CUDA_EXTERNAL_MEMORY_HANDLE_DESC* handle_desc);
+using ExternalMemoryGetMappedBufferFunction =
+    CUresult (*)(CUdeviceptr* device_pointer, CUexternalMemory external_memory,
+                 const CUDA_EXTERNAL_MEMORY_BUFFER_DESC* buffer_desc);
+using ExternalMemoryGetMappedMipmappedArrayFunction =
+    CUresult (*)(CUmipmappedArray* mipmap, CUexternalMemory external_memory,
+                 const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC* mipmap_desc);
+using DestroyExternalMemoryFunction = CUresult (*)(CUexternalMemory external_memory);
+using ArrayCreateFunction = CUresult (*)(CUarray* array, const CUDA_ARRAY_DESCRIPTOR* descriptor);
+using Array3DCreateFunction = CUresult (*)(CUarray* array,
+                                           const CUDA_ARRAY3D_DESCRIPTOR* descriptor);
+using ArrayDestroyFunction = CUresult (*)(CUarray array);
+using MipmappedArrayCreateFunction = CUresult (*)(CUmipmappedArray* mipmap,
+                                                  const CUDA_ARRAY3D_DESCRIPTOR* descriptor,
+                                                  unsigned int level_count);
+using MipmappedArrayDestroyFunction = CUresult (*)(CUmipmappedArray mipmap);
+using GraphicsUnregisterResourceFunction = CUresult (*)(CUgraphicsResource resource);
+using GraphicsSubResourceGetMappedArrayFunction = CUresult (*)(CUarray* array,
+                                                               CUgraphicsResource resource,
+                                                               unsigned int array_index,
+                                                               unsigned int mip_level);
+using GraphicsResourceGetMappedMipmappedArrayFunction = CUresult (*)(CUmipmappedArray* mipmap,
+                                                                     CUgraphicsResource resource);
+using GraphicsResourceGetMappedPointerFunction = CUresult (*)(CUdeviceptr* device_pointer,
+                                                              std::size_t* size,
+                                                              CUgraphicsResource resource);
+using GraphicsResourceSetMapFlagsFunction = CUresult (*)(CUgraphicsResource resource,
+                                                         unsigned int flags);
+using GraphicsMapResourcesFunction = CUresult (*)(unsigned int count, CUgraphicsResource* resources,
+                                                  CUstream stream);
+using GraphicsUnmapResourcesFunction = CUresult (*)(unsigned int count,
+                                                    CUgraphicsResource* resources, CUstream stream);
 using MemGetAllocationGranularityFunction = CUresult (*)(std::size_t* granularity,
                                                          const CUmemAllocationProp* prop,
                                                          CUmemAllocationGranularity_flags option);
@@ -126,12 +165,34 @@ struct DriverFunctionTable {
     MemAddressReserveFunction mem_address_reserve = nullptr;
     MemAddressFreeFunction mem_address_free = nullptr;
     MemMapFunction mem_map = nullptr;
+    MemMapArrayAsyncFunction mem_map_array_async = nullptr;
     MemUnmapFunction mem_unmap = nullptr;
     MemSetAccessFunction mem_set_access = nullptr;
     MemGetAddressRangeFunction mem_get_address_range = nullptr;
     MemGetAccessFunction mem_get_access = nullptr;
     MemExportToShareableHandleFunction mem_export_to_shareable_handle = nullptr;
     MemImportFromShareableHandleFunction mem_import_from_shareable_handle = nullptr;
+    IpcGetMemHandleFunction ipc_get_mem_handle = nullptr;
+    IpcOpenMemHandleFunction ipc_open_mem_handle = nullptr;
+    IpcCloseMemHandleFunction ipc_close_mem_handle = nullptr;
+    ImportExternalMemoryFunction import_external_memory = nullptr;
+    ExternalMemoryGetMappedBufferFunction external_memory_get_mapped_buffer = nullptr;
+    ExternalMemoryGetMappedMipmappedArrayFunction external_memory_get_mapped_mipmapped_array =
+        nullptr;
+    DestroyExternalMemoryFunction destroy_external_memory = nullptr;
+    ArrayCreateFunction array_create = nullptr;
+    Array3DCreateFunction array_3d_create = nullptr;
+    ArrayDestroyFunction array_destroy = nullptr;
+    MipmappedArrayCreateFunction mipmapped_array_create = nullptr;
+    MipmappedArrayDestroyFunction mipmapped_array_destroy = nullptr;
+    GraphicsUnregisterResourceFunction graphics_unregister_resource = nullptr;
+    GraphicsSubResourceGetMappedArrayFunction graphics_subresource_get_mapped_array = nullptr;
+    GraphicsResourceGetMappedMipmappedArrayFunction graphics_resource_get_mapped_mipmapped_array =
+        nullptr;
+    GraphicsResourceGetMappedPointerFunction graphics_resource_get_mapped_pointer = nullptr;
+    GraphicsResourceSetMapFlagsFunction graphics_resource_set_map_flags = nullptr;
+    GraphicsMapResourcesFunction graphics_map_resources = nullptr;
+    GraphicsUnmapResourcesFunction graphics_unmap_resources = nullptr;
     MemGetAllocationGranularityFunction mem_get_allocation_granularity = nullptr;
     MemGetAllocationPropertiesFunction mem_get_allocation_properties = nullptr;
     MemRetainAllocationHandleFunction mem_retain_allocation_handle = nullptr;
@@ -231,6 +292,8 @@ class DriverDispatch {
     [[nodiscard]] CUresult mem_map(CUdeviceptr device_pointer, std::size_t memory_bytes,
                                    std::size_t offset, CUmemGenericAllocationHandle handle,
                                    unsigned long long flags) const;
+    [[nodiscard]] CUresult mem_map_array_async(CUarrayMapInfo* map_info_list, unsigned int count,
+                                               CUstream stream) const;
     [[nodiscard]] CUresult mem_unmap(CUdeviceptr device_pointer, std::size_t memory_bytes) const;
     [[nodiscard]] CUresult mem_set_access(CUdeviceptr device_pointer, std::size_t memory_bytes,
                                           const CUmemAccessDesc* access_descriptors,
@@ -247,6 +310,47 @@ class DriverDispatch {
     [[nodiscard]] CUresult mem_import_from_shareable_handle(
         CUmemGenericAllocationHandle* handle, void* os_handle,
         CUmemAllocationHandleType handle_type) const;
+    [[nodiscard]] CUresult ipc_get_mem_handle(CUipcMemHandle* handle,
+                                              CUdeviceptr device_pointer) const;
+    [[nodiscard]] CUresult ipc_open_mem_handle(CUdeviceptr* device_pointer, CUipcMemHandle handle,
+                                               unsigned int flags) const;
+    [[nodiscard]] CUresult ipc_close_mem_handle(CUdeviceptr device_pointer) const;
+    [[nodiscard]] CUresult import_external_memory(
+        CUexternalMemory* external_memory,
+        const CUDA_EXTERNAL_MEMORY_HANDLE_DESC* handle_desc) const;
+    [[nodiscard]] CUresult external_memory_get_mapped_buffer(
+        CUdeviceptr* device_pointer, CUexternalMemory external_memory,
+        const CUDA_EXTERNAL_MEMORY_BUFFER_DESC* buffer_desc) const;
+    [[nodiscard]] CUresult external_memory_get_mapped_mipmapped_array(
+        CUmipmappedArray* mipmap, CUexternalMemory external_memory,
+        const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC* mipmap_desc) const;
+    [[nodiscard]] CUresult destroy_external_memory(CUexternalMemory external_memory) const;
+    [[nodiscard]] CUresult array_create(CUarray* array,
+                                        const CUDA_ARRAY_DESCRIPTOR* descriptor) const;
+    [[nodiscard]] CUresult array_3d_create(CUarray* array,
+                                           const CUDA_ARRAY3D_DESCRIPTOR* descriptor) const;
+    [[nodiscard]] CUresult array_destroy(CUarray array) const;
+    [[nodiscard]] CUresult mipmapped_array_create(CUmipmappedArray* mipmap,
+                                                  const CUDA_ARRAY3D_DESCRIPTOR* descriptor,
+                                                  unsigned int level_count) const;
+    [[nodiscard]] CUresult mipmapped_array_destroy(CUmipmappedArray mipmap) const;
+    [[nodiscard]] CUresult graphics_unregister_resource(CUgraphicsResource resource) const;
+    [[nodiscard]] CUresult graphics_subresource_get_mapped_array(CUarray* array,
+                                                                 CUgraphicsResource resource,
+                                                                 unsigned int array_index,
+                                                                 unsigned int mip_level) const;
+    [[nodiscard]] CUresult graphics_resource_get_mapped_mipmapped_array(
+        CUmipmappedArray* mipmap, CUgraphicsResource resource) const;
+    [[nodiscard]] CUresult graphics_resource_get_mapped_pointer(CUdeviceptr* device_pointer,
+                                                                std::size_t* size,
+                                                                CUgraphicsResource resource) const;
+    [[nodiscard]] CUresult graphics_resource_set_map_flags(CUgraphicsResource resource,
+                                                           unsigned int flags) const;
+    [[nodiscard]] CUresult graphics_map_resources(unsigned int count, CUgraphicsResource* resources,
+                                                  CUstream stream) const;
+    [[nodiscard]] CUresult graphics_unmap_resources(unsigned int count,
+                                                    CUgraphicsResource* resources,
+                                                    CUstream stream) const;
     [[nodiscard]] CUresult mem_get_allocation_granularity(
         std::size_t* granularity, const CUmemAllocationProp* prop,
         CUmemAllocationGranularity_flags option) const;
@@ -327,12 +431,32 @@ class DriverDispatch {
     [[nodiscard]] bool has_mem_address_reserve() const;
     [[nodiscard]] bool has_mem_address_free() const;
     [[nodiscard]] bool has_mem_map() const;
+    [[nodiscard]] bool has_mem_map_array_async() const;
     [[nodiscard]] bool has_mem_unmap() const;
     [[nodiscard]] bool has_mem_set_access() const;
     [[nodiscard]] bool has_mem_get_address_range() const;
     [[nodiscard]] bool has_mem_get_access() const;
     [[nodiscard]] bool has_mem_export_to_shareable_handle() const;
     [[nodiscard]] bool has_mem_import_from_shareable_handle() const;
+    [[nodiscard]] bool has_ipc_get_mem_handle() const;
+    [[nodiscard]] bool has_ipc_open_mem_handle() const;
+    [[nodiscard]] bool has_ipc_close_mem_handle() const;
+    [[nodiscard]] bool has_import_external_memory() const;
+    [[nodiscard]] bool has_external_memory_get_mapped_buffer() const;
+    [[nodiscard]] bool has_external_memory_get_mapped_mipmapped_array() const;
+    [[nodiscard]] bool has_destroy_external_memory() const;
+    [[nodiscard]] bool has_array_create() const;
+    [[nodiscard]] bool has_array_3d_create() const;
+    [[nodiscard]] bool has_array_destroy() const;
+    [[nodiscard]] bool has_mipmapped_array_create() const;
+    [[nodiscard]] bool has_mipmapped_array_destroy() const;
+    [[nodiscard]] bool has_graphics_unregister_resource() const;
+    [[nodiscard]] bool has_graphics_subresource_get_mapped_array() const;
+    [[nodiscard]] bool has_graphics_resource_get_mapped_mipmapped_array() const;
+    [[nodiscard]] bool has_graphics_resource_get_mapped_pointer() const;
+    [[nodiscard]] bool has_graphics_resource_set_map_flags() const;
+    [[nodiscard]] bool has_graphics_map_resources() const;
+    [[nodiscard]] bool has_graphics_unmap_resources() const;
     [[nodiscard]] bool has_mem_get_allocation_granularity() const;
     [[nodiscard]] bool has_mem_get_allocation_properties() const;
     [[nodiscard]] bool has_mem_retain_allocation_handle() const;
@@ -387,12 +511,34 @@ class DriverDispatch {
     MemAddressReserveFunction mem_address_reserve_ = nullptr;
     MemAddressFreeFunction mem_address_free_ = nullptr;
     MemMapFunction mem_map_ = nullptr;
+    MemMapArrayAsyncFunction mem_map_array_async_ = nullptr;
     MemUnmapFunction mem_unmap_ = nullptr;
     MemSetAccessFunction mem_set_access_ = nullptr;
     MemGetAddressRangeFunction mem_get_address_range_ = nullptr;
     MemGetAccessFunction mem_get_access_ = nullptr;
     MemExportToShareableHandleFunction mem_export_to_shareable_handle_ = nullptr;
     MemImportFromShareableHandleFunction mem_import_from_shareable_handle_ = nullptr;
+    IpcGetMemHandleFunction ipc_get_mem_handle_ = nullptr;
+    IpcOpenMemHandleFunction ipc_open_mem_handle_ = nullptr;
+    IpcCloseMemHandleFunction ipc_close_mem_handle_ = nullptr;
+    ImportExternalMemoryFunction import_external_memory_ = nullptr;
+    ExternalMemoryGetMappedBufferFunction external_memory_get_mapped_buffer_ = nullptr;
+    ExternalMemoryGetMappedMipmappedArrayFunction external_memory_get_mapped_mipmapped_array_ =
+        nullptr;
+    DestroyExternalMemoryFunction destroy_external_memory_ = nullptr;
+    ArrayCreateFunction array_create_ = nullptr;
+    Array3DCreateFunction array_3d_create_ = nullptr;
+    ArrayDestroyFunction array_destroy_ = nullptr;
+    MipmappedArrayCreateFunction mipmapped_array_create_ = nullptr;
+    MipmappedArrayDestroyFunction mipmapped_array_destroy_ = nullptr;
+    GraphicsUnregisterResourceFunction graphics_unregister_resource_ = nullptr;
+    GraphicsSubResourceGetMappedArrayFunction graphics_subresource_get_mapped_array_ = nullptr;
+    GraphicsResourceGetMappedMipmappedArrayFunction graphics_resource_get_mapped_mipmapped_array_ =
+        nullptr;
+    GraphicsResourceGetMappedPointerFunction graphics_resource_get_mapped_pointer_ = nullptr;
+    GraphicsResourceSetMapFlagsFunction graphics_resource_set_map_flags_ = nullptr;
+    GraphicsMapResourcesFunction graphics_map_resources_ = nullptr;
+    GraphicsUnmapResourcesFunction graphics_unmap_resources_ = nullptr;
     MemGetAllocationGranularityFunction mem_get_allocation_granularity_ = nullptr;
     MemGetAllocationPropertiesFunction mem_get_allocation_properties_ = nullptr;
     MemRetainAllocationHandleFunction mem_retain_allocation_handle_ = nullptr;

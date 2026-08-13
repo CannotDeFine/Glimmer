@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 
 #ifdef cudaLaunchKernel
 #undef cudaLaunchKernel
@@ -36,6 +37,9 @@ using DriverStreamDestroyFunction = CUresult (*)(CUstream stream);
 using DriverMemGetInfoFunction = CUresult (*)(std::size_t* free_bytes, std::size_t* total_bytes);
 
 std::uint8_t g_pool_token = 0;
+std::uint8_t g_external_memory_token = 0;
+std::uint8_t g_array_token = 0;
+std::uint8_t g_graphics_resource_token = 0;
 
 cudaMemPool_t fake_pool() noexcept {
     return reinterpret_cast<cudaMemPool_t>(&g_pool_token);
@@ -103,6 +107,162 @@ extern "C" cudaError_t CUDARTAPI cudaMallocManaged(void** device_pointer, std::s
     return cudaSuccess;
 }
 
+extern "C" cudaError_t CUDARTAPI cudaIpcGetMemHandle(cudaIpcMemHandle_t* handle,
+                                                     void* device_pointer) {
+    if (handle == nullptr || device_pointer == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    *handle = {};
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaIpcOpenMemHandle(void** device_pointer, cudaIpcMemHandle_t,
+                                                      unsigned int) {
+    if (device_pointer == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    *device_pointer = reinterpret_cast<void*>(0x71000000U);
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaIpcCloseMemHandle(void* device_pointer) {
+    return device_pointer == nullptr ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaImportExternalMemory(
+    cudaExternalMemory_t* external_memory, const struct cudaExternalMemoryHandleDesc* handle_desc) {
+    if (external_memory == nullptr || handle_desc == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    *external_memory = reinterpret_cast<cudaExternalMemory_t>(&g_external_memory_token);
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI
+cudaExternalMemoryGetMappedBuffer(void** device_pointer, cudaExternalMemory_t external_memory,
+                                  const struct cudaExternalMemoryBufferDesc* buffer_desc) {
+    if (device_pointer == nullptr || external_memory == nullptr || buffer_desc == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    *device_pointer = reinterpret_cast<void*>(0x72000000U);
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaExternalMemoryGetMappedMipmappedArray(
+    cudaMipmappedArray_t* mipmap, cudaExternalMemory_t external_memory,
+    const struct cudaExternalMemoryMipmappedArrayDesc* mipmap_desc) {
+    if (mipmap == nullptr || external_memory == nullptr || mipmap_desc == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    *mipmap = reinterpret_cast<cudaMipmappedArray_t>(&g_external_memory_token);
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaDestroyExternalMemory(cudaExternalMemory_t external_memory) {
+    return external_memory == nullptr ? cudaErrorInvalidResourceHandle : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMallocArray(cudaArray_t* array,
+                                                 const struct cudaChannelFormatDesc* descriptor,
+                                                 std::size_t width, std::size_t height,
+                                                 unsigned int) {
+    if (array == nullptr || descriptor == nullptr || width == 0 || height == 0) {
+        return cudaErrorInvalidValue;
+    }
+    *array = reinterpret_cast<cudaArray_t>(&g_array_token);
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMalloc3DArray(cudaArray_t* array,
+                                                   const struct cudaChannelFormatDesc* descriptor,
+                                                   struct cudaExtent extent, unsigned int) {
+    if (array == nullptr || descriptor == nullptr || extent.width == 0 || extent.height == 0 ||
+        extent.depth == 0) {
+        return cudaErrorInvalidValue;
+    }
+    *array = reinterpret_cast<cudaArray_t>(&g_array_token);
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMallocMipmappedArray(
+    cudaMipmappedArray_t* mipmap, const struct cudaChannelFormatDesc* descriptor,
+    struct cudaExtent extent, unsigned int level_count, unsigned int) {
+    if (mipmap == nullptr || descriptor == nullptr || extent.width == 0 || extent.height == 0 ||
+        extent.depth == 0 || level_count == 0) {
+        return cudaErrorInvalidValue;
+    }
+    *mipmap = reinterpret_cast<cudaMipmappedArray_t>(&g_array_token);
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaFreeArray(cudaArray_t array) {
+    return array == nullptr ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaFreeMipmappedArray(cudaMipmappedArray_t mipmap) {
+    return mipmap == nullptr ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaGraphicsUnregisterResource(cudaGraphicsResource_t resource) {
+    return resource == nullptr ? cudaErrorInvalidResourceHandle : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaGraphicsResourceSetMapFlags(cudaGraphicsResource_t resource,
+                                                                 unsigned int) {
+    return resource == nullptr ? cudaErrorInvalidResourceHandle : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaGraphicsMapResources(int count,
+                                                          cudaGraphicsResource_t* resources,
+                                                          cudaStream_t) {
+    return count < 0 || (count != 0 && resources == nullptr) ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaGraphicsUnmapResources(int count,
+                                                            cudaGraphicsResource_t* resources,
+                                                            cudaStream_t) {
+    return count < 0 || (count != 0 && resources == nullptr) ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaGraphicsResourceGetMappedPointer(
+    void** device_pointer, std::size_t* size, cudaGraphicsResource_t resource) {
+    if (device_pointer == nullptr || size == nullptr || resource == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    *device_pointer = reinterpret_cast<void*>(0x73000000U);
+    *size = 4096;
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaGraphicsSubResourceGetMappedArray(
+    cudaArray_t* array, cudaGraphicsResource_t resource, unsigned int, unsigned int) {
+    if (array == nullptr || resource == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    *array = reinterpret_cast<cudaArray_t>(&g_graphics_resource_token);
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaGraphicsResourceGetMappedMipmappedArray(
+    cudaMipmappedArray_t* mipmap, cudaGraphicsResource_t resource) {
+    if (mipmap == nullptr || resource == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    *mipmap = reinterpret_cast<cudaMipmappedArray_t>(&g_graphics_resource_token);
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaGraphAddMemAllocNode(cudaGraphNode_t* graph_node,
+                                                          cudaGraph_t graph, const cudaGraphNode_t*,
+                                                          std::size_t,
+                                                          struct cudaMemAllocNodeParams*) {
+    if (graph_node == nullptr || graph == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    *graph_node = reinterpret_cast<cudaGraphNode_t>(&g_array_token);
+    return cudaSuccess;
+}
+
 extern "C" cudaError_t CUDARTAPI cudaMallocPitch(void** device_pointer, std::size_t* pitch,
                                                  std::size_t width_bytes, std::size_t height) {
     if (device_pointer == nullptr || pitch == nullptr) {
@@ -120,6 +280,36 @@ extern "C" cudaError_t CUDARTAPI cudaMallocPitch(void** device_pointer, std::siz
         return cudaErrorMemoryAllocation;
     }
     *device_pointer = to_runtime_pointer(driver_pointer);
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaMalloc3D(struct cudaPitchedPtr* pitched_device_pointer,
+                                              struct cudaExtent extent) {
+    if (pitched_device_pointer == nullptr || extent.width == 0 || extent.height == 0 ||
+        extent.depth == 0) {
+        return cudaErrorInvalidValue;
+    }
+    if (extent.depth > std::numeric_limits<std::size_t>::max() / extent.height) {
+        return cudaErrorInvalidValue;
+    }
+
+    const DriverPitchAllocFunction allocate =
+        resolve_driver_function<DriverPitchAllocFunction>("cuMemAllocPitch_v2");
+    if (allocate == nullptr) {
+        return cudaErrorNotSupported;
+    }
+
+    CUdeviceptr driver_pointer = 0;
+    std::size_t pitch = 0;
+    const CUresult result =
+        allocate(&driver_pointer, &pitch, extent.width, extent.height * extent.depth, 1);
+    if (result != CUDA_SUCCESS) {
+        return cudaErrorMemoryAllocation;
+    }
+    pitched_device_pointer->ptr = to_runtime_pointer(driver_pointer);
+    pitched_device_pointer->pitch = pitch;
+    pitched_device_pointer->xsize = extent.width;
+    pitched_device_pointer->ysize = extent.height;
     return cudaSuccess;
 }
 

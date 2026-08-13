@@ -47,6 +47,23 @@ int main() {
         check(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo restored") &&
         free_bytes == kQuotaBytes;
 
+    constexpr cudaExtent k3d_extent{1024, 1024, 1};
+    cudaPitchedPtr pitched_allocation{};
+    const bool allocated_3d =
+        check(cudaMalloc3D(&pitched_allocation, k3d_extent), "cudaMalloc3D") &&
+        pitched_allocation.ptr != nullptr && pitched_allocation.pitch != 0;
+    const std::size_t charged_3d_bytes =
+        pitched_allocation.pitch * k3d_extent.height * k3d_extent.depth;
+    const bool has_reduced_3d_free =
+        allocated_3d &&
+        check(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo 3D allocated") &&
+        free_bytes == kQuotaBytes - charged_3d_bytes;
+    const bool released_3d =
+        !allocated_3d || check(cudaFree(pitched_allocation.ptr), "cudaFree 3D");
+    const bool has_restored_3d_free =
+        check(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo 3D restored") &&
+        free_bytes == kQuotaBytes;
+
     cudaStream_t stream = nullptr;
     const bool stream_created = check(cudaStreamCreate(&stream), "cudaStreamCreate");
     void* async_pointer = nullptr;
@@ -71,7 +88,8 @@ int main() {
         !stream_created || check(cudaStreamDestroy(stream), "cudaStreamDestroy");
 
     if (!has_initial_info || !allocated || !has_reduced_free || !rejected ||
-        !has_unchanged_free_after_rejection || !released || !has_restored_free || !stream_created ||
+        !has_unchanged_free_after_rejection || !released || !has_restored_free || !allocated_3d ||
+        !has_reduced_3d_free || !released_3d || !has_restored_3d_free || !stream_created ||
         !async_allocated || !has_reduced_async_free || !async_released || !async_synchronized ||
         !async_queried || !has_restored_async_free || !stream_destroyed) {
         std::cerr << "CUDA Runtime interceptor GPU test failed\n";

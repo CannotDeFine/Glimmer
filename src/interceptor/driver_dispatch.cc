@@ -193,12 +193,34 @@ DriverDispatch::DriverDispatch(DriverFunctionTable functions) noexcept
       mem_address_reserve_(functions.mem_address_reserve),
       mem_address_free_(functions.mem_address_free),
       mem_map_(functions.mem_map),
+      mem_map_array_async_(functions.mem_map_array_async),
       mem_unmap_(functions.mem_unmap),
       mem_set_access_(functions.mem_set_access),
       mem_get_address_range_(functions.mem_get_address_range),
       mem_get_access_(functions.mem_get_access),
       mem_export_to_shareable_handle_(functions.mem_export_to_shareable_handle),
       mem_import_from_shareable_handle_(functions.mem_import_from_shareable_handle),
+      ipc_get_mem_handle_(functions.ipc_get_mem_handle),
+      ipc_open_mem_handle_(functions.ipc_open_mem_handle),
+      ipc_close_mem_handle_(functions.ipc_close_mem_handle),
+      import_external_memory_(functions.import_external_memory),
+      external_memory_get_mapped_buffer_(functions.external_memory_get_mapped_buffer),
+      external_memory_get_mapped_mipmapped_array_(
+          functions.external_memory_get_mapped_mipmapped_array),
+      destroy_external_memory_(functions.destroy_external_memory),
+      array_create_(functions.array_create),
+      array_3d_create_(functions.array_3d_create),
+      array_destroy_(functions.array_destroy),
+      mipmapped_array_create_(functions.mipmapped_array_create),
+      mipmapped_array_destroy_(functions.mipmapped_array_destroy),
+      graphics_unregister_resource_(functions.graphics_unregister_resource),
+      graphics_subresource_get_mapped_array_(functions.graphics_subresource_get_mapped_array),
+      graphics_resource_get_mapped_mipmapped_array_(
+          functions.graphics_resource_get_mapped_mipmapped_array),
+      graphics_resource_get_mapped_pointer_(functions.graphics_resource_get_mapped_pointer),
+      graphics_resource_set_map_flags_(functions.graphics_resource_set_map_flags),
+      graphics_map_resources_(functions.graphics_map_resources),
+      graphics_unmap_resources_(functions.graphics_unmap_resources),
       mem_get_allocation_granularity_(functions.mem_get_allocation_granularity),
       mem_get_allocation_properties_(functions.mem_get_allocation_properties),
       mem_retain_allocation_handle_(functions.mem_retain_allocation_handle),
@@ -280,6 +302,8 @@ bool DriverDispatch::initialize() {
         reinterpret_cast<MemAddressReserveFunction>(load_symbol("cuMemAddressReserve"));
     mem_address_free_ = reinterpret_cast<MemAddressFreeFunction>(load_symbol("cuMemAddressFree"));
     mem_map_ = reinterpret_cast<MemMapFunction>(load_symbol("cuMemMap"));
+    mem_map_array_async_ =
+        reinterpret_cast<MemMapArrayAsyncFunction>(load_symbol("cuMemMapArrayAsync"));
     mem_unmap_ = reinterpret_cast<MemUnmapFunction>(load_symbol("cuMemUnmap"));
     mem_set_access_ = reinterpret_cast<MemSetAccessFunction>(load_symbol("cuMemSetAccess"));
     mem_get_address_range_ =
@@ -293,6 +317,64 @@ bool DriverDispatch::initialize() {
         load_symbol("cuMemExportToShareableHandle"));
     mem_import_from_shareable_handle_ = reinterpret_cast<MemImportFromShareableHandleFunction>(
         load_symbol("cuMemImportFromShareableHandle"));
+    ipc_get_mem_handle_ =
+        reinterpret_cast<IpcGetMemHandleFunction>(load_symbol("cuIpcGetMemHandle"));
+    ipc_open_mem_handle_ =
+        reinterpret_cast<IpcOpenMemHandleFunction>(load_symbol("cuIpcOpenMemHandle_v2"));
+    if (ipc_open_mem_handle_ == nullptr) {
+        ipc_open_mem_handle_ =
+            reinterpret_cast<IpcOpenMemHandleFunction>(load_symbol("cuIpcOpenMemHandle"));
+    }
+    ipc_close_mem_handle_ =
+        reinterpret_cast<IpcCloseMemHandleFunction>(load_symbol("cuIpcCloseMemHandle"));
+    import_external_memory_ =
+        reinterpret_cast<ImportExternalMemoryFunction>(load_symbol("cuImportExternalMemory"));
+    external_memory_get_mapped_buffer_ = reinterpret_cast<ExternalMemoryGetMappedBufferFunction>(
+        load_symbol("cuExternalMemoryGetMappedBuffer"));
+    external_memory_get_mapped_mipmapped_array_ =
+        reinterpret_cast<ExternalMemoryGetMappedMipmappedArrayFunction>(
+            load_symbol("cuExternalMemoryGetMappedMipmappedArray"));
+    destroy_external_memory_ =
+        reinterpret_cast<DestroyExternalMemoryFunction>(load_symbol("cuDestroyExternalMemory"));
+    array_create_ = reinterpret_cast<ArrayCreateFunction>(load_symbol("cuArrayCreate_v2"));
+    if (array_create_ == nullptr) {
+        array_create_ = reinterpret_cast<ArrayCreateFunction>(load_symbol("cuArrayCreate"));
+    }
+    array_3d_create_ = reinterpret_cast<Array3DCreateFunction>(load_symbol("cuArray3DCreate_v2"));
+    if (array_3d_create_ == nullptr) {
+        array_3d_create_ = reinterpret_cast<Array3DCreateFunction>(load_symbol("cuArray3DCreate"));
+    }
+    array_destroy_ = reinterpret_cast<ArrayDestroyFunction>(load_symbol("cuArrayDestroy"));
+    mipmapped_array_create_ =
+        reinterpret_cast<MipmappedArrayCreateFunction>(load_symbol("cuMipmappedArrayCreate"));
+    mipmapped_array_destroy_ =
+        reinterpret_cast<MipmappedArrayDestroyFunction>(load_symbol("cuMipmappedArrayDestroy"));
+    graphics_unregister_resource_ = reinterpret_cast<GraphicsUnregisterResourceFunction>(
+        load_symbol("cuGraphicsUnregisterResource"));
+    graphics_subresource_get_mapped_array_ =
+        reinterpret_cast<GraphicsSubResourceGetMappedArrayFunction>(
+            load_symbol("cuGraphicsSubResourceGetMappedArray"));
+    graphics_resource_get_mapped_mipmapped_array_ =
+        reinterpret_cast<GraphicsResourceGetMappedMipmappedArrayFunction>(
+            load_symbol("cuGraphicsResourceGetMappedMipmappedArray"));
+    graphics_resource_get_mapped_pointer_ =
+        reinterpret_cast<GraphicsResourceGetMappedPointerFunction>(
+            load_symbol("cuGraphicsResourceGetMappedPointer_v2"));
+    if (graphics_resource_get_mapped_pointer_ == nullptr) {
+        graphics_resource_get_mapped_pointer_ =
+            reinterpret_cast<GraphicsResourceGetMappedPointerFunction>(
+                load_symbol("cuGraphicsResourceGetMappedPointer"));
+    }
+    graphics_resource_set_map_flags_ = reinterpret_cast<GraphicsResourceSetMapFlagsFunction>(
+        load_symbol("cuGraphicsResourceSetMapFlags_v2"));
+    if (graphics_resource_set_map_flags_ == nullptr) {
+        graphics_resource_set_map_flags_ = reinterpret_cast<GraphicsResourceSetMapFlagsFunction>(
+            load_symbol("cuGraphicsResourceSetMapFlags"));
+    }
+    graphics_map_resources_ =
+        reinterpret_cast<GraphicsMapResourcesFunction>(load_symbol("cuGraphicsMapResources"));
+    graphics_unmap_resources_ =
+        reinterpret_cast<GraphicsUnmapResourcesFunction>(load_symbol("cuGraphicsUnmapResources"));
     mem_get_allocation_granularity_ = reinterpret_cast<MemGetAllocationGranularityFunction>(
         load_symbol("cuMemGetAllocationGranularity"));
     mem_get_allocation_properties_ = reinterpret_cast<MemGetAllocationPropertiesFunction>(
@@ -521,6 +603,15 @@ CUresult DriverDispatch::mem_map(CUdeviceptr device_pointer, std::size_t memory_
     return mem_map_(device_pointer, memory_bytes, offset, handle, flags);
 }
 
+CUresult DriverDispatch::mem_map_array_async(CUarrayMapInfo* map_info_list, unsigned int count,
+                                             CUstream stream) const {
+    DriverCallScope scope;
+    if (mem_map_array_async_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return mem_map_array_async_(map_info_list, count, stream);
+}
+
 CUresult DriverDispatch::mem_unmap(CUdeviceptr device_pointer, std::size_t memory_bytes) const {
     DriverCallScope scope;
     if (mem_unmap_ == nullptr) {
@@ -576,6 +667,178 @@ CUresult DriverDispatch::mem_import_from_shareable_handle(
         return CUDA_ERROR_NOT_SUPPORTED;
     }
     return mem_import_from_shareable_handle_(handle, os_handle, handle_type);
+}
+
+CUresult DriverDispatch::ipc_get_mem_handle(CUipcMemHandle* handle,
+                                            CUdeviceptr device_pointer) const {
+    DriverCallScope scope;
+    if (ipc_get_mem_handle_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return ipc_get_mem_handle_(handle, device_pointer);
+}
+
+CUresult DriverDispatch::ipc_open_mem_handle(CUdeviceptr* device_pointer, CUipcMemHandle handle,
+                                             unsigned int flags) const {
+    DriverCallScope scope;
+    if (ipc_open_mem_handle_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return ipc_open_mem_handle_(device_pointer, handle, flags);
+}
+
+CUresult DriverDispatch::ipc_close_mem_handle(CUdeviceptr device_pointer) const {
+    DriverCallScope scope;
+    if (ipc_close_mem_handle_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return ipc_close_mem_handle_(device_pointer);
+}
+
+CUresult DriverDispatch::import_external_memory(
+    CUexternalMemory* external_memory, const CUDA_EXTERNAL_MEMORY_HANDLE_DESC* handle_desc) const {
+    DriverCallScope scope;
+    if (import_external_memory_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return import_external_memory_(external_memory, handle_desc);
+}
+
+CUresult DriverDispatch::external_memory_get_mapped_buffer(
+    CUdeviceptr* device_pointer, CUexternalMemory external_memory,
+    const CUDA_EXTERNAL_MEMORY_BUFFER_DESC* buffer_desc) const {
+    DriverCallScope scope;
+    if (external_memory_get_mapped_buffer_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return external_memory_get_mapped_buffer_(device_pointer, external_memory, buffer_desc);
+}
+
+CUresult DriverDispatch::external_memory_get_mapped_mipmapped_array(
+    CUmipmappedArray* mipmap, CUexternalMemory external_memory,
+    const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC* mipmap_desc) const {
+    DriverCallScope scope;
+    if (external_memory_get_mapped_mipmapped_array_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return external_memory_get_mapped_mipmapped_array_(mipmap, external_memory, mipmap_desc);
+}
+
+CUresult DriverDispatch::destroy_external_memory(CUexternalMemory external_memory) const {
+    DriverCallScope scope;
+    if (destroy_external_memory_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return destroy_external_memory_(external_memory);
+}
+
+CUresult DriverDispatch::array_create(CUarray* array,
+                                      const CUDA_ARRAY_DESCRIPTOR* descriptor) const {
+    DriverCallScope scope;
+    if (array_create_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return array_create_(array, descriptor);
+}
+
+CUresult DriverDispatch::array_3d_create(CUarray* array,
+                                         const CUDA_ARRAY3D_DESCRIPTOR* descriptor) const {
+    DriverCallScope scope;
+    if (array_3d_create_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return array_3d_create_(array, descriptor);
+}
+
+CUresult DriverDispatch::array_destroy(CUarray array) const {
+    DriverCallScope scope;
+    if (array_destroy_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return array_destroy_(array);
+}
+
+CUresult DriverDispatch::mipmapped_array_create(CUmipmappedArray* mipmap,
+                                                const CUDA_ARRAY3D_DESCRIPTOR* descriptor,
+                                                unsigned int level_count) const {
+    DriverCallScope scope;
+    if (mipmapped_array_create_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return mipmapped_array_create_(mipmap, descriptor, level_count);
+}
+
+CUresult DriverDispatch::mipmapped_array_destroy(CUmipmappedArray mipmap) const {
+    DriverCallScope scope;
+    if (mipmapped_array_destroy_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return mipmapped_array_destroy_(mipmap);
+}
+
+CUresult DriverDispatch::graphics_unregister_resource(CUgraphicsResource resource) const {
+    DriverCallScope scope;
+    if (graphics_unregister_resource_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return graphics_unregister_resource_(resource);
+}
+
+CUresult DriverDispatch::graphics_subresource_get_mapped_array(CUarray* array,
+                                                               CUgraphicsResource resource,
+                                                               unsigned int array_index,
+                                                               unsigned int mip_level) const {
+    DriverCallScope scope;
+    if (graphics_subresource_get_mapped_array_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return graphics_subresource_get_mapped_array_(array, resource, array_index, mip_level);
+}
+
+CUresult DriverDispatch::graphics_resource_get_mapped_mipmapped_array(
+    CUmipmappedArray* mipmap, CUgraphicsResource resource) const {
+    DriverCallScope scope;
+    if (graphics_resource_get_mapped_mipmapped_array_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return graphics_resource_get_mapped_mipmapped_array_(mipmap, resource);
+}
+
+CUresult DriverDispatch::graphics_resource_get_mapped_pointer(CUdeviceptr* device_pointer,
+                                                              std::size_t* size,
+                                                              CUgraphicsResource resource) const {
+    DriverCallScope scope;
+    if (graphics_resource_get_mapped_pointer_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return graphics_resource_get_mapped_pointer_(device_pointer, size, resource);
+}
+
+CUresult DriverDispatch::graphics_resource_set_map_flags(CUgraphicsResource resource,
+                                                         unsigned int flags) const {
+    DriverCallScope scope;
+    if (graphics_resource_set_map_flags_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return graphics_resource_set_map_flags_(resource, flags);
+}
+
+CUresult DriverDispatch::graphics_map_resources(unsigned int count, CUgraphicsResource* resources,
+                                                CUstream stream) const {
+    DriverCallScope scope;
+    if (graphics_map_resources_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return graphics_map_resources_(count, resources, stream);
+}
+
+CUresult DriverDispatch::graphics_unmap_resources(unsigned int count, CUgraphicsResource* resources,
+                                                  CUstream stream) const {
+    DriverCallScope scope;
+    if (graphics_unmap_resources_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return graphics_unmap_resources_(count, resources, stream);
 }
 
 CUresult DriverDispatch::mem_get_allocation_granularity(
@@ -1009,6 +1272,10 @@ bool DriverDispatch::has_mem_map() const {
     return mem_map_ != nullptr;
 }
 
+bool DriverDispatch::has_mem_map_array_async() const {
+    return mem_map_array_async_ != nullptr;
+}
+
 bool DriverDispatch::has_mem_unmap() const {
     return mem_unmap_ != nullptr;
 }
@@ -1031,6 +1298,82 @@ bool DriverDispatch::has_mem_export_to_shareable_handle() const {
 
 bool DriverDispatch::has_mem_import_from_shareable_handle() const {
     return mem_import_from_shareable_handle_ != nullptr;
+}
+
+bool DriverDispatch::has_ipc_get_mem_handle() const {
+    return ipc_get_mem_handle_ != nullptr;
+}
+
+bool DriverDispatch::has_ipc_open_mem_handle() const {
+    return ipc_open_mem_handle_ != nullptr;
+}
+
+bool DriverDispatch::has_ipc_close_mem_handle() const {
+    return ipc_close_mem_handle_ != nullptr;
+}
+
+bool DriverDispatch::has_import_external_memory() const {
+    return import_external_memory_ != nullptr;
+}
+
+bool DriverDispatch::has_external_memory_get_mapped_buffer() const {
+    return external_memory_get_mapped_buffer_ != nullptr;
+}
+
+bool DriverDispatch::has_external_memory_get_mapped_mipmapped_array() const {
+    return external_memory_get_mapped_mipmapped_array_ != nullptr;
+}
+
+bool DriverDispatch::has_destroy_external_memory() const {
+    return destroy_external_memory_ != nullptr;
+}
+
+bool DriverDispatch::has_array_create() const {
+    return array_create_ != nullptr;
+}
+
+bool DriverDispatch::has_array_3d_create() const {
+    return array_3d_create_ != nullptr;
+}
+
+bool DriverDispatch::has_array_destroy() const {
+    return array_destroy_ != nullptr;
+}
+
+bool DriverDispatch::has_mipmapped_array_create() const {
+    return mipmapped_array_create_ != nullptr;
+}
+
+bool DriverDispatch::has_mipmapped_array_destroy() const {
+    return mipmapped_array_destroy_ != nullptr;
+}
+
+bool DriverDispatch::has_graphics_unregister_resource() const {
+    return graphics_unregister_resource_ != nullptr;
+}
+
+bool DriverDispatch::has_graphics_subresource_get_mapped_array() const {
+    return graphics_subresource_get_mapped_array_ != nullptr;
+}
+
+bool DriverDispatch::has_graphics_resource_get_mapped_mipmapped_array() const {
+    return graphics_resource_get_mapped_mipmapped_array_ != nullptr;
+}
+
+bool DriverDispatch::has_graphics_resource_get_mapped_pointer() const {
+    return graphics_resource_get_mapped_pointer_ != nullptr;
+}
+
+bool DriverDispatch::has_graphics_resource_set_map_flags() const {
+    return graphics_resource_set_map_flags_ != nullptr;
+}
+
+bool DriverDispatch::has_graphics_map_resources() const {
+    return graphics_map_resources_ != nullptr;
+}
+
+bool DriverDispatch::has_graphics_unmap_resources() const {
+    return graphics_unmap_resources_ != nullptr;
 }
 
 bool DriverDispatch::has_mem_get_allocation_granularity() const {
@@ -1192,6 +1535,70 @@ void* DriverDispatch::resolve_direct_symbol(const char* name) const {
     }
     if (symbol == "cuMemGetInfo_v2" || symbol == "cuMemGetInfo") {
         return reinterpret_cast<void*>(mem_get_info_);
+    }
+    if (symbol == "cuMemMapArrayAsync") {
+        return reinterpret_cast<void*>(mem_map_array_async_);
+    }
+    if (symbol == "cuIpcGetMemHandle") {
+        return reinterpret_cast<void*>(ipc_get_mem_handle_);
+    }
+    if (symbol == "cuIpcOpenMemHandle") {
+        return reinterpret_cast<void*>(ipc_open_mem_handle_);
+    }
+    if (symbol == "cuIpcOpenMemHandle_v2") {
+        return reinterpret_cast<void*>(ipc_open_mem_handle_);
+    }
+    if (symbol == "cuIpcCloseMemHandle") {
+        return reinterpret_cast<void*>(ipc_close_mem_handle_);
+    }
+    if (symbol == "cuImportExternalMemory") {
+        return reinterpret_cast<void*>(import_external_memory_);
+    }
+    if (symbol == "cuExternalMemoryGetMappedBuffer") {
+        return reinterpret_cast<void*>(external_memory_get_mapped_buffer_);
+    }
+    if (symbol == "cuExternalMemoryGetMappedMipmappedArray") {
+        return reinterpret_cast<void*>(external_memory_get_mapped_mipmapped_array_);
+    }
+    if (symbol == "cuDestroyExternalMemory") {
+        return reinterpret_cast<void*>(destroy_external_memory_);
+    }
+    if (symbol == "cuArrayCreate" || symbol == "cuArrayCreate_v2") {
+        return reinterpret_cast<void*>(array_create_);
+    }
+    if (symbol == "cuArray3DCreate" || symbol == "cuArray3DCreate_v2") {
+        return reinterpret_cast<void*>(array_3d_create_);
+    }
+    if (symbol == "cuArrayDestroy") {
+        return reinterpret_cast<void*>(array_destroy_);
+    }
+    if (symbol == "cuMipmappedArrayCreate") {
+        return reinterpret_cast<void*>(mipmapped_array_create_);
+    }
+    if (symbol == "cuMipmappedArrayDestroy") {
+        return reinterpret_cast<void*>(mipmapped_array_destroy_);
+    }
+    if (symbol == "cuGraphicsUnregisterResource") {
+        return reinterpret_cast<void*>(graphics_unregister_resource_);
+    }
+    if (symbol == "cuGraphicsSubResourceGetMappedArray") {
+        return reinterpret_cast<void*>(graphics_subresource_get_mapped_array_);
+    }
+    if (symbol == "cuGraphicsResourceGetMappedMipmappedArray") {
+        return reinterpret_cast<void*>(graphics_resource_get_mapped_mipmapped_array_);
+    }
+    if (symbol == "cuGraphicsResourceGetMappedPointer" ||
+        symbol == "cuGraphicsResourceGetMappedPointer_v2") {
+        return reinterpret_cast<void*>(graphics_resource_get_mapped_pointer_);
+    }
+    if (symbol == "cuGraphicsResourceSetMapFlags" || symbol == "cuGraphicsResourceSetMapFlags_v2") {
+        return reinterpret_cast<void*>(graphics_resource_set_map_flags_);
+    }
+    if (symbol == "cuGraphicsMapResources") {
+        return reinterpret_cast<void*>(graphics_map_resources_);
+    }
+    if (symbol == "cuGraphicsUnmapResources") {
+        return reinterpret_cast<void*>(graphics_unmap_resources_);
     }
     if (symbol == "cuDeviceTotalMem_v2" || symbol == "cuDeviceTotalMem") {
         return reinterpret_cast<void*>(device_total_mem_);

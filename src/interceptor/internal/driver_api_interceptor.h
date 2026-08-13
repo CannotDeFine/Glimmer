@@ -51,6 +51,8 @@ void report_memory_info_observed(const char* api_name, std::int32_t device,
 [[nodiscard]] CUresult intercept_mem_map(CUdeviceptr device_pointer, std::size_t memory_bytes,
                                          std::size_t offset, CUmemGenericAllocationHandle handle,
                                          unsigned long long flags);
+[[nodiscard]] CUresult intercept_mem_map_array_async(CUarrayMapInfo* map_info_list,
+                                                     unsigned int count, CUstream stream);
 [[nodiscard]] CUresult intercept_mem_unmap(CUdeviceptr device_pointer, std::size_t memory_bytes);
 [[nodiscard]] CUresult intercept_mem_set_access(CUdeviceptr device_pointer,
                                                 std::size_t memory_bytes,
@@ -67,6 +69,47 @@ void report_memory_info_observed(const char* api_name, std::int32_t device,
     CUmemAllocationHandleType handle_type, unsigned long long flags);
 [[nodiscard]] CUresult intercept_mem_import_from_shareable_handle(
     CUmemGenericAllocationHandle* handle, void* os_handle, CUmemAllocationHandleType handle_type);
+[[nodiscard]] CUresult intercept_ipc_get_mem_handle(CUipcMemHandle* handle,
+                                                    CUdeviceptr device_pointer);
+[[nodiscard]] CUresult intercept_ipc_open_mem_handle(CUdeviceptr* device_pointer,
+                                                     CUipcMemHandle handle, unsigned int flags);
+[[nodiscard]] CUresult intercept_ipc_close_mem_handle(CUdeviceptr device_pointer);
+[[nodiscard]] CUresult intercept_import_external_memory(
+    CUexternalMemory* external_memory, const CUDA_EXTERNAL_MEMORY_HANDLE_DESC* handle_desc);
+[[nodiscard]] CUresult intercept_external_memory_get_mapped_buffer(
+    CUdeviceptr* device_pointer, CUexternalMemory external_memory,
+    const CUDA_EXTERNAL_MEMORY_BUFFER_DESC* buffer_desc);
+[[nodiscard]] CUresult intercept_external_memory_get_mapped_mipmapped_array(
+    CUmipmappedArray* mipmap, CUexternalMemory external_memory,
+    const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC* mipmap_desc);
+[[nodiscard]] CUresult intercept_destroy_external_memory(CUexternalMemory external_memory);
+[[nodiscard]] CUresult intercept_array_create(CUarray* array,
+                                              const CUDA_ARRAY_DESCRIPTOR* descriptor);
+[[nodiscard]] CUresult intercept_array_3d_create(CUarray* array,
+                                                 const CUDA_ARRAY3D_DESCRIPTOR* descriptor);
+[[nodiscard]] CUresult intercept_array_destroy(CUarray array);
+[[nodiscard]] CUresult intercept_mipmapped_array_create(CUmipmappedArray* mipmap,
+                                                        const CUDA_ARRAY3D_DESCRIPTOR* descriptor,
+                                                        unsigned int level_count);
+[[nodiscard]] CUresult intercept_mipmapped_array_destroy(CUmipmappedArray mipmap);
+[[nodiscard]] CUresult intercept_graphics_unregister_resource(CUgraphicsResource resource);
+[[nodiscard]] CUresult intercept_graphics_subresource_get_mapped_array(CUarray* array,
+                                                                       CUgraphicsResource resource,
+                                                                       unsigned int array_index,
+                                                                       unsigned int mip_level);
+[[nodiscard]] CUresult intercept_graphics_resource_get_mapped_mipmapped_array(
+    CUmipmappedArray* mipmap, CUgraphicsResource resource);
+[[nodiscard]] CUresult intercept_graphics_resource_get_mapped_pointer(CUdeviceptr* device_pointer,
+                                                                      std::size_t* size,
+                                                                      CUgraphicsResource resource);
+[[nodiscard]] CUresult intercept_graphics_resource_set_map_flags(CUgraphicsResource resource,
+                                                                 unsigned int flags);
+[[nodiscard]] CUresult intercept_graphics_map_resources(unsigned int count,
+                                                        CUgraphicsResource* resources,
+                                                        CUstream stream);
+[[nodiscard]] CUresult intercept_graphics_unmap_resources(unsigned int count,
+                                                          CUgraphicsResource* resources,
+                                                          CUstream stream);
 [[nodiscard]] CUresult intercept_mem_get_allocation_granularity(
     std::size_t* granularity, const CUmemAllocationProp* prop,
     CUmemAllocationGranularity_flags option);
