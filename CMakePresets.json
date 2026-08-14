@@ -49,6 +49,7 @@
       "inherits": "debug",
       "cacheVariables": {
         "GLIMMER_BUILD_CUDA_INTERCEPTOR": "ON",
+        "GLIMMER_BUILD_CUDA_BACKEND": "ON",
         "GLIMMER_ENABLE_CUDA_GPU_TESTS": "OFF",
         "GLIMMER_BUILD_CUDA_WORKLOAD": "OFF"
       }

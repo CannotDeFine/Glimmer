@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -20,6 +21,7 @@ struct TaskSpec {
     TenantId tenant_id;
     MemoryBytes memory_bytes = 0;
     std::uint32_t weight = 1;
+    std::uint32_t work_units = 1;
 };
 
 enum class TaskState : std::uint8_t {
@@ -30,10 +32,20 @@ enum class TaskState : std::uint8_t {
     kFailed,
 };
 
+enum class SchedulingPolicy : std::uint8_t {
+    kWeightedRoundRobin,
+    kFifo,
+};
+
+[[nodiscard]] std::optional<SchedulingPolicy> parse_scheduling_policy(
+    std::string_view value) noexcept;
+[[nodiscard]] std::string_view scheduling_policy_name(SchedulingPolicy policy) noexcept;
+
 enum class SubmitStatus : std::uint8_t {
     kAccepted,
     kInvalidTask,
     kQuotaExceeded,
+    kQueueFull,
     kTenantWeightMismatch,
     kInternalError,
 };
@@ -45,19 +57,41 @@ struct SubmitResult {
     [[nodiscard]] bool accepted() const noexcept;
 };
 
+struct SchedulerOptions {
+    std::size_t max_running_tasks = 1;
+    // Zero means that queued-task count is not bounded.
+    std::size_t max_queued_tasks = 0;
+    SchedulingPolicy scheduling_policy = SchedulingPolicy::kWeightedRoundRobin;
+};
+
 struct TaskSnapshot {
     TaskId task_id = 0;
     TenantId tenant_id;
     MemoryBytes memory_bytes = 0;
     std::uint32_t weight = 0;
+    std::uint32_t work_units = 0;
     TaskState state = TaskState::kFailed;
+};
+
+struct SchedulerStats {
+    QuotaUsage quota;
+    std::size_t total_task_count = 0;
+    std::size_t queued_task_count = 0;
+    std::size_t running_task_count = 0;
+    std::size_t completed_task_count = 0;
+    std::size_t cancelled_task_count = 0;
+    std::size_t failed_task_count = 0;
+    std::size_t max_running_tasks = 0;
+    std::size_t max_queued_tasks = 0;
+    SchedulingPolicy scheduling_policy = SchedulingPolicy::kWeightedRoundRobin;
 };
 
 class Scheduler {
    public:
-    // Thread-safe. The first scheduler version runs at most one task at a
-    // time and applies weighted round-robin order between tenants.
-    explicit Scheduler(MemoryBytes memory_limit_bytes);
+    // Thread-safe. The scheduler admits up to max_running_tasks at a time and
+    // applies the configured task-selection policy. A zero capacity is treated
+    // as one to keep construction fail-safe.
+    explicit Scheduler(MemoryBytes memory_limit_bytes, SchedulerOptions options = {});
 
     Scheduler(const Scheduler&) = delete;
     Scheduler& operator=(const Scheduler&) = delete;
@@ -69,10 +103,12 @@ class Scheduler {
     [[nodiscard]] bool complete(TaskId task_id);
     [[nodiscard]] bool fail(TaskId task_id);
     [[nodiscard]] bool cancel(TaskId task_id);
+    [[nodiscard]] bool cancel_queued(TaskId task_id);
     [[nodiscard]] bool forget(TaskId task_id);
 
     [[nodiscard]] std::optional<TaskSnapshot> find(TaskId task_id) const;
     [[nodiscard]] QuotaUsage usage() const;
+    [[nodiscard]] SchedulerStats stats() const;
     [[nodiscard]] std::size_t queued_task_count() const;
     [[nodiscard]] std::size_t running_task_count() const;
 
@@ -89,8 +125,11 @@ class Scheduler {
     };
 
     [[nodiscard]] std::optional<TaskId> select_next_task_locked();
+    [[nodiscard]] std::optional<TaskId> select_fifo_task_locked();
+    [[nodiscard]] std::optional<TaskId> select_weighted_round_robin_task_locked();
     [[nodiscard]] TaskSnapshot snapshot_locked(TaskId task_id, const TaskRecord& task) const;
     [[nodiscard]] bool finish_running_task_locked(TaskId task_id, TaskState terminal_state);
+    [[nodiscard]] bool cancel_queued_task_locked(TaskId task_id, TaskRecord& task) noexcept;
     void remove_task_from_tenant_queue_locked(const TenantId& tenant_id, TaskId task_id) noexcept;
     void advance_tenant_locked();
 
@@ -102,7 +141,10 @@ class Scheduler {
     std::vector<TenantId> tenant_order_;
     std::size_t tenant_cursor_ = 0;
     std::uint32_t tenant_budget_ = 0;
-    std::optional<TaskId> running_task_id_;
+    const SchedulingPolicy scheduling_policy;
+    const std::size_t max_running_tasks;
+    const std::size_t max_queued_tasks;
+    std::vector<TaskId> running_task_ids_;
     std::size_t queued_task_count_ = 0;
 };
 

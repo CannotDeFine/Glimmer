@@ -3,6 +3,11 @@ add_library(glimmer_control
     device_capacity_quota.cc
     process_memory_quota.cc
     shared_memory_quota.cc
+    task_admission.cc
+    task_endpoint.cc
+    task_protocol.cc
+    unix_socket_client.cc
+    unix_socket_server.cc
 )
 add_library(Glimmer::control ALIAS glimmer_control)
 

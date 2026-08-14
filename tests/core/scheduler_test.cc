@@ -4,8 +4,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <thread>
 #include <string>
 #include <string_view>
+#include <atomic>
 #include <vector>
 
 namespace {
@@ -13,6 +15,8 @@ namespace {
 using glimmer::core::MemoryBytes;
 using glimmer::core::Scheduler;
 using glimmer::core::SchedulerMode;
+using glimmer::core::SchedulerOptions;
+using glimmer::core::SchedulingPolicy;
 using glimmer::core::SubmitStatus;
 using glimmer::core::TaskId;
 using glimmer::core::TaskSpec;
@@ -67,6 +71,139 @@ void test_admission_dispatch_and_completion() {
     expect(!scheduler.find(task_id).has_value(), "forgotten task should no longer be observable");
 }
 
+void test_configurable_concurrent_dispatch() {
+    Scheduler scheduler(100, SchedulerOptions{.max_running_tasks = 2});
+    const TaskId first_id = submit(scheduler, "tenant-a", 20);
+    const TaskId second_id = submit(scheduler, "tenant-a", 20);
+    const TaskId third_id = submit(scheduler, "tenant-a", 20);
+
+    const auto first_lease = scheduler.dispatch_next();
+    const auto second_lease = scheduler.dispatch_next();
+    expect(first_lease.has_value() && second_lease.has_value(),
+           "scheduler should fill both configured running slots");
+    if (!first_lease.has_value() || !second_lease.has_value()) {
+        return;
+    }
+    expect(first_lease->task_id == first_id && second_lease->task_id == second_id,
+           "concurrent dispatch should preserve queue order");
+    expect(scheduler.running_task_count() == 2, "both running slots should be observable");
+    expect(scheduler.usage().allocated_bytes == 40,
+           "concurrent dispatch should charge both running tasks");
+    expect(!scheduler.dispatch_next().has_value(),
+           "scheduler should not exceed the configured running capacity");
+
+    expect(scheduler.complete(first_id), "first concurrent task should complete");
+    const auto third_lease = scheduler.dispatch_next();
+    expect(third_lease.has_value() && third_lease->task_id == third_id,
+           "a released slot should dispatch the next queued task");
+    expect(scheduler.fail(second_id), "second concurrent task should fail");
+    expect(scheduler.complete(third_id), "third concurrent task should complete");
+    expect(scheduler.running_task_count() == 0, "all concurrent tasks should be terminal");
+    expect(scheduler.usage().used_bytes() == 0,
+           "all concurrent terminal transitions should release quota");
+}
+
+void test_zero_concurrency_falls_back_to_one() {
+    Scheduler scheduler(100, SchedulerOptions{.max_running_tasks = 0});
+    const TaskId task_id = submit(scheduler, "tenant-a", 20);
+    const auto lease = scheduler.dispatch_next();
+    expect(lease.has_value() && lease->task_id == task_id,
+           "zero concurrency should retain one safe running slot");
+    expect(scheduler.fail(task_id), "fallback running task should fail cleanly");
+}
+
+void test_queue_backpressure_releases_with_dispatch() {
+    Scheduler scheduler(100, SchedulerOptions{.max_queued_tasks = 2});
+    const TaskId first_id = submit(scheduler, "tenant-a", 10);
+    const TaskId second_id = submit(scheduler, "tenant-a", 10);
+    const auto rejected = scheduler.submit(
+        TaskSpec{.tenant_id = "tenant-a", .memory_bytes = 10, .weight = 1, .work_units = 1});
+    expect(rejected.status == SubmitStatus::kQueueFull,
+           "a full waiting queue should reject new submissions explicitly");
+    expect(scheduler.usage().reserved_bytes == 20,
+           "queue backpressure should not reserve rejected work");
+    const auto first_lease = scheduler.dispatch_next();
+    expect(first_lease.has_value() && first_lease->task_id == first_id,
+           "dispatch should free one waiting-queue slot");
+    const auto accepted_after_dispatch = scheduler.submit(
+        TaskSpec{.tenant_id = "tenant-a", .memory_bytes = 10, .weight = 1, .work_units = 1});
+    expect(accepted_after_dispatch.accepted() && accepted_after_dispatch.task_id != second_id,
+           "a new task should be accepted after queue space is freed");
+    expect(scheduler.fail(first_id), "the first running task should fail cleanly");
+    expect(scheduler.cancel_queued(second_id), "the second task should be cancellable");
+    expect(scheduler.cancel_queued(accepted_after_dispatch.task_id),
+           "the replacement task should be cancellable");
+    expect(scheduler.usage().used_bytes() == 0,
+           "queue backpressure test cleanup should release all quota");
+}
+
+void test_scheduler_stats_snapshot() {
+    Scheduler scheduler(100, SchedulerOptions{.max_running_tasks = 2, .max_queued_tasks = 3});
+    const auto empty = scheduler.stats();
+    expect(empty.quota.limit_bytes == 100 && empty.total_task_count == 0 &&
+               empty.queued_task_count == 0 && empty.running_task_count == 0,
+           "empty scheduler stats should report zero tasks and the quota limit");
+
+    const TaskId completed_id = submit(scheduler, "tenant-a", 20);
+    const TaskId failed_id = submit(scheduler, "tenant-b", 20);
+    const TaskId cancelled_id = submit(scheduler, "tenant-c", 20);
+    const auto queued = scheduler.stats();
+    expect(queued.total_task_count == 3 && queued.queued_task_count == 3 &&
+               queued.running_task_count == 0 && queued.quota.reserved_bytes == 60,
+           "queued scheduler stats should expose reservations and queue depth");
+
+    expect(scheduler.dispatch_next().has_value() && scheduler.dispatch_next().has_value(),
+           "stats test should dispatch both running slots");
+    const auto running = scheduler.stats();
+    expect(running.queued_task_count == 1 && running.running_task_count == 2 &&
+               running.quota.reserved_bytes == 20 && running.quota.allocated_bytes == 40,
+           "running scheduler stats should separate reserved and allocated bytes");
+
+    expect(scheduler.complete(completed_id), "stats test should complete one task");
+    expect(scheduler.fail(failed_id), "stats test should fail one task");
+    expect(scheduler.cancel_queued(cancelled_id), "stats test should cancel one task");
+    const auto terminal = scheduler.stats();
+    expect(terminal.total_task_count == 3 && terminal.queued_task_count == 0 &&
+               terminal.running_task_count == 0 && terminal.completed_task_count == 1 &&
+               terminal.cancelled_task_count == 1 && terminal.failed_task_count == 1 &&
+               terminal.quota.used_bytes() == 0 && terminal.max_running_tasks == 2 &&
+               terminal.max_queued_tasks == 3 &&
+               terminal.scheduling_policy == SchedulingPolicy::kWeightedRoundRobin,
+           "terminal scheduler stats should expose states, limits, and released quota");
+}
+
+void test_fifo_policy_order() {
+    Scheduler scheduler(100, SchedulerOptions{.scheduling_policy = SchedulingPolicy::kFifo});
+    const TaskId first = submit(scheduler, "tenant-a", 1, 4);
+    const TaskId second = submit(scheduler, "tenant-b", 1, 1);
+    const TaskId third = submit(scheduler, "tenant-a", 1, 4);
+
+    for (const TaskId expected_id : {first, second, third}) {
+        const auto dispatched = scheduler.dispatch_next();
+        expect(dispatched.has_value() && dispatched->task_id == expected_id,
+               "FIFO policy should dispatch tasks by submission order");
+        expect(scheduler.complete(expected_id), "FIFO task should complete cleanly");
+    }
+    expect(scheduler.stats().scheduling_policy == SchedulingPolicy::kFifo,
+           "FIFO policy should be visible in scheduler stats");
+}
+
+void test_scheduling_policy_configuration() {
+    const auto fifo = glimmer::core::parse_scheduling_policy("fifo");
+    const auto weighted = glimmer::core::parse_scheduling_policy("weighted_rr");
+    expect(fifo.has_value() && fifo.value() == SchedulingPolicy::kFifo, "FIFO policy should parse");
+    expect(weighted.has_value() && weighted.value() == SchedulingPolicy::kWeightedRoundRobin,
+           "weighted policy should parse");
+    expect(!glimmer::core::parse_scheduling_policy("unknown").has_value(),
+           "unknown policy should be rejected");
+    expect(glimmer::core::scheduling_policy_name(SchedulingPolicy::kFifo) == "fifo",
+           "FIFO policy name should be stable");
+    const auto invalid_policy = static_cast<SchedulingPolicy>(255);
+    const Scheduler scheduler(100, SchedulerOptions{.scheduling_policy = invalid_policy});
+    expect(scheduler.stats().scheduling_policy == SchedulingPolicy::kWeightedRoundRobin,
+           "invalid direct API policy should fall back to weighted round-robin");
+}
+
 void test_weighted_round_robin_order() {
     Scheduler scheduler(100);
     const TaskId a1 = submit(scheduler, "tenant-a", 1, 2);
@@ -92,6 +229,8 @@ void test_cancellation_and_failure_release_quota() {
     Scheduler scheduler(100);
     const TaskId queued_id = submit(scheduler, "tenant-a", 40);
     expect(scheduler.cancel(queued_id), "queued task should be cancellable");
+    expect(!scheduler.cancel_queued(queued_id),
+           "a terminal task should not be cancellable through the queued-only path");
     expect(scheduler.usage().used_bytes() == 0, "queued cancellation should release reservation");
     expect_state(scheduler, queued_id, TaskState::kCancelled,
                  "cancelled task state should be observable");
@@ -114,6 +253,11 @@ void test_input_validation_and_tenant_weight_consistency() {
     Scheduler scheduler(100);
     expect(scheduler.submit(TaskSpec{}).status == SubmitStatus::kInvalidTask,
            "empty task should be rejected");
+    expect(scheduler
+                   .submit(TaskSpec{
+                       .tenant_id = "tenant-a", .memory_bytes = 10, .weight = 1, .work_units = 0})
+                   .status == SubmitStatus::kInvalidTask,
+           "zero-work task should be rejected");
     expect(submit(scheduler, "tenant-a", 10, 3) != 0, "valid task should have an id");
     const auto mismatched =
         scheduler.submit(TaskSpec{.tenant_id = "tenant-a", .memory_bytes = 10, .weight = 2});
@@ -137,13 +281,44 @@ void test_scheduler_mode_configuration() {
            "mode name should be stable");
 }
 
+void test_concurrent_claim_is_single_owner() {
+    Scheduler scheduler(100);
+    const TaskId task_id = submit(scheduler, "tenant-a", 40);
+    std::atomic<int> successful_claims = 0;
+    std::vector<std::thread> claimers;
+    claimers.reserve(8);
+    for (int index = 0; index < 8; ++index) {
+        claimers.emplace_back([&scheduler, &successful_claims] {
+            const auto lease = scheduler.dispatch_next();
+            if (lease.has_value()) {
+                ++successful_claims;
+            }
+        });
+    }
+    for (std::thread& claimer : claimers) {
+        claimer.join();
+    }
+    expect(successful_claims.load() == 1, "concurrent claimers must receive one lease");
+    expect(scheduler.running_task_count() == 1, "one task should remain running after claim race");
+    expect(scheduler.fail(task_id), "the sole running lease should fail cleanly");
+    expect(scheduler.usage().used_bytes() == 0,
+           "failed concurrent lease should release its reservation");
+}
+
 }  // namespace
 
 int main() {
     test_admission_dispatch_and_completion();
+    test_configurable_concurrent_dispatch();
+    test_zero_concurrency_falls_back_to_one();
+    test_queue_backpressure_releases_with_dispatch();
+    test_scheduler_stats_snapshot();
+    test_fifo_policy_order();
+    test_scheduling_policy_configuration();
     test_weighted_round_robin_order();
     test_cancellation_and_failure_release_quota();
     test_input_validation_and_tenant_weight_consistency();
     test_scheduler_mode_configuration();
+    test_concurrent_claim_is_single_owner();
     return EXIT_SUCCESS;
 }

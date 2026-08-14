@@ -10,6 +10,7 @@ include(cmake/ProjectOptions.cmake)
 include(cmake/ProjectTesting.cmake)
 
 option(GLIMMER_BUILD_CUDA_INTERCEPTOR "Build the optional CUDA Driver API preload library" OFF)
+option(GLIMMER_BUILD_CUDA_BACKEND "Build the optional explicit CUDA task backend" OFF)
 option(GLIMMER_ENABLE_CUDA_GPU_TESTS "Enable tests that require a CUDA-capable GPU" OFF)
 option(GLIMMER_BUILD_CUDA_WORKLOAD "Build the real-GPU CUDA workload harnesses" OFF)
 
@@ -29,7 +30,7 @@ endif()
 add_subdirectory(3rdparty)
 add_subdirectory(src)
 
-if(GLIMMER_BUILD_CUDA_INTERCEPTOR OR GLIMMER_BUILD_CUDA_WORKLOAD)
+if(GLIMMER_BUILD_CUDA_INTERCEPTOR OR GLIMMER_BUILD_CUDA_BACKEND OR GLIMMER_BUILD_CUDA_WORKLOAD)
     find_package(CUDAToolkit REQUIRED)
 endif()
 
@@ -37,9 +38,16 @@ if(GLIMMER_BUILD_CUDA_INTERCEPTOR)
     add_subdirectory(src/interceptor)
 endif()
 
+if(GLIMMER_BUILD_CUDA_BACKEND)
+    add_subdirectory(src/backend/cuda)
+endif()
+
 if(GLIMMER_BUILD_CUDA_WORKLOAD)
     add_subdirectory(examples/cuda_workload)
     add_subdirectory(examples/cuda_workloads)
+    if(GLIMMER_BUILD_CUDA_BACKEND)
+        add_subdirectory(examples/cuda_task_backend)
+    endif()
 endif()
 
 if(BUILD_TESTING)

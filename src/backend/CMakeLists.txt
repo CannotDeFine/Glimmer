@@ -1,5 +1,6 @@
 add_library(glimmer_backend
     simulated_backend.cc
+    task_executor.cc
 )
 add_library(Glimmer::backend ALIAS glimmer_backend)
 

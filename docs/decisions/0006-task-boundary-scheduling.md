@@ -59,3 +59,7 @@ into the scheduler contract without moving scheduler policy into CUDA-specific
 code. Any later decision to support kernel preemption, cooperative workload
 control, or a stronger latency guarantee requires a superseding ADR and
 backend capability evidence.
+
+The original single-running-task bootstrap capacity is superseded by
+[ADR 0016](0016-configurable-concurrent-task-slots.md). The explicit task
+boundary and non-preemption guarantees remain unchanged.

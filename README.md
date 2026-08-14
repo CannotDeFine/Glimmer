@@ -96,7 +96,10 @@ ctest --preset cuda-gpu --output-on-failure
 The GPU preset includes an embedded Driver-PTX workload, a Runtime kernel
 compiled with `nvcc`, the standalone `glimmer_cuda_workload` baseline, and a
 Runtime workload matrix covering async/pool, managed, pitched, and
-multi-stream execution. To run only the end-to-end kernel checks:
+multi-stream execution. It also builds the opt-in
+`glimmer_cuda_task_backend_demo`, which submits explicit Driver-API PTX tasks
+through the scheduler-controlled backend. To run only the end-to-end kernel
+checks:
 
 ```sh
 ctest --preset cuda-gpu -R 'glimmer_cuda_interceptor_(kernel_gpu_test|runtime_kernel_gpu_test)' --output-on-failure
@@ -155,6 +158,103 @@ real device capacity.
 The root `compile_commands.json` link follows the most recently built preset.
 Use `cuda-lint` last when editor diagnostics must include CUDA interceptor files
 and Toolkit include paths.
+
+### Local control service
+
+The debug build provides a Linux-only control service. The default `simulated`
+mode advances a deterministic backend; `remote` mode exposes task leases for a
+separate worker process. In both modes the service owns scheduling and quota
+state, while CUDA handles and pointers remain inside the worker process.
+
+```sh
+cmake --build --preset debug
+./build/debug/bin/glimmer_control_service \
+    --socket /tmp/glimmer-control.sock \
+    --quota-bytes 8388608
+```
+
+To run the explicit worker-lease mode, add `--execution-mode remote`:
+
+```sh
+./build/debug/bin/glimmer_control_service \
+    --socket /tmp/glimmer-control.sock \
+    --quota-bytes 8388608 \
+    --execution-mode remote \
+    --lease-timeout-ms 5000 \
+    --max-concurrent-tasks 2 \
+    --max-queued-tasks 64 \
+    --scheduler-policy weighted_rr \
+    --bind-leases-to-process
+```
+
+Submit and inspect tasks from another shell:
+
+```sh
+./build/debug/bin/glimmer_control_client \
+    --socket /tmp/glimmer-control.sock submit tenant-a 1048576 2 1
+./build/debug/bin/glimmer_control_client \
+    --socket /tmp/glimmer-control.sock query 1
+./build/debug/bin/glimmer_control_client \
+    --socket /tmp/glimmer-control.sock stats
+```
+
+A worker claims the next queued task, executes its local CUDA work, and reports
+the terminal result:
+
+```sh
+./build/debug/bin/glimmer_control_client \
+    --socket /tmp/glimmer-control.sock claim
+./build/debug/bin/glimmer_control_client \
+    --socket /tmp/glimmer-control.sock complete 1
+```
+
+When `--lease-timeout-ms` is enabled, the CUDA lease worker renews its lease
+automatically. The standalone client can renew a lease explicitly with
+`heartbeat TASK_ID`. An unrenewed lease is marked `FAILED` and its quota is
+released after the configured timeout.
+Set `--lease-timeout-ms 0` to disable lease expiry; in that mode a running
+lease remains until an explicit terminal report or service restart.
+
+`--max-concurrent-tasks` controls the number of remote workers that may hold a
+running lease simultaneously. It defaults to `1`; quota reservations still
+bound the total memory admitted by the service.
+
+`--scheduler-policy` selects the task dispatch order. `weighted_rr` is the
+default and preserves weighted tenant fairness; `fifo` dispatches the oldest
+queued task first. Policies control task-boundary submission order and do not
+preempt a kernel that is already running.
+
+`--bind-leases-to-process` binds `HEARTBEAT`, `COMPLETE`, and `FAIL` to the
+Linux process that claimed the lease, using the authenticated Unix-socket
+peer identity. Keep claim and execution in the same worker process when this
+option is enabled. The option is disabled by default so separate command-line
+smoke-test invocations remain compatible.
+
+`--max-queued-tasks` optionally bounds waiting tasks. A value of `0` (the
+default) leaves the queue unlimited; when the bound is reached, submission
+returns `ERROR QUEUE_FULL` without consuming quota.
+
+`stats` returns a read-only snapshot of task-state counts, quota bytes, and the
+configured running/queued limits. It is intended for diagnostics and smoke
+checks, not as a durable time-series metrics export.
+
+Use `fail TASK_ID` when execution cannot complete. `CANCEL` is intentionally
+limited to queued tasks; the service does not pretend to preempt a running CUDA
+kernel.
+
+The service uses `SO_PEERCRED` and accepts the server process UID by default.
+This first service is a control-plane validation harness: it does not accept
+CUDA pointers or kernel descriptors and does not execute arbitrary application
+workloads. CUDA resource binding remains process-local.
+
+The automated multi-process check starts the service and client as separate
+processes and verifies quota rejection, an empty claim, lease metadata,
+concurrent running-state observation, heartbeat renewal, and explicit terminal
+transitions:
+
+```sh
+ctest --preset debug -R glimmer_control_service_process_test --output-on-failure
+```
 
 ## Contributing
 
