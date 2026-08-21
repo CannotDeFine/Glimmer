@@ -3,8 +3,12 @@
 #include "internal/driver_api_interceptor.h"
 #include "internal/driver_dispatch.h"
 
+#include "glimmer/control/launch_gate.h"
+
+#include <chrono>
 #include <cstddef>
 #include <dlfcn.h>
+#include <optional>
 
 #ifdef cudaMallocFromPoolAsync
 #undef cudaMallocFromPoolAsync
@@ -91,6 +95,89 @@ using glimmer::interceptor::RuntimeMemSetMemPoolFunction;
 using glimmer::interceptor::RuntimeStreamDestroyFunction;
 using glimmer::interceptor::RuntimeStreamQueryFunction;
 using glimmer::interceptor::RuntimeStreamSynchronizeFunction;
+
+[[nodiscard]] std::uint64_t elapsed_nanoseconds(
+    std::chrono::steady_clock::time_point started,
+    std::chrono::steady_clock::time_point finished) noexcept {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(finished - started);
+    return elapsed.count() < 0 ? std::uint64_t{0} : static_cast<std::uint64_t>(elapsed.count());
+}
+
+template <typename Invoke>
+[[nodiscard]] cudaError_t intercept_runtime_kernel_launch(const char* api_name, bool is_reentrant,
+                                                          dim3 grid_dim, dim3 block_dim,
+                                                          std::size_t shared_memory_bytes,
+                                                          cudaStream_t stream, Invoke&& invoke) {
+    if (is_reentrant) {
+        return invoke();
+    }
+
+    const bool scheduling_enforced = glimmer::interceptor::launch_scheduling_is_enforced();
+    const bool trace_launch_timings = glimmer::interceptor::launch_timing_is_enabled();
+    glimmer::control::LaunchGateTiming gate_timing;
+    std::optional<glimmer::core::TaskId> launch_task;
+    if (scheduling_enforced) {
+        launch_task = glimmer::interceptor::acquire_launch_slot(trace_launch_timings ? &gate_timing
+                                                                                     : nullptr);
+        if (!launch_task.has_value()) {
+            return cudaErrorNotSupported;
+        }
+    }
+
+    const auto cuda_launch_started = trace_launch_timings ? std::chrono::steady_clock::now()
+                                                          : std::chrono::steady_clock::time_point{};
+    const cudaError_t result = invoke();
+    const auto cuda_launch_finished = trace_launch_timings
+                                          ? std::chrono::steady_clock::now()
+                                          : std::chrono::steady_clock::time_point{};
+    if (launch_task.has_value() && result != cudaSuccess) {
+        glimmer::interceptor::fail_launch_slot(launch_task.value());
+    }
+
+    bool event_tracking_succeeded = false;
+    bool batch_call_succeeded = true;
+    std::uint64_t event_tracking_nanoseconds = 0;
+    if (launch_task.has_value() && result == cudaSuccess) {
+        const auto event_tracking_started = trace_launch_timings
+                                                ? std::chrono::steady_clock::now()
+                                                : std::chrono::steady_clock::time_point{};
+        event_tracking_succeeded = glimmer::interceptor::track_launch_completion(
+            launch_task.value(), reinterpret_cast<CUstream>(stream));
+        if (trace_launch_timings) {
+            event_tracking_nanoseconds =
+                elapsed_nanoseconds(event_tracking_started, std::chrono::steady_clock::now());
+        }
+        if (event_tracking_succeeded) {
+            batch_call_succeeded =
+                glimmer::interceptor::finish_launch_batch_call(launch_task.value());
+        }
+    }
+    if (trace_launch_timings) {
+        glimmer::interceptor::report_launch_timing_observed(
+            launch_task.value_or(0), gate_timing,
+            elapsed_nanoseconds(cuda_launch_started, cuda_launch_finished),
+            event_tracking_nanoseconds, static_cast<std::uint32_t>(result),
+            event_tracking_succeeded);
+    }
+    if (launch_task.has_value() && result == cudaSuccess &&
+        (!event_tracking_succeeded || !batch_call_succeeded)) {
+        return cudaErrorUnknown;
+    }
+    if (result == cudaSuccess) {
+        glimmer::interceptor::report_kernel_launch_observed({
+            .api_name = api_name,
+            .grid_dim_x = grid_dim.x,
+            .grid_dim_y = grid_dim.y,
+            .grid_dim_z = grid_dim.z,
+            .block_dim_x = block_dim.x,
+            .block_dim_y = block_dim.y,
+            .block_dim_z = block_dim.z,
+            .shared_memory_bytes = shared_memory_bytes,
+            .stream = reinterpret_cast<const void*>(stream),
+        });
+    }
+    return result;
+}
 
 [[nodiscard]] RuntimeMallocFunction resolve_runtime_malloc() noexcept {
     static RuntimeMallocFunction function = []() noexcept {
@@ -1710,37 +1797,12 @@ extern "C" cudaError_t CUDARTAPI cudaLaunchKernel(const void* function, dim3 gri
         if (real_launch == nullptr) {
             return cudaErrorNotSupported;
         }
-        std::optional<glimmer::core::TaskId> launch_task;
-        if (!is_reentrant && glimmer::interceptor::launch_scheduling_is_enforced()) {
-            launch_task = glimmer::interceptor::acquire_launch_slot();
-            if (!launch_task.has_value()) {
-                return cudaErrorNotSupported;
-            }
-        }
-        const cudaError_t result =
-            real_launch(function, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
-        if (launch_task.has_value() && result != cudaSuccess) {
-            glimmer::interceptor::fail_launch_slot(launch_task.value());
-        }
-        if (launch_task.has_value() && result == cudaSuccess &&
-            !glimmer::interceptor::track_launch_completion(launch_task.value(),
-                                                           reinterpret_cast<CUstream>(stream))) {
-            return cudaErrorUnknown;
-        }
-        if (!is_reentrant && result == cudaSuccess) {
-            glimmer::interceptor::report_kernel_launch_observed({
-                .api_name = "cudaLaunchKernel",
-                .grid_dim_x = grid_dim.x,
-                .grid_dim_y = grid_dim.y,
-                .grid_dim_z = grid_dim.z,
-                .block_dim_x = block_dim.x,
-                .block_dim_y = block_dim.y,
-                .block_dim_z = block_dim.z,
-                .shared_memory_bytes = shared_memory_bytes,
-                .stream = reinterpret_cast<const void*>(stream),
+        return intercept_runtime_kernel_launch(
+            "cudaLaunchKernel", is_reentrant, grid_dim, block_dim, shared_memory_bytes, stream,
+            [real_launch, function, grid_dim, block_dim, arguments, shared_memory_bytes, stream] {
+                return real_launch(function, grid_dim, block_dim, arguments, shared_memory_bytes,
+                                   stream);
             });
-        }
-        return result;
     } catch (...) {
         return cudaErrorUnknown;
     }
@@ -1757,37 +1819,12 @@ extern "C" cudaError_t CUDARTAPI cudaLaunchKernel_ptsz(const void* function, dim
         if (real_launch == nullptr) {
             return cudaErrorNotSupported;
         }
-        std::optional<glimmer::core::TaskId> launch_task;
-        if (!is_reentrant && glimmer::interceptor::launch_scheduling_is_enforced()) {
-            launch_task = glimmer::interceptor::acquire_launch_slot();
-            if (!launch_task.has_value()) {
-                return cudaErrorNotSupported;
-            }
-        }
-        const cudaError_t result =
-            real_launch(function, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
-        if (launch_task.has_value() && result != cudaSuccess) {
-            glimmer::interceptor::fail_launch_slot(launch_task.value());
-        }
-        if (launch_task.has_value() && result == cudaSuccess &&
-            !glimmer::interceptor::track_launch_completion(launch_task.value(),
-                                                           reinterpret_cast<CUstream>(stream))) {
-            return cudaErrorUnknown;
-        }
-        if (!is_reentrant && result == cudaSuccess) {
-            glimmer::interceptor::report_kernel_launch_observed({
-                .api_name = "cudaLaunchKernel_ptsz",
-                .grid_dim_x = grid_dim.x,
-                .grid_dim_y = grid_dim.y,
-                .grid_dim_z = grid_dim.z,
-                .block_dim_x = block_dim.x,
-                .block_dim_y = block_dim.y,
-                .block_dim_z = block_dim.z,
-                .shared_memory_bytes = shared_memory_bytes,
-                .stream = reinterpret_cast<const void*>(stream),
+        return intercept_runtime_kernel_launch(
+            "cudaLaunchKernel_ptsz", is_reentrant, grid_dim, block_dim, shared_memory_bytes, stream,
+            [real_launch, function, grid_dim, block_dim, arguments, shared_memory_bytes, stream] {
+                return real_launch(function, grid_dim, block_dim, arguments, shared_memory_bytes,
+                                   stream);
             });
-        }
-        return result;
     } catch (...) {
         return cudaErrorUnknown;
     }
@@ -1807,37 +1844,12 @@ extern "C" cudaError_t CUDARTAPI __cudaLaunchKernel(cudaKernel_t kernel, dim3 gr
         if (real_launch == nullptr) {
             return cudaErrorNotSupported;
         }
-        std::optional<glimmer::core::TaskId> launch_task;
-        if (!is_reentrant && glimmer::interceptor::launch_scheduling_is_enforced()) {
-            launch_task = glimmer::interceptor::acquire_launch_slot();
-            if (!launch_task.has_value()) {
-                return cudaErrorNotSupported;
-            }
-        }
-        const cudaError_t result =
-            real_launch(kernel, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
-        if (launch_task.has_value() && result != cudaSuccess) {
-            glimmer::interceptor::fail_launch_slot(launch_task.value());
-        }
-        if (launch_task.has_value() && result == cudaSuccess &&
-            !glimmer::interceptor::track_launch_completion(launch_task.value(),
-                                                           reinterpret_cast<CUstream>(stream))) {
-            return cudaErrorUnknown;
-        }
-        if (!is_reentrant && result == cudaSuccess) {
-            glimmer::interceptor::report_kernel_launch_observed({
-                .api_name = "__cudaLaunchKernel",
-                .grid_dim_x = grid_dim.x,
-                .grid_dim_y = grid_dim.y,
-                .grid_dim_z = grid_dim.z,
-                .block_dim_x = block_dim.x,
-                .block_dim_y = block_dim.y,
-                .block_dim_z = block_dim.z,
-                .shared_memory_bytes = shared_memory_bytes,
-                .stream = reinterpret_cast<const void*>(stream),
+        return intercept_runtime_kernel_launch(
+            "__cudaLaunchKernel", is_reentrant, grid_dim, block_dim, shared_memory_bytes, stream,
+            [real_launch, kernel, grid_dim, block_dim, arguments, shared_memory_bytes, stream] {
+                return real_launch(kernel, grid_dim, block_dim, arguments, shared_memory_bytes,
+                                   stream);
             });
-        }
-        return result;
     } catch (...) {
         return cudaErrorUnknown;
     }
@@ -1855,37 +1867,13 @@ extern "C" cudaError_t CUDARTAPI __cudaLaunchKernel_ptsz(cudaKernel_t kernel, di
         if (real_launch == nullptr) {
             return cudaErrorNotSupported;
         }
-        std::optional<glimmer::core::TaskId> launch_task;
-        if (!is_reentrant && glimmer::interceptor::launch_scheduling_is_enforced()) {
-            launch_task = glimmer::interceptor::acquire_launch_slot();
-            if (!launch_task.has_value()) {
-                return cudaErrorNotSupported;
-            }
-        }
-        const cudaError_t result =
-            real_launch(kernel, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
-        if (launch_task.has_value() && result != cudaSuccess) {
-            glimmer::interceptor::fail_launch_slot(launch_task.value());
-        }
-        if (launch_task.has_value() && result == cudaSuccess &&
-            !glimmer::interceptor::track_launch_completion(launch_task.value(),
-                                                           reinterpret_cast<CUstream>(stream))) {
-            return cudaErrorUnknown;
-        }
-        if (!is_reentrant && result == cudaSuccess) {
-            glimmer::interceptor::report_kernel_launch_observed({
-                .api_name = "__cudaLaunchKernel_ptsz",
-                .grid_dim_x = grid_dim.x,
-                .grid_dim_y = grid_dim.y,
-                .grid_dim_z = grid_dim.z,
-                .block_dim_x = block_dim.x,
-                .block_dim_y = block_dim.y,
-                .block_dim_z = block_dim.z,
-                .shared_memory_bytes = shared_memory_bytes,
-                .stream = reinterpret_cast<const void*>(stream),
+        return intercept_runtime_kernel_launch(
+            "__cudaLaunchKernel_ptsz", is_reentrant, grid_dim, block_dim, shared_memory_bytes,
+            stream,
+            [real_launch, kernel, grid_dim, block_dim, arguments, shared_memory_bytes, stream] {
+                return real_launch(kernel, grid_dim, block_dim, arguments, shared_memory_bytes,
+                                   stream);
             });
-        }
-        return result;
     } catch (...) {
         return cudaErrorUnknown;
     }

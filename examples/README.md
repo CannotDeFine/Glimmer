@@ -13,6 +13,7 @@ not throughput benchmarks.
 | --- | --- |
 | `cuda_workloads/` | Real-GPU CUDA Runtime workload matrix containing the synchronous baseline plus asynchronous/pool, managed, pitched, and multi-stream paths. |
 | `priority_demo/` | Transparent mixed-load demonstration with high-priority inference and low-priority training CUDA processes. |
+| `framework_workloads/` | Optional framework-level workloads, currently a PyTorch CUDA MLP smoke test that runs outside the CMake build. |
 | `cuda_task_backend/` | Explicit Driver-API task-boundary demo that submits PTX kernels through the scheduler-controlled CUDA backend. |
 
 ## CUDA workloads
@@ -40,3 +41,15 @@ completion.
 The workload programs are built by the `cuda-gpu` preset and are registered as
 optional GPU tests when CUDA hardware testing is enabled. Do not commit build
 directories or temporary CSV files.
+
+## Framework workloads
+
+`framework_workloads/` contains programs that exercise Glimmer from the point
+of view of a real framework. They are intentionally outside the core CMake
+build because the framework installation belongs to the host environment. The
+PyTorch smoke workload compares native, observe, and enforce modes and reports
+latency distributions, throughput, memory peak, and framework/CUDA versions.
+Its synchronized co-location runner starts real inference and training
+processes together and verifies the physical GPU UUID and positive execution
+overlap before reporting a priority result.
+See [`framework_workloads/pytorch_smoke/README.md`](framework_workloads/pytorch_smoke/README.md).

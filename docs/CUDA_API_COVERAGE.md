@@ -96,7 +96,7 @@ The interceptor must cover each supported path before claiming compatibility.
 | `dlsym` | Return a supported wrapper when a CUDA Driver allocation, release, VMM handle, kernel launch, stream identity, or query symbol is requested. Delegate all other symbols to the real resolver. | M2/M3 (implemented) | A preload fixture resolves supported PTDS, kernel-launch, and VMM symbols and verifies delegation for an unsupported symbol. |
 | `cuGetProcAddress` and `cuGetProcAddress_v2` | Return a supported wrapper for requested CUDA Driver APIs and versions. Delegate unsupported requests unchanged. | M2 (implemented) | A CUDA integration test resolves and calls `cuMemGetInfo` through the versioned API and verifies an unsupported request. |
 | CUDA Runtime interception | Wrap synchronous allocation/free (`cudaMalloc`, `cudaMallocManaged`, `cudaMallocPitch`, `cudaMalloc3D`) and stream-ordered allocation/free APIs, including `cudaMallocFromPoolAsync`/`cudaMallocFromPoolAsync_ptsz`, completion boundaries, memory-pool lifecycle/query APIs, and memory-pool import/export APIs. Runtime calls use a reentrancy guard; allocation bytes are independently accounted through the shared registry, while imported pool handles/pointers are rejected when quota mode is enabled. | M2/M3 (implemented) | Fake Runtime and CUDA integration tests plus the real workload matrix for synchronous, stream-ordered, managed, pitched, multi-stream, and memory-pool Runtime calls. |
-| CUDA kernel launch scheduling | Forward `cuLaunchKernel`, `cuLaunchKernel_ptsz`, `cudaLaunchKernel`, `cudaLaunchKernel_ptsz`, `__cudaLaunchKernel`, and `__cudaLaunchKernel_ptsz` with their exact ABIs and preserve the caller's launch arguments. In `observe` mode, emit an allocation-free boundary diagnostic after a successful launch. In `enforce` mode, block at the call boundary until the process-local gate or opt-in control-plane launch lease admits the call, then record a Driver event on the same stream and release the slot after that event completes. Missing event support rejects admission with `CUDA_ERROR_NOT_SUPPORTED`; a post-launch event-recording failure returns `CUDA_ERROR_UNKNOWN` after failing the lease. The control-plane path coordinates processes but still does not preempt running kernels or capture graph/cooperative launches. | M4 partial | Dispatch, symbol-registry, fake enforce/observe tests, real GPU Driver-PTX and Runtime-compiled workloads, and no-GPU remote lease process tests. |
+| CUDA kernel launch scheduling | Forward `cuLaunchKernel`, `cuLaunchKernel_ptsz`, `cudaLaunchKernel`, `cudaLaunchKernel_ptsz`, `__cudaLaunchKernel`, and `__cudaLaunchKernel_ptsz` with their exact ABIs and preserve the caller's launch arguments. In `observe` mode, emit an allocation-free boundary diagnostic after a successful launch. In `enforce` mode, block at the call boundary until the process-local gate or opt-in control-plane launch lease admits the call, then record a Driver event on the same stream and release the slot after the final event belonging to that lease completes. Missing event support rejects admission with `CUDA_ERROR_NOT_SUPPORTED`; a post-launch event-recording failure returns `CUDA_ERROR_UNKNOWN` after failing the lease. The control-plane path coordinates processes but still does not preempt running kernels or capture graph/cooperative launches. | M4 partial | Dispatch, symbol-registry, fake enforce/observe tests, real GPU Driver-PTX and Runtime-compiled workloads, and no-GPU remote lease process tests. |
 
 `cuInit` is also wrapped as an initialization safety boundary. It does not
 make an accounting decision; it establishes the Driver-call guard so that
@@ -105,6 +105,15 @@ Driver-internal `dlsym` requests are delegated to the real resolver.
 When `GLIMMER_SCHEDULER_MODE=enforce`, the launch wrappers use
 `control::LaunchGate`. `GLIMMER_MAX_CONCURRENT_KERNELS` sets the number of
 admitted launches (default `1`) in local mode, and
+`GLIMMER_SCHEDULER_BATCH_SIZE` optionally groups consecutive launches within a
+process under a single admitted lease (default `1`). Launches from multiple
+host threads may contribute to the same process-local batch. The batch is closed
+only after its final successfully tracked launch; failures fail the batch and
+release its lease after already-recorded events reach a terminal state. Batching
+is a scheduling-granularity optimization, not a CUDA stream or memory batch.
+Use `1` for latency-sensitive inference and a larger value only for measured
+throughput-oriented workloads. In remote mode, the batch reduces control-plane
+round trips while preserving one global lease per batch.
 `GLIMMER_SCHEDULER_POLICY` selects `weighted_rr` (the default), `drr`, `fifo`,
 or `priority`. Under the priority policy, the trusted launcher may set
 `GLIMMER_SCHEDULER_PRIORITY`; larger values run first and equal values retain
@@ -356,6 +365,13 @@ launches through the interceptor's allocation-free diagnostic path. Set
 API, dimensions, shared-memory size, stream, and process-local sequence number.
 Set `GLIMMER_TRACE_MEMORY_INFO=1` to report the virtualized memory view returned
 by the CUDA memory-information APIs.
+
+Set `GLIMMER_TRACE_LAUNCH_TIMINGS=1` to report allocation-free launch-path
+timings. Each launch record includes admission and transport duration, claim
+polls, the real CUDA launch duration, and event-tracking duration. A separate
+completion record reports the lease-release duration and transport cost. The
+records are opt-in diagnostics rather than a stable metrics format and do not
+change scheduling behavior.
 
 With `GLIMMER_SCHEDULER_MODE=enforce`, the process-local launch gate blocks a
 caller before forwarding when the configured in-flight capacity is full. A

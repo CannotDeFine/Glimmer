@@ -96,6 +96,35 @@ void test_submit_query_cancel_lifecycle() {
     expect(scheduler.usage().used_bytes() == 0, "cancel should release the reservation");
 }
 
+void test_endpoint_acquire_fast_path_and_queue_fallback() {
+    Scheduler scheduler(100, glimmer::core::SchedulerOptions{.max_running_tasks = 1});
+    TaskAdmissionService service(scheduler);
+    RegistrarState registrar_state;
+    TaskControlEndpoint endpoint(service, register_resource, &registrar_state);
+
+    const auto first = response_from(endpoint, "GLIMMER_TASK_V1 ACQUIRE tenant-a 20 1 1");
+    expect(first.kind == TaskProtocolResponseKind::kLease && first.task_id != 0,
+           "acquire should return a lease when a slot is immediately available");
+    const auto second = response_from(endpoint, "GLIMMER_TASK_V1 ACQUIRE tenant-b 20 1 1");
+    expect(second.kind == TaskProtocolResponseKind::kAccepted && second.task_id != 0,
+           "acquire should return an accepted queued task when the slot is occupied");
+    expect(registrar_state.calls == 2, "acquire should register both tasks exactly once");
+
+    expect(response_from(endpoint, "GLIMMER_TASK_V1 COMPLETE " + std::to_string(first.task_id))
+                   .state == TaskProtocolState::kCompleted,
+           "the immediate acquire lease should complete");
+    const auto queued_lease =
+        response_from(endpoint, "GLIMMER_TASK_V1 CLAIM " + std::to_string(second.task_id));
+    expect(queued_lease.kind == TaskProtocolResponseKind::kLease &&
+               queued_lease.task_id == second.task_id,
+           "the queued acquire task should remain claimable by task id");
+    expect(response_from(endpoint, "GLIMMER_TASK_V1 COMPLETE " + std::to_string(second.task_id))
+                   .state == TaskProtocolState::kCompleted,
+           "the queued acquire task should complete after its claim");
+    expect(scheduler.usage().used_bytes() == 0,
+           "acquire completion should release all scheduler quota");
+}
+
 void test_rejection_and_unknown_task() {
     Scheduler scheduler(10);
     TaskAdmissionService service(scheduler);
@@ -491,6 +520,7 @@ void test_endpoint_binds_lease_to_peer_process() {
 
 int main() {
     test_submit_query_cancel_lifecycle();
+    test_endpoint_acquire_fast_path_and_queue_fallback();
     test_rejection_and_unknown_task();
     test_endpoint_reports_queue_backpressure();
     test_endpoint_priority_claim_order();

@@ -75,6 +75,10 @@ if(GLIMMER_CLANG_FORMAT)
         "${PROJECT_SOURCE_DIR}/tests/*.cu"
     )
 
+    # Examples may contain ignored framework environments and generated output.
+    # They are external artifacts, not Glimmer sources, and must not be linted.
+    list(FILTER GLIMMER_FORMAT_SOURCES EXCLUDE REGEX "/(\\.venv|output|build)/")
+
     if(GLIMMER_FORMAT_SOURCES)
         add_custom_target(format
             COMMAND ${GLIMMER_CLANG_FORMAT} -i ${GLIMMER_FORMAT_SOURCES}

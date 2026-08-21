@@ -43,12 +43,24 @@ int run_worker(const char* socket_path, const char* tenant_id) {
         .control_socket = socket_path == nullptr ? "" : socket_path,
         .remote_acquire_timeout = std::chrono::seconds{2},
         .remote_poll_interval = std::chrono::milliseconds{2}});
-    const auto lease = gate.acquire(std::chrono::seconds{2});
+    glimmer::control::LaunchGateTiming acquire_timing;
+    const auto lease = gate.acquire(std::chrono::seconds{2}, &acquire_timing);
     if (!lease.has_value()) {
         return EXIT_FAILURE;
     }
+    if (!acquire_timing.remote || acquire_timing.request_count == 0 ||
+        acquire_timing.transport_nanoseconds == 0) {
+        return EXIT_FAILURE;
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds{100});
-    return gate.complete(lease.value()) ? EXIT_SUCCESS : EXIT_FAILURE;
+    glimmer::control::LaunchGateTiming completion_timing;
+    if (!gate.complete(lease.value(), &completion_timing)) {
+        return EXIT_FAILURE;
+    }
+    return completion_timing.remote && completion_timing.request_count == 1 &&
+                   completion_timing.transport_nanoseconds != 0
+               ? EXIT_SUCCESS
+               : EXIT_FAILURE;
 }
 
 pid_t start_service(const std::string& executable, const std::string& socket_path) {

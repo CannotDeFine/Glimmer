@@ -3,6 +3,7 @@
 #include "glimmer/control/task_protocol.h"
 
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <poll.h>
@@ -13,6 +14,31 @@
 
 namespace glimmer::control {
 namespace {
+
+class RequestTimingScope final {
+   public:
+    explicit RequestTimingScope(ControlRequestTiming* timing) noexcept
+        : timing_(timing), started_(timing == nullptr ? Clock::time_point{} : Clock::now()) {}
+
+    RequestTimingScope(const RequestTimingScope&) = delete;
+    RequestTimingScope& operator=(const RequestTimingScope&) = delete;
+
+    ~RequestTimingScope() noexcept {
+        if (timing_ != nullptr) {
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - started_);
+            timing_->elapsed_nanoseconds = elapsed.count() < 0
+                                               ? std::uint64_t{0}
+                                               : static_cast<std::uint64_t>(elapsed.count());
+        }
+    }
+
+   private:
+    using Clock = std::chrono::steady_clock;
+
+    ControlRequestTiming* timing_ = nullptr;
+    Clock::time_point started_{};
+};
 
 constexpr std::uint32_t kMaxIoTimeoutMs = 60'000;
 
@@ -125,7 +151,9 @@ UnixSocketControlClient::UnixSocketControlClient(std::string socket_path,
                                                  std::uint32_t io_timeout_ms) noexcept
     : socket_path_(std::move(socket_path)), io_timeout_ms_(io_timeout_ms) {}
 
-std::optional<std::string> UnixSocketControlClient::request(std::string_view line) const noexcept {
+std::optional<std::string> UnixSocketControlClient::request(
+    std::string_view line, ControlRequestTiming* timing) const noexcept {
+    const RequestTimingScope timing_scope(timing);
     if (io_timeout_ms_ == 0 || io_timeout_ms_ > kMaxIoTimeoutMs || line.empty() ||
         line.back() != '\n' || line.size() > kTaskProtocolMaxLineBytes) {
         return std::nullopt;

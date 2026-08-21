@@ -47,8 +47,12 @@ int main() {
     }
 
     if (workload_succeeded) {
-        write_value<<<1, 1>>>(device_output);
-        workload_succeeded = check(cudaGetLastError(), "kernel launch") && workload_succeeded;
+        const int launch_count = std::getenv("GLIMMER_TEST_BATCHED") == nullptr ? 1 : 2;
+        for (int launch_index = 0; launch_index < launch_count && workload_succeeded;
+             ++launch_index) {
+            write_value<<<1, 1>>>(device_output);
+            workload_succeeded = check(cudaGetLastError(), "kernel launch") && workload_succeeded;
+        }
         workload_succeeded =
             check(cudaDeviceSynchronize(), "cudaDeviceSynchronize") && workload_succeeded;
     }

@@ -75,6 +75,22 @@ void test_request_round_trip() {
                parsed_explicit_zero.request->admission.priority == 0,
            "explicit zero priority should remain valid");
 
+    const TaskProtocolRequest acquire{.operation = TaskProtocolOperation::kAcquire,
+                                      .admission = {.tenant_id = "tenant-a_1",
+                                                    .memory_bytes = 1048576,
+                                                    .weight = 2,
+                                                    .work_units = 3,
+                                                    .priority = 7}};
+    const auto acquire_text = format_task_protocol_request(acquire);
+    expect(acquire_text.has_value() &&
+               acquire_text.value_or("") == "GLIMMER_TASK_V1 ACQUIRE tenant-a_1 1048576 2 3 7\n",
+           "acquire should format canonically");
+    const auto parsed_acquire = parse_task_protocol_request(acquire_text.value_or(""));
+    expect(parsed_acquire.parsed() && parsed_acquire.request.has_value() &&
+               parsed_acquire.request->operation == TaskProtocolOperation::kAcquire &&
+               parsed_acquire.request->admission.priority == 7,
+           "acquire should round trip through the protocol");
+
     for (const TaskProtocolOperation operation :
          {TaskProtocolOperation::kCancel, TaskProtocolOperation::kQuery,
           TaskProtocolOperation::kHeartbeat, TaskProtocolOperation::kComplete,

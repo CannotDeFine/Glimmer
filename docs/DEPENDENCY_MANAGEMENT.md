@@ -40,6 +40,17 @@ CUDA installation while avoiding recursive Driver-internal lookups. CUDA
 integration tests must state the Toolkit, Driver, and loader layout they
 exercise when the layout is non-standard.
 
+## Optional framework workload dependencies
+
+The framework workload examples may use a framework installed by the user, for
+example a CUDA-enabled PyTorch installation. These are optional runtime test
+dependencies, not Glimmer build dependencies: they are not vendored, fetched
+by CMake, or linked into the interceptor. The example records pinned wheel
+requirements and creates an ignored local virtual environment beside the
+example when explicitly requested by the user. It reports the framework and
+CUDA versions it exercises. Compatibility results are scoped to that
+environment and must not be presented as universal framework support.
+
 ## Introducing a dependency
 
 Before adding one, document:

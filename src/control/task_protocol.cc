@@ -199,13 +199,14 @@ TaskProtocolRequestParseResult parse_task_protocol_request(std::string_view line
         }
 
         TaskProtocolRequest request;
-        if (tokens.values[1] == "SUBMIT") {
+        if (tokens.values[1] == "SUBMIT" || tokens.values[1] == "ACQUIRE") {
             if ((tokens.count != 6 && tokens.count != 7) || !is_valid_tenant_id(tokens.values[2])) {
                 return request_error(tokens.count == 6 || tokens.count == 7
                                          ? TaskProtocolParseError::kInvalidTenant
                                          : TaskProtocolParseError::kMalformed);
             }
-            request.operation = TaskProtocolOperation::kSubmit;
+            request.operation = tokens.values[1] == "SUBMIT" ? TaskProtocolOperation::kSubmit
+                                                             : TaskProtocolOperation::kAcquire;
             request.admission.tenant_id = std::string(tokens.values[2]);
             if (!parse_positive_integer(tokens.values[3], &request.admission.memory_bytes) ||
                 !parse_positive_integer(tokens.values[4], &request.admission.weight) ||
@@ -277,18 +278,22 @@ TaskProtocolRequestParseResult parse_task_protocol_request(std::string_view line
 
 std::optional<std::string> format_task_protocol_request(const TaskProtocolRequest& request) {
     std::optional<std::string> formatted;
-    if (request.operation == TaskProtocolOperation::kSubmit) {
+    if (request.operation == TaskProtocolOperation::kSubmit ||
+        request.operation == TaskProtocolOperation::kAcquire) {
         if (!is_valid_tenant_id(request.admission.tenant_id) ||
             request.admission.memory_bytes == 0 || request.admission.weight == 0 ||
             request.admission.work_units == 0) {
             return std::nullopt;
         }
-        formatted = std::string(kTaskProtocolVersion) + " SUBMIT " + request.admission.tenant_id +
-                    " " + std::to_string(request.admission.memory_bytes) + " " +
+        const std::string_view operation =
+            request.operation == TaskProtocolOperation::kSubmit ? "SUBMIT" : "ACQUIRE";
+        formatted = std::string(kTaskProtocolVersion) + " " + std::string(operation) + " " +
+                    request.admission.tenant_id + " " +
+                    std::to_string(request.admission.memory_bytes) + " " +
                     std::to_string(request.admission.weight) + " " +
                     std::to_string(request.admission.work_units) + "\n";
         if (request.admission.priority != 0) {
-            formatted = std::string(kTaskProtocolVersion) + " SUBMIT " +
+            formatted = std::string(kTaskProtocolVersion) + " " + std::string(operation) + " " +
                         request.admission.tenant_id + " " +
                         std::to_string(request.admission.memory_bytes) + " " +
                         std::to_string(request.admission.weight) + " " +

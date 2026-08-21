@@ -41,7 +41,7 @@ concrete responsibility and a testable interface.
 | `control` | `include/glimmer/control/`, `src/control/` | Defines the quota-store contract, adapts process-local quota requests to `core`, provides transactional explicit-task admission with backend-registration rollback, composes aggregate, task, and physical-device capacity quotas, implements the Linux shared-memory tenant accounting store, provides authenticated Unix-socket server/client transport adapters, coordinates optional cross-process transparent launch leases, and exposes bounded read-only scheduler/quota stats and latency snapshots. It computes tenant/task/device-visible memory information and has no CUDA or dynamic-linker dependencies. |
 | `app` | `src/control_service_main.cc`, `src/control_client_main.cc` | Provides standalone control-service/client entry points. The service supports deterministic simulated execution and remote worker leases; neither binary serializes or owns CUDA resources. |
 | `interceptor` | `src/interceptor/` and `src/interceptor/internal/` | Provides ABI-compatible wrappers for covered CUDA Driver, PTDS stream-ordered Driver, CUDA kernel-launch, Runtime, memory-pool, IPC, external-memory, array, graphics, and graph-memory APIs, routes supported symbol lookups, and owns process-local allocation metadata while using `control` for quota decisions. Accounted allocations update the ledger; APIs whose ownership or byte lifetime cannot be reconstructed are explicitly fail-closed under quota and delegated when quota is disabled. Observe mode forwards launches and emits a sampled boundary diagnostic; enforce mode admits covered launches through a process-local `control::LaunchGate`, or an opt-in authenticated Unix-socket launch lease, and releases the slot after an internal CUDA event completes. Neither path provides kernel preemption. The `internal/` headers are private implementation interfaces and are not public project headers. |
-| `examples` | `examples/` | Contains independent real-GPU CUDA workload harnesses and the opt-in `cuda_task_backend/` demonstration. Each directory owns its source and generated artifacts; examples do not modify transparent interception behavior or define scheduler policy. |
+| `examples` | `examples/` | Contains independent real-GPU CUDA workload harnesses, optional framework workload programs, and the opt-in `cuda_task_backend/` demonstration. Each directory owns its source and generated artifacts; examples do not modify transparent interception behavior or define scheduler policy. |
 
 `control::CompositeQuota` is the isolation boundary used when a shared tenant
 has a narrower per-process task limit. It admits, commits, cancels, releases,
@@ -63,8 +63,8 @@ The interceptor is split into focused implementation units:
 | `symbol_interceptor.cc` | `dlsym` interception, caller classification, and safe delegation to the real loader. |
 | `symbol_registry.cc` | The single registry of exported aliases used by `dlsym` and `cuGetProcAddress`. |
 | `internal/allocation_registry.cc` | Process-local allocation metadata, release state, and deferred stream completion. |
-| `launch_completion_tracker.cc` | Records a Driver event after an admitted launch and completes or fails the corresponding process-local launch lease from a monitor thread. |
-| `internal/diagnostics.cc` | Allocation-free diagnostics for loader and accounting failure paths, plus opt-in structured kernel-launch and virtualized memory-view observations. |
+| `launch_completion_tracker.cc` | Records a Driver event after each admitted launch, drains batched events, and completes or fails the corresponding process-local launch lease from a monitor thread. |
+| `internal/diagnostics.cc` | Allocation-free diagnostics for loader and accounting failure paths, plus opt-in structured kernel-launch, virtualized memory-view, and launch-path timing observations. |
 
 ## Dependency direction
 
@@ -125,10 +125,14 @@ owning targets and tests.
 - `control::UnixSocketControlServer` is the first Linux transport adapter. It
   authenticates `SO_PEERCRED`, bounds and times out one request per connection,
   and delegates all semantics to the endpoint; it does not own CUDA resources.
-- In remote execution mode, `CLAIM` performs the scheduler dispatch transition
-  and returns only logical task metadata. Up to the configured concurrency
-  limit may run at once. A worker must report `COMPLETE` or `FAIL`; the service
-  retains the reservation while the lease is running.
+- In remote execution mode, `ACQUIRE` combines submission with an immediate
+  task-specific claim when a scheduler slot is available. If the task is
+  queued, it returns the accepted task id and the worker polls `CLAIM` for
+  that id. This removes one control-plane round trip from the uncontended
+  launch path while preserving the versioned `SUBMIT`/`CLAIM` operations for
+  explicit clients. Up to the configured concurrency limit may run at once. A
+  worker must report `COMPLETE` or `FAIL`; the service retains the reservation
+  while the lease is running.
 - When a lease timeout is configured, workers renew running leases with
   `HEARTBEAT`; the service reaps an unrenewed lease as `FAILED` and releases its
   reservation. With timeout disabled, a running lease remains visible until an
@@ -154,11 +158,24 @@ owning targets and tests.
   event recorded on the same stream releases the slot after the work reaches
   that event. Event support is required; an unavailable event path fails
   closed rather than forwarding an unenforced launch.
-- With `GLIMMER_SCHEDULER_CONTROL_SOCKET`, the same gate submits a one-unit
-  task and polls a task-specific control-plane claim. The service applies the
-  global policy and may bind the lease to the requesting process identity.
-  Completion and failure are reported over the same protocol. A missing or
-  failed remote lease fails the launch closed.
+- With `GLIMMER_SCHEDULER_CONTROL_SOCKET`, the same gate uses a one-unit
+  `ACQUIRE` request and polls a task-specific `CLAIM` only when the first
+  request is queued. The service applies the global policy and may bind the
+  lease to the requesting process identity. Completion and failure are
+  reported over the same protocol. A missing or failed remote lease fails the
+  launch closed.
+- `GLIMMER_SCHEDULER_BATCH_SIZE` may group consecutive covered launches within a
+  process under one lease, including launches from multiple host threads. The
+  completion tracker records one event per launch and closes the lease only
+  after every acquired call has tracked its event; any launch or event error
+  fails the entire batch. This reduces remote transport
+  overhead without moving CUDA handles across processes. The default batch
+  size is one, and batching must not be presented as kernel preemption or a
+  memory-isolation boundary.
+- `GLIMMER_TRACE_LAUNCH_TIMINGS=1` enables an allocation-free diagnostic path
+  that measures launch admission, remote request transport, claim polling,
+  CUDA forwarding, event tracking, and completion reporting. It is disabled by
+  default and does not alter admission, scheduling, or completion behavior.
 - Transparent launch admission remains a task-boundary mechanism: it does not
   preempt a running kernel or capture CUDA graph/cooperative-launch state.
 

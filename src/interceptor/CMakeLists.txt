@@ -219,6 +219,16 @@ if(BUILD_TESTING)
         ENVIRONMENT
             "GLIMMER_MEMORY_LIMIT_BYTES=4096;GLIMMER_SCHEDULER_MODE=enforce;GLIMMER_MAX_CONCURRENT_KERNELS=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
     )
+
+    add_test(NAME glimmer_cuda_interceptor_batched_enforce_fake_driver_test
+        COMMAND glimmer_cuda_interceptor_fake_driver_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_batched_enforce_fake_driver_test PROPERTIES
+        ENVIRONMENT
+            "GLIMMER_MEMORY_LIMIT_BYTES=4096;GLIMMER_SCHEDULER_MODE=enforce;GLIMMER_MAX_CONCURRENT_KERNELS=1;GLIMMER_SCHEDULER_BATCH_SIZE=2;GLIMMER_TRACE_LAUNCH_TIMINGS=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
+        PASS_REGULAR_EXPRESSION
+            "lease_reused=1"
+    )
     set_tests_properties(glimmer_cuda_interceptor_observe_fake_driver_test PROPERTIES
         ENVIRONMENT
             "GLIMMER_MEMORY_LIMIT_BYTES=4096;GLIMMER_SCHEDULER_MODE=observe;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
@@ -246,6 +256,16 @@ if(BUILD_TESTING)
             "GLIMMER_MEMORY_LIMIT_BYTES=4096;GLIMMER_TRACE_MEMORY_INFO=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
         PASS_REGULAR_EXPRESSION
             "memory info api=cudaMemGetInfo device=0 total_bytes=4096 used_bytes=1024 free_bytes=3072"
+    )
+
+    add_test(NAME glimmer_cuda_interceptor_trace_launch_timing_fake_driver_test
+        COMMAND glimmer_cuda_interceptor_fake_driver_test
+    )
+    set_tests_properties(glimmer_cuda_interceptor_trace_launch_timing_fake_driver_test PROPERTIES
+        ENVIRONMENT
+            "GLIMMER_MEMORY_LIMIT_BYTES=4096;GLIMMER_SCHEDULER_MODE=enforce;GLIMMER_MAX_CONCURRENT_KERNELS=1;GLIMMER_TRACE_LAUNCH_TIMINGS=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
+        PASS_REGULAR_EXPRESSION
+            "launch timing task=1 remote=0 .*cuda_status=0 event_tracking=1"
     )
 
     add_executable(glimmer_cuda_interceptor_nvml_passthrough_test
@@ -505,6 +525,15 @@ if(BUILD_TESTING)
         set_tests_properties(glimmer_cuda_interceptor_runtime_kernel_enforce_gpu_test PROPERTIES
             ENVIRONMENT
                 "GLIMMER_MEMORY_LIMIT_BYTES=8388608;GLIMMER_SCHEDULER_MODE=enforce;GLIMMER_MAX_CONCURRENT_KERNELS=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>"
+            TIMEOUT 60
+        )
+
+        add_test(NAME glimmer_cuda_interceptor_runtime_kernel_batched_enforce_gpu_test
+            COMMAND glimmer_cuda_interceptor_runtime_kernel_gpu_test
+        )
+        set_tests_properties(glimmer_cuda_interceptor_runtime_kernel_batched_enforce_gpu_test PROPERTIES
+            ENVIRONMENT
+                "GLIMMER_MEMORY_LIMIT_BYTES=8388608;GLIMMER_SCHEDULER_MODE=enforce;GLIMMER_MAX_CONCURRENT_KERNELS=1;GLIMMER_SCHEDULER_BATCH_SIZE=2;GLIMMER_TEST_BATCHED=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>"
             TIMEOUT 60
         )
 

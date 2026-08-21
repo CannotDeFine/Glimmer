@@ -59,6 +59,18 @@ namespace {
             .stats = {}};
 }
 
+[[nodiscard]] TaskProtocolResponse accepted_response(core::TaskId task_id) noexcept {
+    return {.kind = TaskProtocolResponseKind::kAccepted,
+            .task_id = task_id,
+            .state = TaskProtocolState::kQueued,
+            .error = TaskProtocolErrorCode::kInternalError,
+            .tenant_id = {},
+            .memory_bytes = 0,
+            .weight = 0,
+            .work_units = 0,
+            .stats = {}};
+}
+
 [[nodiscard]] TaskProtocolResponse stats_response(const core::SchedulerStats& stats,
                                                   bool include_metrics) {
     return {
@@ -158,15 +170,24 @@ std::optional<std::string> TaskControlEndpoint::handle(
                 if (!result.accepted()) {
                     return format_response(error_response(admission_error(result.status)));
                 }
-                return format_response({.kind = TaskProtocolResponseKind::kAccepted,
-                                        .task_id = result.task_id,
-                                        .state = TaskProtocolState::kQueued,
-                                        .error = TaskProtocolErrorCode::kInternalError,
-                                        .tenant_id = {},
-                                        .memory_bytes = 0,
-                                        .weight = 0,
-                                        .work_units = 0,
-                                        .stats = {}});
+                return format_response(accepted_response(result.task_id));
+            }
+            case TaskProtocolOperation::kAcquire: {
+                const core::SubmitResult result = admission_service_.submit(
+                    request.admission, registrar_, registrar_context_, peer);
+                if (!result.accepted()) {
+                    return format_response(error_response(admission_error(result.status)));
+                }
+                const auto snapshot = admission_service_.claim(result.task_id, peer);
+                if (snapshot.has_value()) {
+                    return format_response(lease_response(snapshot.value()));
+                }
+                const auto current = admission_service_.find(result.task_id);
+                if (current.has_value() && current->state == core::TaskState::kQueued) {
+                    return format_response(accepted_response(result.task_id));
+                }
+                static_cast<void>(admission_service_.cancel(result.task_id));
+                return format_response(error_response(TaskProtocolErrorCode::kInternalError));
             }
             case TaskProtocolOperation::kCancel: {
                 if (admission_service_.cancel_queued(request.task_id)) {

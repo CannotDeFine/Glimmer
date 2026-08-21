@@ -27,6 +27,15 @@ struct LaunchGateOptions {
     std::chrono::milliseconds remote_poll_interval = std::chrono::milliseconds{2};
 };
 
+struct LaunchGateTiming {
+    bool remote = false;
+    bool lease_reused = false;
+    std::uint64_t elapsed_nanoseconds = 0;
+    std::uint64_t transport_nanoseconds = 0;
+    std::uint32_t request_count = 0;
+    std::uint32_t claim_poll_count = 0;
+};
+
 // A launch gate admits host-side launch calls at explicit scheduler boundaries.
 // It owns no CUDA state and releases a scheduler slot only after the caller
 // reports that the corresponding CUDA work reached a completion boundary.
@@ -43,11 +52,15 @@ class LaunchGate final {
     // for admission and returns no lease if it expires while the task remains
     // queued.
     [[nodiscard]] std::optional<core::TaskId> acquire(
-        std::chrono::milliseconds timeout = std::chrono::milliseconds::zero());
+        std::chrono::milliseconds timeout = std::chrono::milliseconds::zero(),
+        LaunchGateTiming* timing = nullptr);
     [[nodiscard]] bool heartbeat(core::TaskId task_id);
-    [[nodiscard]] bool complete(core::TaskId task_id);
-    [[nodiscard]] bool fail(core::TaskId task_id);
+    [[nodiscard]] bool complete(core::TaskId task_id, LaunchGateTiming* timing = nullptr);
+    [[nodiscard]] bool fail(core::TaskId task_id, LaunchGateTiming* timing = nullptr);
     [[nodiscard]] core::SchedulerStats stats() const;
+    [[nodiscard]] bool remote_mode() const noexcept {
+        return remote_mode_requested_;
+    }
 
    private:
     [[nodiscard]] bool pump_locked();

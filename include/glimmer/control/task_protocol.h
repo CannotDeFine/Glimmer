@@ -16,6 +16,9 @@ inline constexpr std::size_t kTaskProtocolMaxTenantIdBytes = 96;
 
 enum class TaskProtocolOperation : std::uint8_t {
     kSubmit,
+    // Submit a task and claim it immediately when a scheduler slot is free.
+    // A queued task is returned as ACCEPTED and can be claimed by task id.
+    kAcquire,
     kCancel,
     kQuery,
     kClaim,

@@ -5,3 +5,5 @@
 __pycache__/
 *.py[cod]
 /examples/priority_demo/output/
+/examples/framework_workloads/**/output/
+/examples/framework_workloads/**/.venv/

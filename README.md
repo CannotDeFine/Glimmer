@@ -109,6 +109,11 @@ For a reproducible mixed-load comparison between native CUDA execution and
 transparent priority scheduling, see
 [`examples/priority_demo/README.md`](examples/priority_demo/README.md).
 
+For an optional real-framework smoke test using public PyTorch CUDA APIs, see
+[`examples/framework_workloads/pytorch_smoke/README.md`](examples/framework_workloads/pytorch_smoke/README.md).
+It remains outside the CMake build because PyTorch is supplied by the host
+environment.
+
 Run the real Runtime workload matrix with the interceptor:
 
 ```sh
@@ -131,6 +136,14 @@ Add `GLIMMER_TRACE_MEMORY_INFO=1` to also print the virtualized total, used,
 and free memory together with the physical total and free bytes after each
 successful memory-information query.
 
+For enforce-mode launch-path timing, add `GLIMMER_TRACE_LAUNCH_TIMINGS=1`.
+The interceptor then prints one allocation-free diagnostic for each admitted
+or forwarded launch and one when its completion lease is released. The fields
+separate admission time, remote control transport time, claim-poll count,
+CUDA launch time, event tracking time, completion transport time, and whether
+the launch reused a batched lease. This is an opt-in diagnostic stream, not a
+stable metrics export.
+
 ### Transparent launch scheduling
 
 The preload library can also admit covered CUDA kernel launches through a
@@ -144,6 +157,7 @@ policy.
 ```sh
 env GLIMMER_SCHEDULER_MODE=enforce \
     GLIMMER_MAX_CONCURRENT_KERNELS=1 \
+    GLIMMER_SCHEDULER_BATCH_SIZE=1 \
     GLIMMER_SCHEDULER_POLICY=weighted_rr \
     GLIMMER_MEMORY_LIMIT_BYTES=8388608 \
     LD_PRELOAD="$PWD/build/cuda-gpu/lib/libglimmer_cuda_interceptor.so" \
@@ -161,7 +175,14 @@ CUDA graph launches. To coordinate multiple
 processes, set `GLIMMER_SCHEDULER_CONTROL_SOCKET` to a running remote control
 service socket. The gate then submits a task-specific lease before each
 covered launch, renews long-running leases while their events are pending, and
-reports completion after each CUDA event. Transport or lease failures fail the
+reports completion after the final CUDA event for that lease. Set
+`GLIMMER_SCHEDULER_BATCH_SIZE` to
+reuse one admitted lease for that many launches within the same process. The
+default is `1`, which gives the finest scheduling granularity. A larger value
+reduces control-plane overhead for throughput-oriented work but delays priority
+or fairness decisions by up to the batch size; keep latency-sensitive inference
+at `1`. A batch closes on its final successfully tracked launch, and any launch
+or event failure fails the whole batch. Transport or lease failures fail the
 launch closed; leaving the variable unset preserves the process-local default.
 
 ### Task-scoped memory isolation

@@ -1,11 +1,63 @@
 #include "glimmer/control/launch_gate.h"
 #include "glimmer/control/task_protocol.h"
 
+#include <chrono>
 #include <limits>
 #include <thread>
 #include <utility>
 
 namespace glimmer::control {
+
+namespace {
+
+class LaunchTimingScope final {
+   public:
+    explicit LaunchTimingScope(LaunchGateTiming* timing) noexcept
+        : timing_(timing), started_(timing == nullptr ? Clock::time_point{} : Clock::now()) {
+        if (timing_ != nullptr) {
+            *timing_ = {};
+        }
+    }
+
+    LaunchTimingScope(const LaunchTimingScope&) = delete;
+    LaunchTimingScope& operator=(const LaunchTimingScope&) = delete;
+
+    ~LaunchTimingScope() noexcept {
+        if (timing_ != nullptr) {
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - started_);
+            timing_->elapsed_nanoseconds = elapsed.count() < 0
+                                               ? std::uint64_t{0}
+                                               : static_cast<std::uint64_t>(elapsed.count());
+        }
+    }
+
+   private:
+    using Clock = std::chrono::steady_clock;
+
+    LaunchGateTiming* timing_ = nullptr;
+    Clock::time_point started_{};
+};
+
+void add_request_timing(LaunchGateTiming* timing, const ControlRequestTiming& request_timing,
+                        bool is_claim) noexcept {
+    if (timing == nullptr) {
+        return;
+    }
+    timing->transport_nanoseconds =
+        timing->transport_nanoseconds >
+                std::numeric_limits<std::uint64_t>::max() - request_timing.elapsed_nanoseconds
+            ? std::numeric_limits<std::uint64_t>::max()
+            : timing->transport_nanoseconds + request_timing.elapsed_nanoseconds;
+    if (timing->request_count != std::numeric_limits<std::uint32_t>::max()) {
+        ++timing->request_count;
+    }
+    if (is_claim && timing->claim_poll_count != std::numeric_limits<std::uint32_t>::max()) {
+        ++timing->claim_poll_count;
+    }
+}
+
+}  // namespace
 
 LaunchGate::LaunchGate(LaunchGateOptions options)
     : scheduler_(std::numeric_limits<core::MemoryBytes>::max(),
@@ -32,7 +84,12 @@ LaunchGate::LaunchGate(LaunchGateOptions options)
     }
 }
 
-std::optional<core::TaskId> LaunchGate::acquire(std::chrono::milliseconds timeout) {
+std::optional<core::TaskId> LaunchGate::acquire(std::chrono::milliseconds timeout,
+                                                LaunchGateTiming* timing) {
+    const LaunchTimingScope timing_scope(timing);
+    if (timing != nullptr) {
+        timing->remote = remote_mode_requested_;
+    }
     if (remote_mode_requested_) {
         if (remote_client_ == nullptr) {
             return std::nullopt;
@@ -42,33 +99,66 @@ std::optional<core::TaskId> LaunchGate::acquire(std::chrono::milliseconds timeou
         const auto deadline = effective_timeout == std::chrono::milliseconds::zero()
                                   ? std::chrono::steady_clock::time_point::max()
                                   : std::chrono::steady_clock::now() + effective_timeout;
-        const TaskProtocolRequest submit{.operation = TaskProtocolOperation::kSubmit,
-                                         .admission = {.tenant_id = tenant_id_,
-                                                       .memory_bytes = 1,
-                                                       .weight = tenant_weight_,
-                                                       .work_units = 1,
-                                                       .priority = task_priority_},
-                                         .task_id = 0};
-        const auto encoded_submit = format_task_protocol_request(submit);
-        if (!encoded_submit.has_value()) {
+        const TaskProtocolRequest acquire{.operation = TaskProtocolOperation::kAcquire,
+                                          .admission = {.tenant_id = tenant_id_,
+                                                        .memory_bytes = 1,
+                                                        .weight = tenant_weight_,
+                                                        .work_units = 1,
+                                                        .priority = task_priority_},
+                                          .task_id = 0};
+        const auto encoded_acquire = format_task_protocol_request(acquire);
+        if (!encoded_acquire.has_value()) {
             return std::nullopt;
         }
-        const auto submit_response = remote_client_->request(encoded_submit.value());
-        if (!submit_response.has_value()) {
+        ControlRequestTiming request_timing;
+        const auto acquire_response = remote_client_->request(
+            encoded_acquire.value(), timing == nullptr ? nullptr : &request_timing);
+        add_request_timing(timing, request_timing, false);
+        if (!acquire_response.has_value()) {
             return std::nullopt;
         }
-        const auto parsed_submit = parse_task_protocol_response(submit_response.value());
-        if (!parsed_submit.parsed() || !parsed_submit.response.has_value() ||
-            parsed_submit.response->kind != TaskProtocolResponseKind::kAccepted) {
+        auto parsed_acquire = parse_task_protocol_response(acquire_response.value());
+        if (parsed_acquire.parsed() && parsed_acquire.response.has_value() &&
+            parsed_acquire.response->kind == TaskProtocolResponseKind::kError &&
+            (parsed_acquire.response->error == TaskProtocolErrorCode::kInvalidRequest ||
+             parsed_acquire.response->error == TaskProtocolErrorCode::kUnsupportedVersion)) {
+            // Keep mixed-version deployments usable while the service is
+            // upgraded. Policy errors are not retried through this path.
+            const TaskProtocolRequest submit{.operation = TaskProtocolOperation::kSubmit,
+                                             .admission = acquire.admission,
+                                             .task_id = 0};
+            const auto encoded_submit = format_task_protocol_request(submit);
+            if (!encoded_submit.has_value()) {
+                return std::nullopt;
+            }
+            const auto submit_response = remote_client_->request(
+                encoded_submit.value(), timing == nullptr ? nullptr : &request_timing);
+            add_request_timing(timing, request_timing, false);
+            if (!submit_response.has_value()) {
+                return std::nullopt;
+            }
+            parsed_acquire = parse_task_protocol_response(submit_response.value());
+        }
+        if (!parsed_acquire.parsed() || !parsed_acquire.response.has_value()) {
             return std::nullopt;
         }
-        const core::TaskId task_id = parsed_submit.response->task_id;
-        const auto cancel_task = [this, task_id] {
+        if (parsed_acquire.response->kind == TaskProtocolResponseKind::kLease) {
+            return parsed_acquire.response->task_id;
+        }
+        if (parsed_acquire.response->kind != TaskProtocolResponseKind::kAccepted ||
+            parsed_acquire.response->task_id == 0) {
+            return std::nullopt;
+        }
+        const core::TaskId task_id = parsed_acquire.response->task_id;
+        const auto cancel_task = [this, task_id, timing] {
             const TaskProtocolRequest cancel{
                 .operation = TaskProtocolOperation::kCancel, .admission = {}, .task_id = task_id};
             const auto encoded_cancel = format_task_protocol_request(cancel);
             if (encoded_cancel.has_value()) {
-                static_cast<void>(remote_client_->request(encoded_cancel.value()));
+                ControlRequestTiming request_timing;
+                static_cast<void>(remote_client_->request(
+                    encoded_cancel.value(), timing == nullptr ? nullptr : &request_timing));
+                add_request_timing(timing, request_timing, false);
             }
         };
         const TaskProtocolRequest claim{
@@ -79,7 +169,9 @@ std::optional<core::TaskId> LaunchGate::acquire(std::chrono::milliseconds timeou
             return std::nullopt;
         }
         while (true) {
-            const auto claim_response = remote_client_->request(encoded_claim.value());
+            const auto claim_response = remote_client_->request(
+                encoded_claim.value(), timing == nullptr ? nullptr : &request_timing);
+            add_request_timing(timing, request_timing, true);
             if (!claim_response.has_value()) {
                 cancel_task();
                 return std::nullopt;
@@ -169,7 +261,11 @@ bool LaunchGate::heartbeat(core::TaskId task_id) {
     return state.has_value() && state.value() == core::TaskState::kRunning;
 }
 
-bool LaunchGate::complete(core::TaskId task_id) {
+bool LaunchGate::complete(core::TaskId task_id, LaunchGateTiming* timing) {
+    const LaunchTimingScope timing_scope(timing);
+    if (timing != nullptr) {
+        timing->remote = remote_mode_requested_;
+    }
     if (remote_mode_requested_) {
         if (remote_client_ == nullptr) {
             return false;
@@ -180,7 +276,10 @@ bool LaunchGate::complete(core::TaskId task_id) {
         if (!encoded.has_value()) {
             return false;
         }
-        const auto response = remote_client_->request(encoded.value());
+        ControlRequestTiming request_timing;
+        const auto response =
+            remote_client_->request(encoded.value(), timing == nullptr ? nullptr : &request_timing);
+        add_request_timing(timing, request_timing, false);
         if (!response.has_value()) {
             return false;
         }
@@ -194,7 +293,11 @@ bool LaunchGate::complete(core::TaskId task_id) {
     return finish_locked(task_id, core::TaskState::kCompleted);
 }
 
-bool LaunchGate::fail(core::TaskId task_id) {
+bool LaunchGate::fail(core::TaskId task_id, LaunchGateTiming* timing) {
+    const LaunchTimingScope timing_scope(timing);
+    if (timing != nullptr) {
+        timing->remote = remote_mode_requested_;
+    }
     if (remote_mode_requested_) {
         if (remote_client_ == nullptr) {
             return false;
@@ -205,7 +308,10 @@ bool LaunchGate::fail(core::TaskId task_id) {
         if (!encoded.has_value()) {
             return false;
         }
-        const auto response = remote_client_->request(encoded.value());
+        ControlRequestTiming request_timing;
+        const auto response =
+            remote_client_->request(encoded.value(), timing == nullptr ? nullptr : &request_timing);
+        add_request_timing(timing, request_timing, false);
         if (!response.has_value()) {
             return false;
         }

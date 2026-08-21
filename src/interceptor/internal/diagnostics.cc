@@ -117,4 +117,54 @@ void report_memory_info_diagnostic(const MemoryInfoObservation& observation) noe
     write_message(message, static_cast<std::size_t>(cursor - message));
 }
 
+void report_launch_timing_diagnostic(const LaunchTimingObservation& observation) noexcept {
+    char message[640]{};
+    char* cursor = message;
+    char* const end = message + sizeof(message);
+    cursor = append_text(cursor, end, "[glimmer] launch timing task=");
+    cursor = append_number(cursor, end, observation.task_id);
+    cursor = append_text(cursor, end, " remote=");
+    cursor = append_number(cursor, end, observation.remote ? 1U : 0U);
+    cursor = append_text(cursor, end, " lease_reused=");
+    cursor = append_number(cursor, end, observation.lease_reused ? 1U : 0U);
+    cursor = append_text(cursor, end, " acquire_ns=");
+    cursor = append_number(cursor, end, observation.acquire_nanoseconds);
+    cursor = append_text(cursor, end, " acquire_transport_ns=");
+    cursor = append_number(cursor, end, observation.acquire_transport_nanoseconds);
+    cursor = append_text(cursor, end, " acquire_requests=");
+    cursor = append_number(cursor, end, observation.acquire_request_count);
+    cursor = append_text(cursor, end, " claim_polls=");
+    cursor = append_number(cursor, end, observation.claim_poll_count);
+    cursor = append_text(cursor, end, " cuda_launch_ns=");
+    cursor = append_number(cursor, end, observation.cuda_launch_nanoseconds);
+    cursor = append_text(cursor, end, " event_tracking_ns=");
+    cursor = append_number(cursor, end, observation.event_tracking_nanoseconds);
+    cursor = append_text(cursor, end, " cuda_status=");
+    cursor = append_number(cursor, end, observation.cuda_launch_status);
+    cursor = append_text(cursor, end, " event_tracking=");
+    cursor = append_number(cursor, end, observation.event_tracking_succeeded ? 1U : 0U);
+    cursor = append_text(cursor, end, "\n");
+    write_message(message, static_cast<std::size_t>(cursor - message));
+}
+
+void report_launch_completion_diagnostic(const LaunchCompletionObservation& observation) noexcept {
+    char message[384]{};
+    char* cursor = message;
+    char* const end = message + sizeof(message);
+    cursor = append_text(cursor, end, "[glimmer] completion timing task=");
+    cursor = append_number(cursor, end, observation.task_id);
+    cursor = append_text(cursor, end, " remote=");
+    cursor = append_number(cursor, end, observation.remote ? 1U : 0U);
+    cursor = append_text(cursor, end, " completion_ns=");
+    cursor = append_number(cursor, end, observation.completion_nanoseconds);
+    cursor = append_text(cursor, end, " completion_transport_ns=");
+    cursor = append_number(cursor, end, observation.completion_transport_nanoseconds);
+    cursor = append_text(cursor, end, " completion_requests=");
+    cursor = append_number(cursor, end, observation.completion_request_count);
+    cursor = append_text(cursor, end, " completed=");
+    cursor = append_number(cursor, end, observation.completed ? 1U : 0U);
+    cursor = append_text(cursor, end, "\n");
+    write_message(message, static_cast<std::size_t>(cursor - message));
+}
+
 }  // namespace glimmer::interceptor

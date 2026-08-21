@@ -24,9 +24,12 @@ void expect(bool condition, std::string_view message) {
 
 void test_capacity_blocks_and_releases() {
     LaunchGate gate(LaunchGateOptions{.max_concurrent_launches = 1, .control_socket = ""});
-    const auto first = gate.acquire();
+    glimmer::control::LaunchGateTiming first_timing;
+    const auto first = gate.acquire(std::chrono::milliseconds::zero(), &first_timing);
     const auto first_id = first.value_or(0);
     expect(first_id != 0, "the first launch should acquire the gate");
+    expect(!first_timing.remote && first_timing.request_count == 0,
+           "local admission timing should not report remote requests");
 
     std::optional<glimmer::core::TaskId> second;
     std::condition_variable waiter_condition;
@@ -52,7 +55,11 @@ void test_capacity_blocks_and_releases() {
     expect(!waiter_finished.load(std::memory_order_acquire),
            "a full gate should keep the second launch waiting");
 
-    expect(gate.complete(first_id), "completion should release the first launch");
+    glimmer::control::LaunchGateTiming completion_timing;
+    expect(gate.complete(first_id, &completion_timing),
+           "completion should release the first launch");
+    expect(!completion_timing.remote && completion_timing.request_count == 0,
+           "local completion timing should not report remote requests");
     waiter.join();
     const auto second_id = second.value_or(0);
     expect(second_id != 0, "the waiting launch should acquire the released slot");

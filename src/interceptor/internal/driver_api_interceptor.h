@@ -10,18 +10,31 @@
 #include <cstdint>
 #include <optional>
 
+namespace glimmer::control {
+struct LaunchGateTiming;
+}
+
 namespace glimmer::interceptor {
 
 [[nodiscard]] CUresult intercept_init(unsigned int flags);
 [[nodiscard]] bool launch_scheduling_is_enforced() noexcept;
-[[nodiscard]] std::optional<glimmer::core::TaskId> acquire_launch_slot() noexcept;
+[[nodiscard]] bool launch_timing_is_enabled() noexcept;
+[[nodiscard]] std::optional<glimmer::core::TaskId> acquire_launch_slot(
+    glimmer::control::LaunchGateTiming* timing = nullptr) noexcept;
 void fail_launch_slot(glimmer::core::TaskId task_id) noexcept;
 [[nodiscard]] bool track_launch_completion(glimmer::core::TaskId task_id, CUstream stream) noexcept;
+[[nodiscard]] bool finish_launch_batch_call(glimmer::core::TaskId task_id) noexcept;
 void report_kernel_launch_observed(const KernelLaunchObservation& observation) noexcept;
 void report_memory_info_observed(const char* api_name, std::int32_t device,
                                  std::uint64_t total_bytes, std::uint64_t free_bytes,
                                  std::uint64_t physical_total_bytes,
                                  std::uint64_t physical_free_bytes) noexcept;
+void report_launch_timing_observed(glimmer::core::TaskId task_id,
+                                   const glimmer::control::LaunchGateTiming& timing,
+                                   std::uint64_t cuda_launch_nanoseconds,
+                                   std::uint64_t event_tracking_nanoseconds,
+                                   std::uint32_t cuda_launch_status,
+                                   bool event_tracking_succeeded) noexcept;
 [[nodiscard]] CUresult intercept_launch_kernel(CUfunction function, unsigned int grid_dim_x,
                                                unsigned int grid_dim_y, unsigned int grid_dim_z,
                                                unsigned int block_dim_x, unsigned int block_dim_y,

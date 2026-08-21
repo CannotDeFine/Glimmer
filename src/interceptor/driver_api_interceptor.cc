@@ -5,6 +5,7 @@
 #include "glimmer/control/process_memory_quota.h"
 #include "glimmer/control/composite_quota.h"
 #include "glimmer/control/device_capacity_quota.h"
+#include "glimmer/control/launch_gate.h"
 #include "glimmer/control/shared_memory_quota.h"
 #include "glimmer/core/scheduler_mode.h"
 
@@ -20,6 +21,7 @@
 #include <cuda.h>
 
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -32,6 +34,7 @@
 #include <optional>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -76,6 +79,15 @@ struct InterceptorState {
     std::atomic<std::uint64_t> launch_observation_count = 0;
     bool trace_kernel_launches = false;
     bool trace_memory_info = false;
+    bool trace_launch_timings = false;
+    std::size_t launch_batch_size = 1;
+    struct LaunchBatchState {
+        std::size_t remaining_launches = 0;
+        std::size_t active_calls = 0;
+        bool close_requested = false;
+    };
+    std::mutex launch_batch_mutex;
+    std::unordered_map<glimmer::core::TaskId, LaunchBatchState> launch_batches;
     std::unique_ptr<QuotaStore> quota;
     glimmer::interceptor::AllocationRegistry allocations;
     bool is_driver_ready = false;
@@ -84,6 +96,13 @@ struct InterceptorState {
 };
 
 thread_local bool g_is_inside_proc_address_v2 = false;
+
+struct ThreadLaunchBatch final {
+    glimmer::core::TaskId task_id = 0;
+    bool final_launch = false;
+};
+
+thread_local ThreadLaunchBatch g_thread_launch_batch;
 
 class ProcAddressV2Scope {
    public:
@@ -110,6 +129,7 @@ class ProcAddressV2Scope {
     if (state_pid != current_pid) {
         state = new InterceptorState();
         state_pid = current_pid;
+        g_thread_launch_batch = {};
     }
     return *state;
 }
@@ -207,6 +227,10 @@ class ProcAddressV2Scope {
     return read_trace_setting("GLIMMER_TRACE_MEMORY_INFO");
 }
 
+[[nodiscard]] bool read_launch_timing_trace_setting() noexcept {
+    return read_trace_setting("GLIMMER_TRACE_LAUNCH_TIMINGS");
+}
+
 bool resolve_device_capacity(void* context, DeviceId device,
                              DeviceMemoryCapacity* capacity) noexcept {
     if (context == nullptr || capacity == nullptr || device < 0) {
@@ -263,6 +287,13 @@ std::uint64_t next_launch_observation_count(std::atomic<std::uint64_t>& count) n
     return left * right;
 }
 
+[[nodiscard]] std::uint64_t elapsed_nanoseconds(
+    std::chrono::steady_clock::time_point started,
+    std::chrono::steady_clock::time_point finished) noexcept {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(finished - started);
+    return elapsed.count() < 0 ? std::uint64_t{0} : static_cast<std::uint64_t>(elapsed.count());
+}
+
 // The setup owns allocator-backed scheduler state but converts every setup
 // failure into a diagnostic and a disabled enforcement path.
 // NOLINTNEXTLINE(bugprone-exception-escape)
@@ -275,6 +306,10 @@ void initialize_launch_scheduler(InterceptorState& state) noexcept {
     const std::optional<std::size_t> max_concurrent =
         configured_max_concurrent == nullptr ? std::optional<std::size_t>{1}
                                              : read_positive_size("GLIMMER_MAX_CONCURRENT_KERNELS");
+    const char* configured_batch_size = std::getenv("GLIMMER_SCHEDULER_BATCH_SIZE");
+    const std::optional<std::size_t> batch_size =
+        configured_batch_size == nullptr ? std::optional<std::size_t>{1}
+                                         : read_positive_size("GLIMMER_SCHEDULER_BATCH_SIZE");
     const std::optional<glimmer::core::SchedulingPolicy> policy = read_scheduling_policy();
     const std::optional<std::uint32_t> weight = read_positive_weight();
     const char* configured_priority = std::getenv("GLIMMER_SCHEDULER_PRIORITY");
@@ -285,14 +320,15 @@ void initialize_launch_scheduler(InterceptorState& state) noexcept {
     const char* quota_tenant = std::getenv("GLIMMER_QUOTA_TENANT_ID");
     const char* tenant = configured_tenant != nullptr ? configured_tenant : quota_tenant;
     const char* configured_socket = std::getenv("GLIMMER_SCHEDULER_CONTROL_SOCKET");
-    if (!max_concurrent.has_value() || !policy.has_value() || !priority.has_value() ||
-        (configured_tenant != nullptr && *configured_tenant == '\0') ||
+    if (!max_concurrent.has_value() || !batch_size.has_value() || !policy.has_value() ||
+        !priority.has_value() || (configured_tenant != nullptr && *configured_tenant == '\0') ||
         (configured_socket != nullptr && *configured_socket == '\0') ||
         (weight.has_value() == false && std::getenv("GLIMMER_SCHEDULER_WEIGHT") != nullptr)) {
         glimmer::interceptor::report_diagnostic(
             "[glimmer] launch scheduler configuration is invalid\n");
         return;
     }
+    state.launch_batch_size = batch_size.value();
 
     try {
         state.launch_gate = std::make_unique<LaunchGate>(LaunchGateOptions{
@@ -304,8 +340,8 @@ void initialize_launch_scheduler(InterceptorState& state) noexcept {
             .control_socket =
                 configured_socket == nullptr ? std::string{} : std::string(configured_socket),
         });
-        state.launch_tracker =
-            std::make_unique<LaunchCompletionTracker>(state.driver, *state.launch_gate);
+        state.launch_tracker = std::make_unique<LaunchCompletionTracker>(
+            state.driver, *state.launch_gate, state.trace_launch_timings);
         state.launch_scheduler_ready =
             state.driver.has_event_api() && state.launch_tracker->start();
         if (!state.launch_scheduler_ready) {
@@ -325,6 +361,7 @@ void initialize_launch_scheduler(InterceptorState& state) noexcept {
 void initialize_state(InterceptorState& state) noexcept {
     state.trace_kernel_launches = read_kernel_launch_trace_setting();
     state.trace_memory_info = read_memory_info_trace_setting();
+    state.trace_launch_timings = read_launch_timing_trace_setting();
     const std::optional<glimmer::core::SchedulerMode> configured_scheduler_mode =
         read_scheduler_mode();
     if (!configured_scheduler_mode.has_value()) {
@@ -3299,6 +3336,44 @@ void report_memory_info_observed(const char* api_name, std::int32_t device,
     }
 }
 
+bool launch_timing_is_enabled() noexcept {
+    try {
+        InterceptorState& state = get_state();
+        return state.trace_launch_timings;
+    } catch (...) {
+        return false;
+    }
+}
+
+void report_launch_timing_observed(glimmer::core::TaskId task_id,
+                                   const glimmer::control::LaunchGateTiming& timing,
+                                   std::uint64_t cuda_launch_nanoseconds,
+                                   std::uint64_t event_tracking_nanoseconds,
+                                   std::uint32_t cuda_launch_status,
+                                   bool event_tracking_succeeded) noexcept {
+    try {
+        InterceptorState& state = get_state();
+        if (!state.trace_launch_timings) {
+            return;
+        }
+        glimmer::interceptor::report_launch_timing_diagnostic({
+            .task_id = task_id,
+            .remote = timing.remote,
+            .lease_reused = timing.lease_reused,
+            .acquire_nanoseconds = timing.elapsed_nanoseconds,
+            .acquire_transport_nanoseconds = timing.transport_nanoseconds,
+            .acquire_request_count = timing.request_count,
+            .claim_poll_count = timing.claim_poll_count,
+            .cuda_launch_nanoseconds = cuda_launch_nanoseconds,
+            .event_tracking_nanoseconds = event_tracking_nanoseconds,
+            .cuda_launch_status = cuda_launch_status,
+            .event_tracking_succeeded = event_tracking_succeeded,
+        });
+    } catch (...) {
+        glimmer::interceptor::report_diagnostic("[glimmer] launch timing observation failed\n");
+    }
+}
+
 bool launch_scheduling_is_enforced() noexcept {
     try {
         InterceptorState& state = get_state();
@@ -3309,7 +3384,8 @@ bool launch_scheduling_is_enforced() noexcept {
     }
 }
 
-std::optional<glimmer::core::TaskId> acquire_launch_slot() noexcept {
+std::optional<glimmer::core::TaskId> acquire_launch_slot(
+    glimmer::control::LaunchGateTiming* timing) noexcept {
     try {
         InterceptorState& state = get_state();
         ensure_state_initialized(state);
@@ -3317,7 +3393,54 @@ std::optional<glimmer::core::TaskId> acquire_launch_slot() noexcept {
             !state.launch_scheduler_ready || state.launch_gate == nullptr) {
             return std::nullopt;
         }
-        return state.launch_gate->acquire();
+        if (state.launch_batch_size > 1) {
+            std::scoped_lock lock(state.launch_batch_mutex);
+            for (auto& [task_id, batch] : state.launch_batches) {
+                if (batch.remaining_launches == 0 || batch.close_requested) {
+                    continue;
+                }
+                --batch.remaining_launches;
+                ++batch.active_calls;
+                g_thread_launch_batch = {.task_id = task_id,
+                                         .final_launch = batch.remaining_launches == 0};
+                if (timing != nullptr) {
+                    *timing = {};
+                    timing->remote = state.launch_gate->remote_mode();
+                    timing->lease_reused = true;
+                }
+                return task_id;
+            }
+        }
+        const auto task_id = state.launch_gate->acquire(std::chrono::milliseconds::zero(), timing);
+        if (task_id.has_value()) {
+            bool batch_inserted = false;
+            try {
+                std::scoped_lock lock(state.launch_batch_mutex);
+                batch_inserted =
+                    state.launch_batches
+                        .try_emplace(task_id.value(),
+                                     InterceptorState::LaunchBatchState{
+                                         .remaining_launches = state.launch_batch_size - 1,
+                                         .active_calls = 1,
+                                         .close_requested = false})
+                        .second;
+                if (batch_inserted) {
+                    g_thread_launch_batch = {.task_id = task_id.value(),
+                                             .final_launch = state.launch_batch_size == 1};
+                }
+            } catch (...) {
+                static_cast<void>(state.launch_gate->fail(task_id.value()));
+                return std::nullopt;
+            }
+            if (!batch_inserted) {
+                // A scheduler task ID must be unique while its launch batch is
+                // active. Treat a violation as a failed admission instead of
+                // corrupting the existing batch's active-call count.
+                static_cast<void>(state.launch_gate->fail(task_id.value()));
+                return std::nullopt;
+            }
+        }
+        return task_id;
     } catch (...) {
         return std::nullopt;
     }
@@ -3326,8 +3449,19 @@ std::optional<glimmer::core::TaskId> acquire_launch_slot() noexcept {
 void fail_launch_slot(glimmer::core::TaskId task_id) noexcept {
     try {
         InterceptorState& state = get_state();
+        {
+            std::scoped_lock lock(state.launch_batch_mutex);
+            state.launch_batches.erase(task_id);
+        }
+        if (g_thread_launch_batch.task_id == task_id) {
+            g_thread_launch_batch = {};
+        }
         if (state.launch_gate != nullptr) {
-            static_cast<void>(state.launch_gate->fail(task_id));
+            if (state.launch_tracker != nullptr) {
+                static_cast<void>(state.launch_tracker->fail(task_id));
+            } else {
+                static_cast<void>(state.launch_gate->fail(task_id));
+            }
         }
     } catch (...) {
         glimmer::interceptor::report_diagnostic(
@@ -3338,9 +3472,53 @@ void fail_launch_slot(glimmer::core::TaskId task_id) noexcept {
 bool track_launch_completion(glimmer::core::TaskId task_id, CUstream stream) noexcept {
     try {
         InterceptorState& state = get_state();
-        return state.launch_tracker != nullptr && state.launch_tracker->track(task_id, stream);
+        const bool tracked =
+            state.launch_tracker != nullptr && state.launch_tracker->track(task_id, stream);
+        if (!tracked && g_thread_launch_batch.task_id == task_id) {
+            {
+                std::scoped_lock lock(state.launch_batch_mutex);
+                state.launch_batches.erase(task_id);
+            }
+            g_thread_launch_batch = {};
+        }
+        return tracked;
     } catch (...) {
         fail_launch_slot(task_id);
+        return false;
+    }
+}
+
+bool finish_launch_batch_call(glimmer::core::TaskId task_id) noexcept {
+    try {
+        InterceptorState& state = get_state();
+        if (g_thread_launch_batch.task_id != task_id) {
+            return false;
+        }
+        bool should_close = false;
+        {
+            std::scoped_lock lock(state.launch_batch_mutex);
+            const auto batch_iterator = state.launch_batches.find(task_id);
+            if (batch_iterator == state.launch_batches.end() ||
+                batch_iterator->second.active_calls == 0) {
+                g_thread_launch_batch = {};
+                return false;
+            }
+            --batch_iterator->second.active_calls;
+            if (g_thread_launch_batch.final_launch) {
+                batch_iterator->second.close_requested = true;
+            }
+            if (batch_iterator->second.close_requested &&
+                batch_iterator->second.active_calls == 0) {
+                state.launch_batches.erase(batch_iterator);
+                should_close = true;
+            }
+        }
+        g_thread_launch_batch = {};
+        if (!should_close) {
+            return true;
+        }
+        return state.launch_tracker != nullptr && state.launch_tracker->close_batch(task_id);
+    } catch (...) {
         return false;
     }
 }
@@ -3378,20 +3556,50 @@ CUresult intercept_launch_kernel(CUfunction function, unsigned int grid_dim_x,
         return CUDA_ERROR_NOT_SUPPORTED;
     }
 
+    const bool trace_launch_timings = state.trace_launch_timings;
+    glimmer::control::LaunchGateTiming gate_timing;
     std::optional<glimmer::core::TaskId> launch_task;
     if (launch_scheduling_is_enforced()) {
-        launch_task = acquire_launch_slot();
+        launch_task = acquire_launch_slot(trace_launch_timings ? &gate_timing : nullptr);
         if (!launch_task.has_value()) {
             return CUDA_ERROR_NOT_SUPPORTED;
         }
     }
 
+    const auto cuda_launch_started = trace_launch_timings ? std::chrono::steady_clock::now()
+                                                          : std::chrono::steady_clock::time_point{};
     const CUresult launch_result = invoke();
+    const auto cuda_launch_finished = trace_launch_timings
+                                          ? std::chrono::steady_clock::now()
+                                          : std::chrono::steady_clock::time_point{};
     if (launch_task.has_value() && launch_result != CUDA_SUCCESS) {
         fail_launch_slot(launch_task.value());
     }
+    bool event_tracking_succeeded = false;
+    bool batch_call_succeeded = true;
+    std::uint64_t event_tracking_nanoseconds = 0;
+    if (launch_task.has_value() && launch_result == CUDA_SUCCESS) {
+        const auto event_tracking_started = trace_launch_timings
+                                                ? std::chrono::steady_clock::now()
+                                                : std::chrono::steady_clock::time_point{};
+        event_tracking_succeeded = track_launch_completion(launch_task.value(), stream);
+        if (trace_launch_timings) {
+            event_tracking_nanoseconds =
+                elapsed_nanoseconds(event_tracking_started, std::chrono::steady_clock::now());
+        }
+        if (event_tracking_succeeded) {
+            batch_call_succeeded = finish_launch_batch_call(launch_task.value());
+        }
+    }
+    if (trace_launch_timings) {
+        report_launch_timing_observed(
+            launch_task.value_or(0), gate_timing,
+            elapsed_nanoseconds(cuda_launch_started, cuda_launch_finished),
+            event_tracking_nanoseconds, static_cast<std::uint32_t>(launch_result),
+            event_tracking_succeeded);
+    }
     if (launch_task.has_value() && launch_result == CUDA_SUCCESS &&
-        !track_launch_completion(launch_task.value(), stream)) {
+        (!event_tracking_succeeded || !batch_call_succeeded)) {
         return CUDA_ERROR_UNKNOWN;
     }
     if (launch_result == CUDA_SUCCESS) {
