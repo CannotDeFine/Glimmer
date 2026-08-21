@@ -35,7 +35,8 @@ core::SubmitResult TaskAdmissionService::submit(const TaskAdmissionRequest& requ
         scheduler_.submit(core::TaskSpec{.tenant_id = request.tenant_id,
                                          .memory_bytes = request.memory_bytes,
                                          .weight = request.weight,
-                                         .work_units = request.work_units});
+                                         .work_units = request.work_units,
+                                         .priority = request.priority});
     if (!admission.accepted()) {
         return admission;
     }

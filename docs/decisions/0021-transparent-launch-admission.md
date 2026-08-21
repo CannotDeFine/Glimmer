@@ -36,11 +36,13 @@ wrappers use a process-local `control::LaunchGate`:
   existing sampled diagnostics.
 
 `GLIMMER_MAX_CONCURRENT_KERNELS` defaults to one. The gate accepts the same
-`weighted_rr` and `fifo` policy names as the explicit control service, plus a
-process-local tenant identifier and optional weight from trusted launcher
-configuration. The state is reset after `fork()` so a child does not inherit a
-monitor thread it cannot join; the preload state is intentionally kept alive
-until process exit.
+`weighted_rr`, `drr`, `fifo`, and `priority` policy names as the explicit
+control service, plus a process-local tenant identifier, optional weight, and
+optional unsigned priority from trusted launcher configuration. Priority is
+used only when the `priority` policy is selected; larger values run first and
+ties retain submission order. The state is reset after `fork()` so a child
+does not inherit a monitor thread it cannot join; the preload state is
+intentionally kept alive until process exit.
 
 This is a process-local admission mechanism, not a replacement for the
 multi-process control-plane lease path. It does not preempt running kernels,

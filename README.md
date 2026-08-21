@@ -60,8 +60,8 @@ cmake --preset cuda-lint
 The `lint` and `cuda-lint` presets require `clang-tidy`. The executable is
 written to `bin/` inside the selected build directory.
 
-`./scripts/check.sh` also runs ShellCheck for the repository scripts when
-`shellcheck` is installed.
+`./scripts/check.sh` also runs ShellCheck for shell scripts under `scripts/`
+and `examples/` when `shellcheck` is installed.
 
 Run the complete pre-commit verification with:
 
@@ -94,7 +94,7 @@ ctest --preset cuda-gpu --output-on-failure
 ```
 
 The GPU preset includes an embedded Driver-PTX workload, a Runtime kernel
-compiled with `nvcc`, the standalone `glimmer_cuda_workload` baseline, and a
+compiled with `nvcc`, the synchronous `glimmer_cuda_workload` baseline, and a
 Runtime workload matrix covering async/pool, managed, pitched, and
 multi-stream execution. It also builds the opt-in
 `glimmer_cuda_task_backend_demo`, which submits explicit Driver-API PTX tasks
@@ -104,6 +104,10 @@ checks:
 ```sh
 ctest --preset cuda-gpu -R 'glimmer_cuda_interceptor_(kernel_gpu_test|runtime_kernel_gpu_test)' --output-on-failure
 ```
+
+For a reproducible mixed-load comparison between native CUDA execution and
+transparent priority scheduling, see
+[`examples/priority_demo/README.md`](examples/priority_demo/README.md).
 
 Run the real Runtime workload matrix with the interceptor:
 
@@ -146,7 +150,10 @@ env GLIMMER_SCHEDULER_MODE=enforce \
     ./your_cuda_application
 ```
 
-`GLIMMER_SCHEDULER_POLICY` accepts `weighted_rr` (the default), `drr`, or `fifo`.
+`GLIMMER_SCHEDULER_POLICY` accepts `weighted_rr` (the default), `drr`, `fifo`,
+or `priority`. `GLIMMER_SCHEDULER_PRIORITY` sets the unsigned priority of each
+transparent launch when the `priority` policy is selected; larger values run
+first and the default is `0`.
 `GLIMMER_SCHEDULER_TENANT_ID` and `GLIMMER_SCHEDULER_WEIGHT` identify and
 weight the queue; the tenant falls back to
 `GLIMMER_QUOTA_TENANT_ID`. This path does not preempt running kernels or capture
@@ -228,6 +235,14 @@ Submit and inspect tasks from another shell:
     --socket /tmp/glimmer-control.sock stats
 ```
 
+The optional priority argument sets priority when the service uses
+`--scheduler-policy priority`, for example:
+
+```sh
+./build/debug/bin/glimmer_control_client \
+    --socket /tmp/glimmer-control.sock submit tenant-a 1048576 2 1 10
+```
+
 A worker claims the next queued task, executes its local CUDA work, and reports
 the terminal result:
 
@@ -252,8 +267,10 @@ bound the total memory admitted by the service.
 `--scheduler-policy` selects the task dispatch order. `weighted_rr` is the
 default and preserves weighted tenant fairness; `drr` uses `work_units` as a
 task cost and `weight` as its tenant quantum; `fifo` dispatches the oldest
-queued task first. Policies control task-boundary submission order and do not
-preempt a kernel that is already running.
+queued task first; and `priority` dispatches the largest priority first while
+preserving submission order for ties. Priority is strict and can starve lower
+priority work under sustained load. Policies control task-boundary submission
+order and do not preempt a kernel that is already running.
 
 `--bind-leases-to-process` binds submission, claim, `HEARTBEAT`, `COMPLETE`, and
 `FAIL` to an authenticated Linux Unix-socket peer identity. Keep submission,

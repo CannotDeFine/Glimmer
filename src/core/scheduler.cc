@@ -24,6 +24,7 @@ void saturating_add(std::uint64_t value, std::uint64_t* accumulator) noexcept {
         case SchedulingPolicy::kWeightedRoundRobin:
         case SchedulingPolicy::kDeficitRoundRobin:
         case SchedulingPolicy::kFifo:
+        case SchedulingPolicy::kPriority:
             return true;
     }
     return false;
@@ -45,6 +46,9 @@ std::optional<SchedulingPolicy> parse_scheduling_policy(std::string_view value) 
     if (value == "fifo") {
         return SchedulingPolicy::kFifo;
     }
+    if (value == "priority") {
+        return SchedulingPolicy::kPriority;
+    }
     return std::nullopt;
 }
 
@@ -56,6 +60,8 @@ std::string_view scheduling_policy_name(SchedulingPolicy policy) noexcept {
             return "drr";
         case SchedulingPolicy::kFifo:
             return "fifo";
+        case SchedulingPolicy::kPriority:
+            return "priority";
     }
     return "unknown";
 }
@@ -363,6 +369,8 @@ std::optional<TaskId> Scheduler::select_next_task_locked() {
             return select_weighted_round_robin_task_locked();
         case SchedulingPolicy::kDeficitRoundRobin:
             return select_deficit_round_robin_task_locked();
+        case SchedulingPolicy::kPriority:
+            return select_priority_task_locked();
     }
     return std::nullopt;
 }
@@ -478,6 +486,33 @@ std::optional<TaskId> Scheduler::select_deficit_round_robin_task_locked() {
     return std::nullopt;
 }
 
+std::optional<TaskId> Scheduler::select_priority_task_locked() {
+    std::optional<TaskId> selected_task_id;
+    std::uint32_t selected_priority = 0;
+    for (const auto& [task_id, task] : tasks_) {
+        if (task.state != TaskState::kQueued ||
+            (selected_task_id.has_value() &&
+             (task.spec.priority < selected_priority ||
+              (task.spec.priority == selected_priority && task_id > selected_task_id.value())))) {
+            continue;
+        }
+        selected_task_id = task_id;
+        selected_priority = task.spec.priority;
+    }
+    if (!selected_task_id.has_value()) {
+        return std::nullopt;
+    }
+
+    const auto task_iterator = tasks_.find(selected_task_id.value());
+    if (task_iterator == tasks_.end() || task_iterator->second.state != TaskState::kQueued) {
+        return std::nullopt;
+    }
+    remove_task_from_tenant_queue_locked(task_iterator->second.spec.tenant_id,
+                                         selected_task_id.value());
+    --queued_task_count_;
+    return selected_task_id;
+}
+
 std::optional<TaskId> Scheduler::peek_next_task_locked() const {
     switch (scheduling_policy) {
         case SchedulingPolicy::kFifo: {
@@ -494,6 +529,8 @@ std::optional<TaskId> Scheduler::peek_next_task_locked() const {
             return peek_weighted_round_robin_task_locked();
         case SchedulingPolicy::kDeficitRoundRobin:
             return peek_deficit_round_robin_task_locked();
+        case SchedulingPolicy::kPriority:
+            return peek_priority_task_locked();
     }
     return std::nullopt;
 }
@@ -576,12 +613,29 @@ std::optional<TaskId> Scheduler::peek_deficit_round_robin_task_locked() const {
     return std::nullopt;
 }
 
+std::optional<TaskId> Scheduler::peek_priority_task_locked() const {
+    std::optional<TaskId> selected_task_id;
+    std::uint32_t selected_priority = 0;
+    for (const auto& [task_id, task] : tasks_) {
+        if (task.state != TaskState::kQueued ||
+            (selected_task_id.has_value() &&
+             (task.spec.priority < selected_priority ||
+              (task.spec.priority == selected_priority && task_id > selected_task_id.value())))) {
+            continue;
+        }
+        selected_task_id = task_id;
+        selected_priority = task.spec.priority;
+    }
+    return selected_task_id;
+}
+
 TaskSnapshot Scheduler::snapshot_locked(TaskId task_id, const TaskRecord& task) const {
     return TaskSnapshot{.task_id = task_id,
                         .tenant_id = task.spec.tenant_id,
                         .memory_bytes = task.spec.memory_bytes,
                         .weight = task.spec.weight,
                         .work_units = task.spec.work_units,
+                        .priority = task.spec.priority,
                         .state = task.state};
 }
 

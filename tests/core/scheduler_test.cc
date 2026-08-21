@@ -192,19 +192,64 @@ void test_scheduling_policy_configuration() {
     const auto fifo = glimmer::core::parse_scheduling_policy("fifo");
     const auto weighted = glimmer::core::parse_scheduling_policy("weighted_rr");
     const auto deficit = glimmer::core::parse_scheduling_policy("drr");
+    const auto priority = glimmer::core::parse_scheduling_policy("priority");
     expect(fifo.has_value() && fifo.value() == SchedulingPolicy::kFifo, "FIFO policy should parse");
     expect(weighted.has_value() && weighted.value() == SchedulingPolicy::kWeightedRoundRobin,
            "weighted policy should parse");
     expect(deficit.has_value() && deficit.value() == SchedulingPolicy::kDeficitRoundRobin,
            "deficit policy should parse");
+    expect(priority.has_value() && priority.value() == SchedulingPolicy::kPriority,
+           "priority policy should parse");
     expect(!glimmer::core::parse_scheduling_policy("unknown").has_value(),
            "unknown policy should be rejected");
     expect(glimmer::core::scheduling_policy_name(SchedulingPolicy::kFifo) == "fifo",
            "FIFO policy name should be stable");
+    expect(glimmer::core::scheduling_policy_name(SchedulingPolicy::kPriority) == "priority",
+           "priority policy name should be stable");
     const auto invalid_policy = static_cast<SchedulingPolicy>(255);
     const Scheduler scheduler(100, SchedulerOptions{.scheduling_policy = invalid_policy});
     expect(scheduler.stats().scheduling_policy == SchedulingPolicy::kWeightedRoundRobin,
            "invalid direct API policy should fall back to weighted round-robin");
+}
+
+void test_priority_policy_order_and_tie_breaking() {
+    Scheduler scheduler(100, SchedulerOptions{.scheduling_policy = SchedulingPolicy::kPriority});
+    const auto low =
+        scheduler.submit(TaskSpec{.tenant_id = "tenant-a", .memory_bytes = 1, .priority = 1});
+    const auto high_first =
+        scheduler.submit(TaskSpec{.tenant_id = "tenant-b", .memory_bytes = 1, .priority = 9});
+    const auto high_second =
+        scheduler.submit(TaskSpec{.tenant_id = "tenant-c", .memory_bytes = 1, .priority = 9});
+    expect(low.accepted() && high_first.accepted() && high_second.accepted(),
+           "priority tasks should be accepted");
+
+    for (const TaskId expected_id : {high_first.task_id, high_second.task_id, low.task_id}) {
+        const auto lease = scheduler.dispatch_next();
+        expect(lease.has_value() && lease->task_id == expected_id,
+               "priority policy should prefer larger priorities and preserve ties");
+        expect(scheduler.complete(expected_id), "priority task should complete cleanly");
+    }
+
+    Scheduler specific_scheduler(
+        100, SchedulerOptions{.scheduling_policy = SchedulingPolicy::kPriority});
+    const auto specific_low = specific_scheduler.submit(
+        TaskSpec{.tenant_id = "tenant-a", .memory_bytes = 1, .priority = 1});
+    const auto specific_high = specific_scheduler.submit(
+        TaskSpec{.tenant_id = "tenant-b", .memory_bytes = 1, .priority = 9});
+    expect(specific_low.accepted() && specific_high.accepted(),
+           "specific priority tasks should be accepted");
+    expect(!specific_scheduler.dispatch_task(specific_low.task_id).has_value(),
+           "specific dispatch must not bypass a higher-priority task");
+    const auto specific_high_lease = specific_scheduler.dispatch_task(specific_high.task_id);
+    expect(specific_high_lease.has_value() && specific_high_lease->task_id == specific_high.task_id,
+           "specific dispatch should claim the priority head");
+    expect(specific_scheduler.complete(specific_high.task_id),
+           "specific priority task should complete cleanly");
+    const auto specific_low_lease = specific_scheduler.dispatch_task(specific_low.task_id);
+    expect(specific_low_lease.has_value() && specific_low_lease->task_id == specific_low.task_id,
+           "specific dispatch should claim the remaining priority task");
+    expect(specific_scheduler.complete(specific_low.task_id),
+           "remaining specific priority task should complete cleanly");
 }
 
 void test_specific_dispatch_preserves_policy_order() {
@@ -354,6 +399,7 @@ int main() {
     test_scheduling_policy_configuration();
     test_specific_dispatch_preserves_policy_order();
     test_deficit_round_robin_and_latency_stats();
+    test_priority_policy_order_and_tie_breaking();
     test_weighted_round_robin_order();
     test_cancellation_and_failure_release_quota();
     test_input_validation_and_tenant_weight_consistency();

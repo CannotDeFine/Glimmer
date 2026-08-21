@@ -200,15 +200,20 @@ TaskProtocolRequestParseResult parse_task_protocol_request(std::string_view line
 
         TaskProtocolRequest request;
         if (tokens.values[1] == "SUBMIT") {
-            if (tokens.count != 6 || !is_valid_tenant_id(tokens.values[2])) {
-                return request_error(tokens.count == 6 ? TaskProtocolParseError::kInvalidTenant
-                                                       : TaskProtocolParseError::kMalformed);
+            if ((tokens.count != 6 && tokens.count != 7) || !is_valid_tenant_id(tokens.values[2])) {
+                return request_error(tokens.count == 6 || tokens.count == 7
+                                         ? TaskProtocolParseError::kInvalidTenant
+                                         : TaskProtocolParseError::kMalformed);
             }
             request.operation = TaskProtocolOperation::kSubmit;
             request.admission.tenant_id = std::string(tokens.values[2]);
             if (!parse_positive_integer(tokens.values[3], &request.admission.memory_bytes) ||
                 !parse_positive_integer(tokens.values[4], &request.admission.weight) ||
                 !parse_positive_integer(tokens.values[5], &request.admission.work_units)) {
+                return request_error(TaskProtocolParseError::kInvalidValue);
+            }
+            if (tokens.count == 7 &&
+                !parse_unsigned_integer(tokens.values[6], &request.admission.priority)) {
                 return request_error(TaskProtocolParseError::kInvalidValue);
             }
             return TaskProtocolRequestParseResult{.error = TaskProtocolParseError::kNone,
@@ -282,6 +287,14 @@ std::optional<std::string> format_task_protocol_request(const TaskProtocolReques
                     " " + std::to_string(request.admission.memory_bytes) + " " +
                     std::to_string(request.admission.weight) + " " +
                     std::to_string(request.admission.work_units) + "\n";
+        if (request.admission.priority != 0) {
+            formatted = std::string(kTaskProtocolVersion) + " SUBMIT " +
+                        request.admission.tenant_id + " " +
+                        std::to_string(request.admission.memory_bytes) + " " +
+                        std::to_string(request.admission.weight) + " " +
+                        std::to_string(request.admission.work_units) + " " +
+                        std::to_string(request.admission.priority) + "\n";
+        }
     } else if (request.operation == TaskProtocolOperation::kCancel ||
                request.operation == TaskProtocolOperation::kQuery ||
                request.operation == TaskProtocolOperation::kHeartbeat ||

@@ -23,6 +23,7 @@ struct TaskSpec {
     MemoryBytes memory_bytes = 0;
     std::uint32_t weight = 1;
     std::uint32_t work_units = 1;
+    std::uint32_t priority = 0;
 };
 
 enum class TaskState : std::uint8_t {
@@ -37,6 +38,7 @@ enum class SchedulingPolicy : std::uint8_t {
     kWeightedRoundRobin,
     kDeficitRoundRobin,
     kFifo,
+    kPriority,
 };
 
 [[nodiscard]] std::optional<SchedulingPolicy> parse_scheduling_policy(
@@ -72,6 +74,7 @@ struct TaskSnapshot {
     MemoryBytes memory_bytes = 0;
     std::uint32_t weight = 0;
     std::uint32_t work_units = 0;
+    std::uint32_t priority = 0;
     TaskState state = TaskState::kFailed;
 };
 
@@ -140,9 +143,11 @@ class Scheduler {
     [[nodiscard]] std::optional<TaskId> select_fifo_task_locked();
     [[nodiscard]] std::optional<TaskId> select_weighted_round_robin_task_locked();
     [[nodiscard]] std::optional<TaskId> select_deficit_round_robin_task_locked();
+    [[nodiscard]] std::optional<TaskId> select_priority_task_locked();
     [[nodiscard]] std::optional<TaskId> peek_next_task_locked() const;
     [[nodiscard]] std::optional<TaskId> peek_weighted_round_robin_task_locked() const;
     [[nodiscard]] std::optional<TaskId> peek_deficit_round_robin_task_locked() const;
+    [[nodiscard]] std::optional<TaskId> peek_priority_task_locked() const;
     [[nodiscard]] std::optional<TaskSnapshot> dispatch_selected_task_locked(TaskId task_id);
     [[nodiscard]] TaskSnapshot snapshot_locked(TaskId task_id, const TaskRecord& task) const;
     [[nodiscard]] bool finish_running_task_locked(TaskId task_id, TaskState terminal_state);

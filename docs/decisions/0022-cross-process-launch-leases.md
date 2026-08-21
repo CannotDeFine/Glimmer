@@ -35,9 +35,11 @@ Glimmer adds an opt-in control-plane launch-lease mode:
   id. `METRICS` is a separate diagnostic operation so existing `STATS` clients
   retain their response shape.
 
-The scheduler exposes FIFO, weighted round-robin, and deficit round-robin
-selection. DRR treats `work_units` as a scheduling cost and `weight` as the
-tenant quantum. Scheduler snapshots aggregate queue-wait and service-time
+The scheduler exposes FIFO, weighted round-robin, deficit round-robin, and
+strict priority selection. Priority selects the largest task priority and
+breaks ties by submission order; the other policies ignore that field. DRR
+treats `work_units` as a scheduling cost and `weight` as the tenant quantum.
+Scheduler snapshots aggregate queue-wait and service-time
 microseconds; they are diagnostic measurements, not hard latency guarantees.
 
 ## Consequences

@@ -24,7 +24,9 @@ package is unsuitable.
 The optional CUDA interceptor and explicit CUDA task backend require NVIDIA
 CUDA Toolkit headers for the CUDA Driver API ABI declarations. The standalone
 CUDA workload harnesses also require the Toolkit to compile their Runtime
-programs. The Toolkit is a vendor SDK dependency; it is discovered with
+programs. The priority demo additionally links the Toolkit's `CUDA::cublas`
+target for its model-shaped cuBLAS execution graph. The Toolkit is a vendor
+SDK dependency; it is discovered with
 `find_package(CUDAToolkit)` when `GLIMMER_BUILD_CUDA_INTERCEPTOR=ON`,
 `GLIMMER_BUILD_CUDA_BACKEND=ON`, or `GLIMMER_BUILD_CUDA_WORKLOAD=ON`. CUDA
 headers and binaries are not vendored in this repository.

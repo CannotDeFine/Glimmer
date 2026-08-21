@@ -17,13 +17,17 @@ next; it does not interrupt a kernel that is already running.
 ## Decision
 
 Keep policy selection inside the scheduler core and separate it from quota
-admission and task state transitions. The first supported policies are:
+admission and task state transitions. The supported policies are:
 
 - `weighted_rr` (the default): weighted round-robin ordering between tenants;
-- `fifo`: oldest accepted queued task first.
+- `drr`: deficit round-robin using `work_units` as task cost and `weight` as
+  the tenant quantum;
+- `fifo`: oldest accepted queued task first; and
+- `priority`: highest-priority queued task first, with submission order as the
+  tie-breaker.
 
 The control service selects the policy at startup with
-`--scheduler-policy fifo|weighted_rr`. A scheduler's policy is immutable for
+`--scheduler-policy fifo|weighted_rr|drr|priority`. A scheduler's policy is immutable for
 its lifetime; changing it requires restarting the service. Unknown policy
 values are rejected at the configuration boundary, while an invalid enum
 received directly by the C++ API falls back to the safe default.
@@ -32,6 +36,6 @@ received directly by the C++ API falls back to the safe default.
 
 Policy experiments can be added and tested without changing CUDA interception,
 quota accounting, or terminal transition logic. Existing deployments retain
-weighted fairness by default. Runtime policy changes, priority/deadline
-semantics, and kernel preemption remain future decisions rather than implicit
-claims of this interface.
+weighted fairness by default. Priority values are ignored by the other
+policies, and strict priority may starve lower-priority work under sustained
+load. Kernel preemption remains outside this interface.

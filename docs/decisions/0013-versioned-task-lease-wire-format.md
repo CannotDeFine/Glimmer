@@ -16,7 +16,7 @@ Add a transport-neutral, line-oriented codec in
 `glimmer/control/task_protocol.h`. The versioned wire format is:
 
 ```text
-GLIMMER_TASK_V1 SUBMIT <tenant> <memory_bytes> <weight> <work_units>
+GLIMMER_TASK_V1 SUBMIT <tenant> <memory_bytes> <weight> <work_units> [<priority>]
 GLIMMER_TASK_V1 CANCEL <task_id>
 GLIMMER_TASK_V1 QUERY <task_id>
 GLIMMER_TASK_V1 CLAIM
@@ -34,7 +34,9 @@ GLIMMER_TASK_V1 ERROR <INVALID_REQUEST|QUOTA_EXCEEDED|QUEUE_FULL|UNKNOWN_TASK|IN
 ```
 
 Requests and responses are bounded to 256 bytes, use decimal unsigned
-integers, reject zero and overflow, and reject unknown fields. Tenant IDs are
+integers, reject zero and overflow for required positive fields, and reject
+unknown fields. Priority is an optional unsigned 32-bit value; it defaults to
+zero and may therefore be explicitly set to zero. Tenant IDs are
 non-empty tokens of at most 96 ASCII bytes containing only letters, digits,
 `.`, `_`, or `-`. The codec accepts an optional line terminator and emits one
 newline for canonical framing.

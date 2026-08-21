@@ -36,7 +36,7 @@ concrete responsibility and a testable interface.
 
 | Module | Location | Current responsibility |
 | --- | --- | --- |
-| `core` | `include/glimmer/core/`, `src/core/` | Provides the thread-safe quota ledger and task-boundary scheduler with explicit admission, configurable FIFO or weighted-round-robin dispatch policies, weighted tenant queues, configurable concurrent dispatch slots, optional queued-work backpressure, completion, cancellation, and failure transitions. It has no CUDA, dynamic-linker, transport, or process-global dependencies. |
+| `core` | `include/glimmer/core/`, `src/core/` | Provides the thread-safe quota ledger and task-boundary scheduler with explicit admission, configurable FIFO, weighted-round-robin, deficit-round-robin, or strict-priority dispatch policies, weighted tenant queues, configurable concurrent dispatch slots, optional queued-work backpressure, completion, cancellation, and failure transitions. It has no CUDA, dynamic-linker, transport, or process-global dependencies. |
 | `backend` | `include/glimmer/backend/`, `src/backend/` | Defines the internal task execution contract, provides a deterministic simulated backend, provides the single-threaded executor that translates backend progress into scheduler terminal transitions, and optionally provides the explicit CUDA task backend under `src/backend/cuda/`. It does not own tenant fairness, quota policy, or transparent CUDA interception. |
 | `control` | `include/glimmer/control/`, `src/control/` | Defines the quota-store contract, adapts process-local quota requests to `core`, provides transactional explicit-task admission with backend-registration rollback, composes aggregate, task, and physical-device capacity quotas, implements the Linux shared-memory tenant accounting store, provides authenticated Unix-socket server/client transport adapters, coordinates optional cross-process transparent launch leases, and exposes bounded read-only scheduler/quota stats and latency snapshots. It computes tenant/task/device-visible memory information and has no CUDA or dynamic-linker dependencies. |
 | `app` | `src/control_service_main.cc`, `src/control_client_main.cc` | Provides standalone control-service/client entry points. The service supports deterministic simulated execution and remote worker leases; neither binary serializes or owns CUDA resources. |
@@ -106,10 +106,12 @@ owning targets and tests.
 - The scheduler operates at explicit task boundaries. It does not claim to
   preempt arbitrary running CUDA kernels.
 - Scheduling policy is selected when the scheduler is constructed. The
-  current policies are FIFO, weighted round-robin, and deficit round-robin;
-  all control dispatch order only and keep quota admission and terminal state
-  transitions in the scheduler core. DRR uses `work_units` as task cost and
-  `weight` as tenant quantum.
+  current policies are FIFO, weighted round-robin, deficit round-robin, and
+  strict priority; all control dispatch order only and keep quota admission
+  and terminal state transitions in the scheduler core. Priority selects the
+  largest task priority and preserves submission order for ties. DRR uses
+  `work_units` as task cost and `weight` as tenant quantum; other policies
+  ignore priority.
 - Explicit clients use `control::TaskAdmissionService` to bind a logical task
   admission to backend-resource registration. A failed registration cancels the
   queued task and releases its scheduler reservation.

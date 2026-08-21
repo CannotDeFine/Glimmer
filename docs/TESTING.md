@@ -31,10 +31,10 @@ replace it.
 
 | Module | Current tests | Hardware required |
 | --- | --- | --- |
-| `core` | Quota reservation admission, rejection, commit, cancellation, release failures, concurrent reservations, lifetime safety, counter overflow protection, task admission, FIFO, weighted, and deficit-round-robin tenant ordering, policy-preserving task-specific dispatch, configurable concurrent dispatch slots, queued-work backpressure, scheduler state and latency snapshots, completion, cancellation, failure, and input validation. | No |
+| `core` | Quota reservation admission, rejection, commit, cancellation, release failures, concurrent reservations, lifetime safety, counter overflow protection, task admission, FIFO, weighted, deficit-round-robin, and strict-priority ordering, policy-preserving task-specific dispatch, configurable concurrent dispatch slots, queued-work backpressure, scheduler state and latency snapshots, completion, cancellation, failure, and input validation. | No |
 | `backend` | Simulated task submission, deterministic progress, completion, cancellation, duplicate rejection, unknown-task handling, executor-to-scheduler submission/progress/terminal transitions, and fake-Driver CUDA launch/event state mapping. | No |
-| `examples` | Optional CUDA workload harnesses cover synchronous, stream-ordered/pool, managed, pitched, and multi-stream Runtime paths with device-side validation and visible-memory reporting under `LD_PRELOAD`; explicit task demos cover Driver-API PTX launch, scheduler admission, event polling, terminal quota release, and remote Unix-socket lease workers with process-local CUDA execution. The remote lease GPU integration test starts the endpoint with process-bound leases, forks two workers, and verifies both completed states. | CUDA |
-| `control` | Quota-visible memory information, physical-memory bounds, physical-capacity admission and free-memory rejection, rejected reservations, shared-memory accounting, aggregate-plus-task quota composition, multi-process quota boundaries, per-device counters, fork re-registration, continuous stale-process recovery, committed-byte recovery grace, stale-process reservation/commit recovery, safe region cleanup, reservation lifecycle checks, robust-mutex owner-death recovery, transactional explicit-task admission with registration rollback, endpoint-to-executor lifecycle transitions, remote lease claim/heartbeat/complete/fail transitions, task-specific process-bound claims, optional PID/UID/start-time lease ownership binding, lease expiry and quota recovery, queue-full backpressure, read-only stats and latency metrics snapshots, versioned task-protocol request/response validation, and authenticated Unix-socket request/response handling. | No |
+| `examples` | Optional CUDA workload harnesses cover synchronous, stream-ordered/pool, managed, pitched, and multi-stream Runtime paths with device-side validation and visible-memory reporting under `LD_PRELOAD`; the priority demo compares native scheduling with transparent priority enforcement using configurable cuBLAS model-shaped, tiled-GEMM, or pointwise workloads; explicit task demos cover Driver-API PTX launch, scheduler admission, event polling, terminal quota release, and remote Unix-socket lease workers with process-local CUDA execution. The remote lease GPU integration test starts the endpoint with process-bound leases, forks two workers, and verifies both completed states. | CUDA |
+| `control` | Quota-visible memory information, physical-memory bounds, physical-capacity admission and free-memory rejection, rejected reservations, shared-memory accounting, aggregate-plus-task quota composition, multi-process quota boundaries, per-device counters, fork re-registration, continuous stale-process recovery, committed-byte recovery grace, stale-process reservation/commit recovery, safe region cleanup, reservation lifecycle checks, robust-mutex owner-death recovery, transactional explicit-task admission with registration rollback, endpoint-to-executor lifecycle transitions, priority-ordered endpoint claims, remote lease claim/heartbeat/complete/fail transitions, task-specific process-bound claims, optional PID/UID/start-time lease ownership binding, lease expiry and quota recovery, queue-full backpressure, read-only stats and latency metrics snapshots, versioned task-protocol request/response validation, and authenticated Unix-socket request/response handling. | No |
 | `app` | Service and client argument validation and usage smoke tests, plus a multi-process service/client check covering quota rejection, queued-work backpressure, stats snapshots, empty claims, lease metadata, running-slot exclusion, heartbeat renewal, explicit completion, and explicit failure. | No |
 | `interceptor` | Driver/Runtime preload coverage through fake CUDA Driver, Runtime, and NVML libraries, `cuInit`, `cuLaunchKernel` and PTDS launch forwarding, process-local enforce-mode launch admission and event completion, `dlsym` including explicit CUDA Driver/Runtime/NVML handles, both `cuGetProcAddress` forms, invalid-argument rejection, legacy/versioned and PTDS allocation/query aliases, exact PTDS availability checks, context-aware allocation records, duplicate-pointer degraded-state handling, ambiguous successful-null allocation rollback, context-bound cleanup that preserves context-independent allocations, stream cleanup, device-grouped asynchronous completion, fork reinitialization of local allocation metadata, `cuDeviceTotalMem_v2`, `cuMemAllocManaged`, `cuMemAllocPitch_v2`, Runtime `cudaMalloc3D`, physical-capacity clamping and free-memory rejection, stream-ordered Driver/Runtime allocation/free and completion accounting, memory-pool lifecycle and import policy, device-resident `cuMemCreate`/`cuMemRelease` VMM handle accounting with retain/release references, VMM address reserve/map/access/unmap/free and query/import policy, CUDA IPC export/close forwarding and quota-enabled import rejection for Driver and Runtime APIs, NVML initialization/device lookup and passthrough plus v1/v2 memory-view virtualization, process-scoped task-limit enforcement, deterministic allocation-registry tests, and injectable Driver dispatch tests. | GPU tests for real CUDA/NVML routing, Driver and Runtime kernel launches, and cross-process shared quota; no GPU for symbol, fake preload, registry, dispatch, and core tests |
 
@@ -78,15 +78,21 @@ used, and free bytes plus the physical total and free bytes used for the
 capacity boundary.
 
 The same preset builds `glimmer_cuda_workload`, an ordinary CUDA Runtime
-application under `examples/cuda_workload/`. Its CTest entry runs a 1 MiB
-allocation and kernel workload with an 8 MiB preload quota and requires a CSV
-row showing the virtualized capacity. It also builds the workload matrix under
-`examples/cuda_workloads/`: asynchronous and explicit pool allocation,
-managed memory, pitched memory, and two-stream execution. Each matrix entry
-uses a distinct executable and emits a summary line with memory snapshots and
-a validation flag. Run the executables directly to vary the baseline
-allocation size or to compare the matrix paths; an allocation larger than the
-configured quota is expected to return a non-zero status.
+application under `examples/cuda_workloads/baseline/`. Its CTest entry runs a
+1 MiB allocation and kernel workload with an 8 MiB preload quota and requires
+a CSV row showing the virtualized capacity. The same directory also builds the
+workload matrix for asynchronous and explicit pool allocation, managed memory,
+pitched memory, and two-stream execution. Each matrix entry uses a distinct
+executable and emits a summary line with memory snapshots and a validation
+flag. Run the executables directly to vary the baseline allocation size or to
+compare the matrix paths; an allocation larger than the configured quota is
+expected to return a non-zero status.
+
+The priority demo also has a GPU smoke test for its cuBLAS model-shaped
+inference path. The smoke test uses a small matrix and observe-mode preload to
+verify that the ordinary cuBLAS application remains transparent to the
+interceptor; the larger native-versus-priority comparison remains an explicit
+example run.
 
 The same CUDA presets build `glimmer_cuda_task_backend_demo` under
 `examples/cuda_task_backend/`. Its optional GPU test submits two explicit PTX
@@ -119,7 +125,8 @@ released after CUDA event completion.
   enforce-mode admission, verify that the launch lease is failed and no slot
   remains occupied. If the event API is unavailable, verify the fail-closed
   `CUDA_ERROR_NOT_SUPPORTED` result.
-- Exercise the control protocol codec with canonical round trips plus empty,
+- Exercise the control protocol codec with canonical round trips plus optional
+  priority and legacy submit forms, empty,
   oversized, unsupported-version, malformed, unsafe-tenant, zero, and
   overflowing input. Test response states and error codes as well as request
   operations.
@@ -171,10 +178,10 @@ For the complete pre-commit verification, use the project check script:
 ./scripts/check.sh
 ```
 
-It runs all available no-GPU, sanitizer, clang-tidy, formatting, ShellCheck,
-and CUDA lint checks. ShellCheck is skipped with an explicit warning when it
-is not installed. CUDA hardware tests remain opt-in and are not run by this
-script.
+It runs all available no-GPU, sanitizer, clang-tidy, formatting, and CUDA lint
+checks, plus ShellCheck for repository and example scripts. ShellCheck is
+skipped with an explicit warning when it is not installed. CUDA hardware tests
+remain opt-in and are not run by this script.
 
 Run the sanitizer suite when changing memory ownership, lifetime, or
 asynchronous behavior:

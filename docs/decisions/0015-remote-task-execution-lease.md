@@ -15,7 +15,7 @@ The scheduler also cannot safely preempt an arbitrary running kernel.
 Add an explicit worker lease flow to the versioned control protocol:
 
 ```text
-SUBMIT tenant memory weight work_units -> OK task_id
+SUBMIT tenant memory weight work_units [priority] -> OK task_id
 CLAIM                              -> LEASE task_id tenant memory weight work_units
 HEARTBEAT task_id                 -> STATE task_id RUNNING
 COMPLETE task_id                   -> STATE task_id COMPLETED

@@ -154,6 +154,14 @@ class ProcAddressV2Scope {
     return static_cast<std::uint32_t>(value.value());
 }
 
+[[nodiscard]] std::optional<std::uint32_t> read_scheduler_priority() {
+    const std::optional<MemoryBytes> value = read_memory_limit("GLIMMER_SCHEDULER_PRIORITY");
+    if (!value.has_value() || value.value() > std::numeric_limits<std::uint32_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(value.value());
+}
+
 [[nodiscard]] std::optional<glimmer::core::SchedulingPolicy> read_scheduling_policy() {
     const char* value = std::getenv("GLIMMER_SCHEDULER_POLICY");
     if (value == nullptr) {
@@ -269,11 +277,15 @@ void initialize_launch_scheduler(InterceptorState& state) noexcept {
                                              : read_positive_size("GLIMMER_MAX_CONCURRENT_KERNELS");
     const std::optional<glimmer::core::SchedulingPolicy> policy = read_scheduling_policy();
     const std::optional<std::uint32_t> weight = read_positive_weight();
+    const char* configured_priority = std::getenv("GLIMMER_SCHEDULER_PRIORITY");
+    const std::optional<std::uint32_t> priority = configured_priority == nullptr
+                                                      ? std::optional<std::uint32_t>{0}
+                                                      : read_scheduler_priority();
     const char* configured_tenant = std::getenv("GLIMMER_SCHEDULER_TENANT_ID");
     const char* quota_tenant = std::getenv("GLIMMER_QUOTA_TENANT_ID");
     const char* tenant = configured_tenant != nullptr ? configured_tenant : quota_tenant;
     const char* configured_socket = std::getenv("GLIMMER_SCHEDULER_CONTROL_SOCKET");
-    if (!max_concurrent.has_value() || !policy.has_value() ||
+    if (!max_concurrent.has_value() || !policy.has_value() || !priority.has_value() ||
         (configured_tenant != nullptr && *configured_tenant == '\0') ||
         (configured_socket != nullptr && *configured_socket == '\0') ||
         (weight.has_value() == false && std::getenv("GLIMMER_SCHEDULER_WEIGHT") != nullptr)) {
@@ -288,6 +300,7 @@ void initialize_launch_scheduler(InterceptorState& state) noexcept {
             .scheduling_policy = policy.value(),
             .tenant_id = tenant == nullptr ? "default" : tenant,
             .tenant_weight = weight.value_or(1),
+            .task_priority = priority.value(),
             .control_socket =
                 configured_socket == nullptr ? std::string{} : std::string(configured_socket),
         });

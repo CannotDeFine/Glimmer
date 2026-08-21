@@ -16,6 +16,7 @@ struct TaskAdmissionRequest {
     core::MemoryBytes memory_bytes = 0;
     std::uint32_t weight = 1;
     std::uint32_t work_units = 1;
+    std::uint32_t priority = 0;
 };
 
 // Identity obtained from a trusted local transport such as SO_PEERCRED. The

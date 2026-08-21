@@ -13,6 +13,7 @@ LaunchGate::LaunchGate(LaunchGateOptions options)
                                         .scheduling_policy = options.scheduling_policy}),
       tenant_id_(std::move(options.tenant_id)),
       tenant_weight_(options.tenant_weight == 0 ? 1 : options.tenant_weight),
+      task_priority_(options.task_priority),
       remote_mode_requested_(!options.control_socket.empty()),
       remote_acquire_timeout_(options.remote_acquire_timeout),
       remote_poll_interval_(options.remote_poll_interval > std::chrono::milliseconds::zero()
@@ -45,7 +46,8 @@ std::optional<core::TaskId> LaunchGate::acquire(std::chrono::milliseconds timeou
                                          .admission = {.tenant_id = tenant_id_,
                                                        .memory_bytes = 1,
                                                        .weight = tenant_weight_,
-                                                       .work_units = 1},
+                                                       .work_units = 1,
+                                                       .priority = task_priority_},
                                          .task_id = 0};
         const auto encoded_submit = format_task_protocol_request(submit);
         if (!encoded_submit.has_value()) {
@@ -104,8 +106,11 @@ std::optional<core::TaskId> LaunchGate::acquire(std::chrono::milliseconds timeou
         }
     }
     std::unique_lock lock(mutex_);
-    const core::SubmitResult submission = scheduler_.submit(
-        core::TaskSpec{.tenant_id = tenant_id_, .memory_bytes = 1, .weight = tenant_weight_});
+    const core::SubmitResult submission =
+        scheduler_.submit(core::TaskSpec{.tenant_id = tenant_id_,
+                                         .memory_bytes = 1,
+                                         .weight = tenant_weight_,
+                                         .priority = task_priority_});
     if (!submission.accepted()) {
         return std::nullopt;
     }

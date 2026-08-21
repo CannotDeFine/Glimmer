@@ -19,6 +19,7 @@ struct LaunchGateOptions {
     core::SchedulingPolicy scheduling_policy = core::SchedulingPolicy::kWeightedRoundRobin;
     std::string tenant_id = "default";
     std::uint32_t tenant_weight = 1;
+    std::uint32_t task_priority = 0;
     // When set, launch leases are coordinated by the Linux control service
     // instead of this process-local scheduler.
     std::string control_socket;
@@ -57,6 +58,7 @@ class LaunchGate final {
     core::Scheduler scheduler_;
     std::string tenant_id_;
     std::uint32_t tenant_weight_ = 1;
+    std::uint32_t task_priority_ = 0;
     bool remote_mode_requested_ = false;
     std::unique_ptr<UnixSocketControlClient> remote_client_;
     std::chrono::milliseconds remote_acquire_timeout_{};

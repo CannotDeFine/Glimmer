@@ -73,7 +73,7 @@ git diff --check
 
 if command -v shellcheck >/dev/null 2>&1; then
     section "repository: shellcheck"
-    shellcheck scripts/*.sh
+    find scripts examples -type f -name '*.sh' -exec shellcheck {} +
 else
     printf '%sWARNING: shellcheck is not installed; skipping script analysis.%s\n' \
         "${COLOR_YELLOW}" "${COLOR_RESET}" >&2

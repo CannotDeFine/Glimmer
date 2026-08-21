@@ -55,6 +55,20 @@ void test_admission_registers_and_cancels() {
     expect(scheduler.usage().used_bytes() == 0, "cancellation should release reservation");
 }
 
+void test_admission_propagates_priority() {
+    Scheduler scheduler(100);
+    TaskAdmissionService service(scheduler);
+    RegistrarState state;
+    const auto admission = service.submit(
+        TaskAdmissionRequest{.tenant_id = "tenant-a", .memory_bytes = 20, .priority = 7},
+        register_resource, &state);
+    expect(admission.accepted(), "prioritized request should be admitted");
+    const auto lease = service.claim_next();
+    expect(lease.has_value() && lease->priority == 7,
+           "admission should propagate priority to the scheduler snapshot");
+    expect(service.complete(admission.task_id), "prioritized task should complete");
+}
+
 void test_registration_failure_rolls_back() {
     Scheduler scheduler(100);
     TaskAdmissionService service(scheduler);
@@ -115,6 +129,7 @@ void test_pending_lease_expiry_releases_queue() {
 
 int main() {
     test_admission_registers_and_cancels();
+    test_admission_propagates_priority();
     test_registration_failure_rolls_back();
     test_admission_rejects_invalid_or_unavailable_requests();
     test_pending_lease_expiry_releases_queue();

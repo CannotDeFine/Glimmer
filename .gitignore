@@ -2,3 +2,6 @@
 /.cache/
 /compile_commands.json
 /AGENTS.md
+__pycache__/
+*.py[cod]
+/examples/priority_demo/output/

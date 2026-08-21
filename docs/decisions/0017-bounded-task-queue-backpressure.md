@@ -22,7 +22,7 @@ Add an optional `max_queued_tasks` scheduler capacity:
 - the control protocol exposes the rejection as `ERROR QUEUE_FULL`.
 
 The control service exposes the setting as `--max-queued-tasks N`. This is
-backpressure, not admission priority: weighted tenant scheduling remains
+backpressure, not admission priority: the configured scheduling policy remains
 responsible for ordering tasks that have already entered the queue. Terminal
 task retention and persistence are separate lifecycle concerns and remain
 outside this capacity setting.

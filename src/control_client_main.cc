@@ -11,7 +11,8 @@ namespace {
 
 void print_usage(std::ostream& output, std::string_view program) {
     output << "Usage:\n"
-           << "  " << program << " --socket PATH submit TENANT MEMORY_BYTES WEIGHT WORK_UNITS\n"
+           << "  " << program
+           << " --socket PATH submit TENANT MEMORY_BYTES WEIGHT WORK_UNITS [PRIORITY]\n"
            << "  " << program << " --socket PATH query TASK_ID\n"
            << "  " << program << " --socket PATH cancel TASK_ID\n"
            << "  " << program << " --socket PATH claim\n"
@@ -36,6 +37,20 @@ bool parse_positive(std::string_view text, Integer* value) {
     return true;
 }
 
+template <typename Integer>
+bool parse_unsigned(std::string_view text, Integer* value) {
+    if (value == nullptr || text.empty()) {
+        return false;
+    }
+    Integer parsed = 0;
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != text.data() + text.size()) {
+        return false;
+    }
+    *value = parsed;
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -51,7 +66,7 @@ int main(int argc, char** argv) {
     const std::string_view operation = argv[3];
     glimmer::control::TaskProtocolRequest request;
     if (operation == "submit") {
-        if (argc != 8) {
+        if (argc != 8 && argc != 9) {
             print_usage(std::cerr, argv[0]);
             return EXIT_FAILURE;
         }
@@ -61,6 +76,10 @@ int main(int argc, char** argv) {
             !parse_positive(argv[6], &request.admission.weight) ||
             !parse_positive(argv[7], &request.admission.work_units)) {
             std::cerr << "invalid submit values\n";
+            return EXIT_FAILURE;
+        }
+        if (argc == 9 && !parse_unsigned(argv[8], &request.admission.priority)) {
+            std::cerr << "invalid submit priority\n";
             return EXIT_FAILURE;
         }
     } else if (operation == "claim") {

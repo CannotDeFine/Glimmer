@@ -136,6 +136,37 @@ void test_endpoint_reports_queue_backpressure() {
            "queue backpressure test should release its accepted task");
 }
 
+void test_endpoint_priority_claim_order() {
+    Scheduler scheduler(100, glimmer::core::SchedulerOptions{
+                                 .scheduling_policy = glimmer::core::SchedulingPolicy::kPriority});
+    TaskAdmissionService service(scheduler);
+    RegistrarState registrar_state;
+    TaskControlEndpoint endpoint(service, register_resource, &registrar_state);
+
+    const auto low = response_from(endpoint, "GLIMMER_TASK_V1 SUBMIT tenant-a 20 1 1 1");
+    const auto high = response_from(endpoint, "GLIMMER_TASK_V1 SUBMIT tenant-b 20 1 1 9");
+    expect(low.kind == TaskProtocolResponseKind::kAccepted &&
+               high.kind == TaskProtocolResponseKind::kAccepted,
+           "priority endpoint tasks should be accepted");
+
+    const auto high_lease = response_from(endpoint, "GLIMMER_TASK_V1 CLAIM");
+    expect(
+        high_lease.kind == TaskProtocolResponseKind::kLease && high_lease.task_id == high.task_id,
+        "endpoint claim should select the highest-priority task");
+    expect(
+        response_from(endpoint, "GLIMMER_TASK_V1 COMPLETE " + std::to_string(high.task_id)).state ==
+            TaskProtocolState::kCompleted,
+        "high-priority endpoint task should complete");
+
+    const auto low_lease = response_from(endpoint, "GLIMMER_TASK_V1 CLAIM");
+    expect(low_lease.kind == TaskProtocolResponseKind::kLease && low_lease.task_id == low.task_id,
+           "endpoint claim should select the remaining lower-priority task");
+    expect(
+        response_from(endpoint, "GLIMMER_TASK_V1 COMPLETE " + std::to_string(low.task_id)).state ==
+            TaskProtocolState::kCompleted,
+        "low-priority endpoint task should complete");
+}
+
 void test_endpoint_reports_scheduler_stats() {
     Scheduler scheduler(
         100, glimmer::core::SchedulerOptions{.max_running_tasks = 2, .max_queued_tasks = 4});
@@ -462,6 +493,7 @@ int main() {
     test_submit_query_cancel_lifecycle();
     test_rejection_and_unknown_task();
     test_endpoint_reports_queue_backpressure();
+    test_endpoint_priority_claim_order();
     test_endpoint_reports_scheduler_stats();
     test_registration_failure_and_running_cancel();
     test_endpoint_observes_executor_lifecycle();

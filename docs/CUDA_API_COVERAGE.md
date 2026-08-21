@@ -105,8 +105,10 @@ Driver-internal `dlsym` requests are delegated to the real resolver.
 When `GLIMMER_SCHEDULER_MODE=enforce`, the launch wrappers use
 `control::LaunchGate`. `GLIMMER_MAX_CONCURRENT_KERNELS` sets the number of
 admitted launches (default `1`) in local mode, and
-`GLIMMER_SCHEDULER_POLICY` selects `weighted_rr` (the default), `drr`, or
-`fifo`.
+`GLIMMER_SCHEDULER_POLICY` selects `weighted_rr` (the default), `drr`, `fifo`,
+or `priority`. Under the priority policy, the trusted launcher may set
+`GLIMMER_SCHEDULER_PRIORITY`; larger values run first and equal values retain
+submission order. Other policies ignore that field.
 `GLIMMER_SCHEDULER_TENANT_ID` identifies the local queue and falls back to
 `GLIMMER_QUOTA_TENANT_ID`; `GLIMMER_SCHEDULER_WEIGHT` optionally sets its
 positive weight. The caller may therefore block before the real CUDA launch

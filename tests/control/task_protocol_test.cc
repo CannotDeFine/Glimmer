@@ -50,6 +50,31 @@ void test_request_round_trip() {
                "submit fields should round trip");
     }
 
+    const TaskProtocolRequest prioritized_submit{.operation = TaskProtocolOperation::kSubmit,
+                                                 .admission = {.tenant_id = "tenant-a_1",
+                                                               .memory_bytes = 1048576,
+                                                               .weight = 2,
+                                                               .work_units = 3,
+                                                               .priority = 7}};
+    const auto prioritized_text = format_task_protocol_request(prioritized_submit);
+    expect(prioritized_text.has_value() &&
+               prioritized_text.value_or("") == "GLIMMER_TASK_V1 SUBMIT tenant-a_1 1048576 2 3 7\n",
+           "non-default priority should be included in submit format");
+    const auto parsed_prioritized = parse_task_protocol_request(prioritized_text.value_or(""));
+    expect(parsed_prioritized.parsed() && parsed_prioritized.request.has_value() &&
+               parsed_prioritized.request->admission.priority == 7,
+           "priority should round trip through submit protocol");
+    const auto parsed_legacy =
+        parse_task_protocol_request("GLIMMER_TASK_V1 SUBMIT tenant-a_1 1048576 2 3\n");
+    expect(parsed_legacy.parsed() && parsed_legacy.request.has_value() &&
+               parsed_legacy.request->admission.priority == 0,
+           "legacy submit format should default priority to zero");
+    const auto parsed_explicit_zero =
+        parse_task_protocol_request("GLIMMER_TASK_V1 SUBMIT tenant-a_1 1048576 2 3 0\n");
+    expect(parsed_explicit_zero.parsed() && parsed_explicit_zero.request.has_value() &&
+               parsed_explicit_zero.request->admission.priority == 0,
+           "explicit zero priority should remain valid");
+
     for (const TaskProtocolOperation operation :
          {TaskProtocolOperation::kCancel, TaskProtocolOperation::kQuery,
           TaskProtocolOperation::kHeartbeat, TaskProtocolOperation::kComplete,
@@ -115,6 +140,9 @@ void test_request_rejects_invalid_input() {
     expect(parse_task_protocol_request("GLIMMER_TASK_V1 SUBMIT tenant 0 1 1").error ==
                TaskProtocolParseError::kInvalidValue,
            "zero memory should be rejected");
+    expect(parse_task_protocol_request("GLIMMER_TASK_V1 SUBMIT tenant 1 1 1 4294967296").error ==
+               TaskProtocolParseError::kInvalidValue,
+           "overflowing priority should be rejected");
     expect(parse_task_protocol_request("GLIMMER_TASK_V1 QUERY 18446744073709551616").error ==
                TaskProtocolParseError::kInvalidValue,
            "overflowing task id should be rejected");
