@@ -41,7 +41,7 @@ void print_usage(std::ostream& output, std::string_view program) {
            << " --socket PATH --quota-bytes BYTES [--execution-mode simulated|remote]"
               " [--completion-steps N] [--lease-timeout-ms N]"
               " [--max-concurrent-tasks N] [--max-queued-tasks N]"
-              " [--scheduler-policy fifo|weighted_rr]"
+              " [--scheduler-policy fifo|weighted_rr|drr]"
               " [--max-requests N] [--bind-leases-to-process]\n";
 }
 

@@ -7,7 +7,7 @@
 namespace glimmer::control {
 namespace {
 
-constexpr std::size_t kMaxTokens = 16;
+constexpr std::size_t kMaxTokens = 24;
 
 struct TokenList {
     std::array<std::string_view, kMaxTokens> values{};
@@ -216,19 +216,30 @@ TaskProtocolRequestParseResult parse_task_protocol_request(std::string_view line
         }
 
         if (tokens.values[1] == "CLAIM") {
-            if (tokens.count != 2) {
+            if (tokens.count != 2 && tokens.count != 3) {
                 return request_error(TaskProtocolParseError::kMalformed);
             }
             request.operation = TaskProtocolOperation::kClaim;
+            if (tokens.count == 3) {
+                std::uint64_t parsed_task_id = 0;
+                if (!parse_unsigned_integer(tokens.values[2], &parsed_task_id)) {
+                    return request_error(TaskProtocolParseError::kMalformed);
+                }
+                if (parsed_task_id == 0) {
+                    return request_error(TaskProtocolParseError::kInvalidValue);
+                }
+                request.task_id = parsed_task_id;
+            }
             return TaskProtocolRequestParseResult{.error = TaskProtocolParseError::kNone,
                                                   .request = std::move(request)};
         }
 
-        if (tokens.values[1] == "STATS") {
+        if (tokens.values[1] == "STATS" || tokens.values[1] == "METRICS") {
             if (tokens.count != 2) {
                 return request_error(TaskProtocolParseError::kMalformed);
             }
-            request.operation = TaskProtocolOperation::kStats;
+            request.operation = tokens.values[1] == "STATS" ? TaskProtocolOperation::kStats
+                                                            : TaskProtocolOperation::kMetrics;
             return TaskProtocolRequestParseResult{.error = TaskProtocolParseError::kNone,
                                                   .request = std::move(request)};
         }
@@ -293,9 +304,17 @@ std::optional<std::string> format_task_protocol_request(const TaskProtocolReques
         formatted = std::string(kTaskProtocolVersion) + " " + std::string(operation) + " " +
                     task_id.value() + "\n";
     } else if (request.operation == TaskProtocolOperation::kClaim) {
-        formatted = std::string(kTaskProtocolVersion) + " CLAIM\n";
-    } else if (request.operation == TaskProtocolOperation::kStats) {
-        formatted = std::string(kTaskProtocolVersion) + " STATS\n";
+        if (request.task_id == 0) {
+            formatted = std::string(kTaskProtocolVersion) + " CLAIM\n";
+        } else {
+            formatted = std::string(kTaskProtocolVersion) + " CLAIM " +
+                        std::to_string(request.task_id) + "\n";
+        }
+    } else if (request.operation == TaskProtocolOperation::kStats ||
+               request.operation == TaskProtocolOperation::kMetrics) {
+        formatted =
+            std::string(kTaskProtocolVersion) +
+            (request.operation == TaskProtocolOperation::kStats ? " STATS\n" : " METRICS\n");
     }
     if (!formatted.has_value() || formatted->size() > kTaskProtocolMaxLineBytes) {
         return std::nullopt;
@@ -329,7 +348,8 @@ TaskProtocolResponseParseResult parse_task_protocol_response(std::string_view li
             return TaskProtocolResponseParseResult{.error = TaskProtocolParseError::kNone,
                                                    .response = response};
         }
-        if (tokens.count == 13 && tokens.values[1] == "STATS" &&
+        if ((tokens.count == 13 || tokens.count == 17) &&
+            (tokens.values[1] == "STATS" || tokens.values[1] == "METRICS") &&
             parse_unsigned_integer(tokens.values[2], &response.stats.total_task_count) &&
             parse_unsigned_integer(tokens.values[3], &response.stats.queued_task_count) &&
             parse_unsigned_integer(tokens.values[4], &response.stats.running_task_count) &&
@@ -340,8 +360,18 @@ TaskProtocolResponseParseResult parse_task_protocol_response(std::string_view li
             parse_unsigned_integer(tokens.values[9], &response.stats.quota_reserved_bytes) &&
             parse_unsigned_integer(tokens.values[10], &response.stats.quota_allocated_bytes) &&
             parse_unsigned_integer(tokens.values[11], &response.stats.max_running_tasks) &&
-            parse_unsigned_integer(tokens.values[12], &response.stats.max_queued_tasks)) {
-            response.kind = TaskProtocolResponseKind::kStats;
+            parse_unsigned_integer(tokens.values[12], &response.stats.max_queued_tasks) &&
+            (tokens.count == 13 ||
+             (parse_unsigned_integer(tokens.values[13],
+                                     &response.stats.total_queue_wait_microseconds) &&
+              parse_unsigned_integer(tokens.values[14],
+                                     &response.stats.max_queue_wait_microseconds) &&
+              parse_unsigned_integer(tokens.values[15],
+                                     &response.stats.total_service_time_microseconds) &&
+              parse_unsigned_integer(tokens.values[16],
+                                     &response.stats.max_service_time_microseconds)))) {
+            response.kind = tokens.values[1] == "STATS" ? TaskProtocolResponseKind::kStats
+                                                        : TaskProtocolResponseKind::kMetrics;
             return TaskProtocolResponseParseResult{.error = TaskProtocolParseError::kNone,
                                                    .response = response};
         }
@@ -422,20 +452,28 @@ std::optional<std::string> format_task_protocol_response(const TaskProtocolRespo
         return std::string(kTaskProtocolVersion) + " STATE " + task_id.value() + " " +
                std::string(state.value()) + "\n";
     }
-    if (response.kind == TaskProtocolResponseKind::kStats) {
+    if (response.kind == TaskProtocolResponseKind::kStats ||
+        response.kind == TaskProtocolResponseKind::kMetrics) {
         const auto& stats = response.stats;
-        std::string formatted = std::string(kTaskProtocolVersion) + " STATS " +
-                                std::to_string(stats.total_task_count) + " " +
-                                std::to_string(stats.queued_task_count) + " " +
-                                std::to_string(stats.running_task_count) + " " +
-                                std::to_string(stats.completed_task_count) + " " +
-                                std::to_string(stats.cancelled_task_count) + " " +
-                                std::to_string(stats.failed_task_count) + " " +
-                                std::to_string(stats.quota_limit_bytes) + " " +
-                                std::to_string(stats.quota_reserved_bytes) + " " +
-                                std::to_string(stats.quota_allocated_bytes) + " " +
-                                std::to_string(stats.max_running_tasks) + " " +
-                                std::to_string(stats.max_queued_tasks) + "\n";
+        std::string formatted =
+            std::string(kTaskProtocolVersion) +
+            (response.kind == TaskProtocolResponseKind::kStats ? " STATS " : " METRICS ") +
+            std::to_string(stats.total_task_count) + " " + std::to_string(stats.queued_task_count) +
+            " " + std::to_string(stats.running_task_count) + " " +
+            std::to_string(stats.completed_task_count) + " " +
+            std::to_string(stats.cancelled_task_count) + " " +
+            std::to_string(stats.failed_task_count) + " " +
+            std::to_string(stats.quota_limit_bytes) + " " +
+            std::to_string(stats.quota_reserved_bytes) + " " +
+            std::to_string(stats.quota_allocated_bytes) + " " +
+            std::to_string(stats.max_running_tasks) + " " + std::to_string(stats.max_queued_tasks);
+        if (response.kind == TaskProtocolResponseKind::kMetrics) {
+            formatted += " " + std::to_string(stats.total_queue_wait_microseconds) + " " +
+                         std::to_string(stats.max_queue_wait_microseconds) + " " +
+                         std::to_string(stats.total_service_time_microseconds) + " " +
+                         std::to_string(stats.max_service_time_microseconds);
+        }
+        formatted += "\n";
         if (formatted.size() > kTaskProtocolMaxLineBytes) {
             return std::nullopt;
         }

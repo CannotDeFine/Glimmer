@@ -75,6 +75,7 @@ std::uint8_t g_custom_pool_token = 0;
 std::uint8_t g_external_memory_token = 0;
 std::uint8_t g_array_token = 0;
 std::uint8_t g_graphics_resource_token = 0;
+std::uint8_t g_event_token = 0;
 std::uint64_t g_pool_release_threshold = 0;
 
 CUcontext fake_context() {
@@ -789,6 +790,29 @@ extern "C" CUresult CUDAAPI cuStreamDestroy(CUstream stream) {
 extern "C" CUresult CUDAAPI cuCtxSynchronize() {
     complete_pending_frees(nullptr, false);
     return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuEventCreate(CUevent* event, unsigned int) {
+    if (event == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *event = reinterpret_cast<CUevent>(&g_event_token);
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuEventRecord(CUevent event, CUstream) {
+    return event == reinterpret_cast<CUevent>(&g_event_token) ? CUDA_SUCCESS
+                                                              : CUDA_ERROR_INVALID_HANDLE;
+}
+
+extern "C" CUresult CUDAAPI cuEventQuery(CUevent event) {
+    return event == reinterpret_cast<CUevent>(&g_event_token) ? CUDA_SUCCESS
+                                                              : CUDA_ERROR_INVALID_HANDLE;
+}
+
+extern "C" CUresult CUDAAPI cuEventDestroy_v2(CUevent event) {
+    return event == reinterpret_cast<CUevent>(&g_event_token) ? CUDA_SUCCESS
+                                                              : CUDA_ERROR_INVALID_HANDLE;
 }
 
 extern "C" CUresult CUDAAPI cuMemGetInfo_v2(std::size_t* free_bytes, std::size_t* total_bytes) {

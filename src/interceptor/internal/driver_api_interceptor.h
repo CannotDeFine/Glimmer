@@ -4,13 +4,19 @@
 #include <nvml.h>
 
 #include "internal/diagnostics.h"
+#include "glimmer/core/scheduler.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace glimmer::interceptor {
 
 [[nodiscard]] CUresult intercept_init(unsigned int flags);
+[[nodiscard]] bool launch_scheduling_is_enforced() noexcept;
+[[nodiscard]] std::optional<glimmer::core::TaskId> acquire_launch_slot() noexcept;
+void fail_launch_slot(glimmer::core::TaskId task_id) noexcept;
+[[nodiscard]] bool track_launch_completion(glimmer::core::TaskId task_id, CUstream stream) noexcept;
 void report_kernel_launch_observed(const KernelLaunchObservation& observation) noexcept;
 void report_memory_info_observed(const char* api_name, std::int32_t device,
                                  std::uint64_t total_bytes, std::uint64_t free_bytes,

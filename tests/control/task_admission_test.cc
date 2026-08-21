@@ -1,8 +1,10 @@
 #include "glimmer/control/task_admission.h"
 
 #include <cstdlib>
+#include <chrono>
 #include <iostream>
 #include <string_view>
+#include <thread>
 
 namespace {
 
@@ -92,11 +94,29 @@ void test_admission_rejects_invalid_or_unavailable_requests() {
     expect(state.calls == 0, "rejected requests must not invoke registrar");
 }
 
+void test_pending_lease_expiry_releases_queue() {
+    Scheduler scheduler(100);
+    TaskAdmissionService service(scheduler, std::chrono::milliseconds{1}, true);
+    RegistrarState state;
+    const auto admission = service.submit(
+        TaskAdmissionRequest{.tenant_id = "tenant-a", .memory_bytes = 20}, register_resource,
+        &state, glimmer::control::TaskPeerIdentity{.pid = 1, .uid = 1, .start_time_ticks = 1});
+    expect(admission.accepted(), "process-bound pending lease should be admitted");
+    std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    expect(service.reap_expired(), "expired queued lease should be reclaimed");
+    const auto snapshot = service.find(admission.task_id);
+    expect(snapshot.has_value() && snapshot->state == glimmer::core::TaskState::kCancelled,
+           "expired queued lease should become cancelled");
+    expect(scheduler.usage().used_bytes() == 0,
+           "expired queued lease should release its reservation");
+}
+
 }  // namespace
 
 int main() {
     test_admission_registers_and_cancels();
     test_registration_failure_rolls_back();
     test_admission_rejects_invalid_or_unavailable_requests();
+    test_pending_lease_expiry_releases_queue();
     return EXIT_SUCCESS;
 }

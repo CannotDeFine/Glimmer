@@ -59,9 +59,11 @@ namespace {
             .stats = {}};
 }
 
-[[nodiscard]] TaskProtocolResponse stats_response(const core::SchedulerStats& stats) {
+[[nodiscard]] TaskProtocolResponse stats_response(const core::SchedulerStats& stats,
+                                                  bool include_metrics) {
     return {
-        .kind = TaskProtocolResponseKind::kStats,
+        .kind =
+            include_metrics ? TaskProtocolResponseKind::kMetrics : TaskProtocolResponseKind::kStats,
         .task_id = 0,
         .state = TaskProtocolState::kQueued,
         .error = TaskProtocolErrorCode::kInternalError,
@@ -79,7 +81,11 @@ namespace {
                   .quota_reserved_bytes = stats.quota.reserved_bytes,
                   .quota_allocated_bytes = stats.quota.allocated_bytes,
                   .max_running_tasks = static_cast<std::uint64_t>(stats.max_running_tasks),
-                  .max_queued_tasks = static_cast<std::uint64_t>(stats.max_queued_tasks)}};
+                  .max_queued_tasks = static_cast<std::uint64_t>(stats.max_queued_tasks),
+                  .total_queue_wait_microseconds = stats.total_queue_wait_microseconds,
+                  .max_queue_wait_microseconds = stats.max_queue_wait_microseconds,
+                  .total_service_time_microseconds = stats.total_service_time_microseconds,
+                  .max_service_time_microseconds = stats.max_service_time_microseconds}};
 }
 
 [[nodiscard]] TaskProtocolErrorCode admission_error(core::SubmitStatus status) noexcept {
@@ -147,8 +153,8 @@ std::optional<std::string> TaskControlEndpoint::handle(
         const TaskProtocolRequest request = parsed.request.value_or(TaskProtocolRequest{});
         switch (request.operation) {
             case TaskProtocolOperation::kSubmit: {
-                const core::SubmitResult result =
-                    admission_service_.submit(request.admission, registrar_, registrar_context_);
+                const core::SubmitResult result = admission_service_.submit(
+                    request.admission, registrar_, registrar_context_, peer);
                 if (!result.accepted()) {
                     return format_response(error_response(admission_error(result.status)));
                 }
@@ -190,8 +196,14 @@ std::optional<std::string> TaskControlEndpoint::handle(
                 return format_response(error_response(TaskProtocolErrorCode::kInvalidRequest));
             }
             case TaskProtocolOperation::kClaim: {
-                const auto snapshot = admission_service_.claim_next(peer);
+                const auto snapshot = request.task_id == 0
+                                          ? admission_service_.claim_next(peer)
+                                          : admission_service_.claim(request.task_id, peer);
                 if (!snapshot.has_value()) {
+                    if (request.task_id != 0 &&
+                        !admission_service_.find(request.task_id).has_value()) {
+                        return format_response(error_response(TaskProtocolErrorCode::kUnknownTask));
+                    }
                     return format_response({.kind = TaskProtocolResponseKind::kEmpty,
                                             .task_id = 0,
                                             .state = TaskProtocolState::kQueued,
@@ -205,7 +217,9 @@ std::optional<std::string> TaskControlEndpoint::handle(
                 return format_response(lease_response(snapshot.value()));
             }
             case TaskProtocolOperation::kStats:
-                return format_response(stats_response(admission_service_.stats()));
+                return format_response(stats_response(admission_service_.stats(), false));
+            case TaskProtocolOperation::kMetrics:
+                return format_response(stats_response(admission_service_.stats(), true));
             case TaskProtocolOperation::kComplete:
             case TaskProtocolOperation::kFail: {
                 const bool updated = request.operation == TaskProtocolOperation::kComplete

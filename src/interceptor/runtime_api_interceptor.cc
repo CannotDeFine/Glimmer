@@ -1710,8 +1710,23 @@ extern "C" cudaError_t CUDARTAPI cudaLaunchKernel(const void* function, dim3 gri
         if (real_launch == nullptr) {
             return cudaErrorNotSupported;
         }
+        std::optional<glimmer::core::TaskId> launch_task;
+        if (!is_reentrant && glimmer::interceptor::launch_scheduling_is_enforced()) {
+            launch_task = glimmer::interceptor::acquire_launch_slot();
+            if (!launch_task.has_value()) {
+                return cudaErrorNotSupported;
+            }
+        }
         const cudaError_t result =
             real_launch(function, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
+        if (launch_task.has_value() && result != cudaSuccess) {
+            glimmer::interceptor::fail_launch_slot(launch_task.value());
+        }
+        if (launch_task.has_value() && result == cudaSuccess &&
+            !glimmer::interceptor::track_launch_completion(launch_task.value(),
+                                                           reinterpret_cast<CUstream>(stream))) {
+            return cudaErrorUnknown;
+        }
         if (!is_reentrant && result == cudaSuccess) {
             glimmer::interceptor::report_kernel_launch_observed({
                 .api_name = "cudaLaunchKernel",
@@ -1742,8 +1757,23 @@ extern "C" cudaError_t CUDARTAPI cudaLaunchKernel_ptsz(const void* function, dim
         if (real_launch == nullptr) {
             return cudaErrorNotSupported;
         }
+        std::optional<glimmer::core::TaskId> launch_task;
+        if (!is_reentrant && glimmer::interceptor::launch_scheduling_is_enforced()) {
+            launch_task = glimmer::interceptor::acquire_launch_slot();
+            if (!launch_task.has_value()) {
+                return cudaErrorNotSupported;
+            }
+        }
         const cudaError_t result =
             real_launch(function, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
+        if (launch_task.has_value() && result != cudaSuccess) {
+            glimmer::interceptor::fail_launch_slot(launch_task.value());
+        }
+        if (launch_task.has_value() && result == cudaSuccess &&
+            !glimmer::interceptor::track_launch_completion(launch_task.value(),
+                                                           reinterpret_cast<CUstream>(stream))) {
+            return cudaErrorUnknown;
+        }
         if (!is_reentrant && result == cudaSuccess) {
             glimmer::interceptor::report_kernel_launch_observed({
                 .api_name = "cudaLaunchKernel_ptsz",
@@ -1777,8 +1807,23 @@ extern "C" cudaError_t CUDARTAPI __cudaLaunchKernel(cudaKernel_t kernel, dim3 gr
         if (real_launch == nullptr) {
             return cudaErrorNotSupported;
         }
+        std::optional<glimmer::core::TaskId> launch_task;
+        if (!is_reentrant && glimmer::interceptor::launch_scheduling_is_enforced()) {
+            launch_task = glimmer::interceptor::acquire_launch_slot();
+            if (!launch_task.has_value()) {
+                return cudaErrorNotSupported;
+            }
+        }
         const cudaError_t result =
             real_launch(kernel, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
+        if (launch_task.has_value() && result != cudaSuccess) {
+            glimmer::interceptor::fail_launch_slot(launch_task.value());
+        }
+        if (launch_task.has_value() && result == cudaSuccess &&
+            !glimmer::interceptor::track_launch_completion(launch_task.value(),
+                                                           reinterpret_cast<CUstream>(stream))) {
+            return cudaErrorUnknown;
+        }
         if (!is_reentrant && result == cudaSuccess) {
             glimmer::interceptor::report_kernel_launch_observed({
                 .api_name = "__cudaLaunchKernel",
@@ -1810,8 +1855,23 @@ extern "C" cudaError_t CUDARTAPI __cudaLaunchKernel_ptsz(cudaKernel_t kernel, di
         if (real_launch == nullptr) {
             return cudaErrorNotSupported;
         }
+        std::optional<glimmer::core::TaskId> launch_task;
+        if (!is_reentrant && glimmer::interceptor::launch_scheduling_is_enforced()) {
+            launch_task = glimmer::interceptor::acquire_launch_slot();
+            if (!launch_task.has_value()) {
+                return cudaErrorNotSupported;
+            }
+        }
         const cudaError_t result =
             real_launch(kernel, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
+        if (launch_task.has_value() && result != cudaSuccess) {
+            glimmer::interceptor::fail_launch_slot(launch_task.value());
+        }
+        if (launch_task.has_value() && result == cudaSuccess &&
+            !glimmer::interceptor::track_launch_completion(launch_task.value(),
+                                                           reinterpret_cast<CUstream>(stream))) {
+            return cudaErrorUnknown;
+        }
         if (!is_reentrant && result == cudaSuccess) {
             glimmer::interceptor::report_kernel_launch_observed({
                 .api_name = "__cudaLaunchKernel_ptsz",

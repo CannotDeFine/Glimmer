@@ -127,6 +127,36 @@ Add `GLIMMER_TRACE_MEMORY_INFO=1` to also print the virtualized total, used,
 and free memory together with the physical total and free bytes after each
 successful memory-information query.
 
+### Transparent launch scheduling
+
+The preload library can also admit covered CUDA kernel launches through a
+launch gate. In enforce mode, a launch call waits for an
+available slot, forwards the original CUDA call, and records a non-timing
+event on the same stream. The slot is released when that event completes. A
+launch failure or event-tracking failure releases the lease; if event support
+is unavailable, the launch is rejected instead of silently bypassing the
+policy.
+
+```sh
+env GLIMMER_SCHEDULER_MODE=enforce \
+    GLIMMER_MAX_CONCURRENT_KERNELS=1 \
+    GLIMMER_SCHEDULER_POLICY=weighted_rr \
+    GLIMMER_MEMORY_LIMIT_BYTES=8388608 \
+    LD_PRELOAD="$PWD/build/cuda-gpu/lib/libglimmer_cuda_interceptor.so" \
+    ./your_cuda_application
+```
+
+`GLIMMER_SCHEDULER_POLICY` accepts `weighted_rr` (the default), `drr`, or `fifo`.
+`GLIMMER_SCHEDULER_TENANT_ID` and `GLIMMER_SCHEDULER_WEIGHT` identify and
+weight the queue; the tenant falls back to
+`GLIMMER_QUOTA_TENANT_ID`. This path does not preempt running kernels or capture
+CUDA graph launches. To coordinate multiple
+processes, set `GLIMMER_SCHEDULER_CONTROL_SOCKET` to a running remote control
+service socket. The gate then submits a task-specific lease before each
+covered launch, renews long-running leases while their events are pending, and
+reports completion after each CUDA event. Transport or lease failures fail the
+launch closed; leaving the variable unset preserves the process-local default.
+
 ### Task-scoped memory isolation
 
 In process-local mode, `GLIMMER_MEMORY_LIMIT_BYTES` is the memory ceiling for
@@ -220,23 +250,25 @@ running lease simultaneously. It defaults to `1`; quota reservations still
 bound the total memory admitted by the service.
 
 `--scheduler-policy` selects the task dispatch order. `weighted_rr` is the
-default and preserves weighted tenant fairness; `fifo` dispatches the oldest
+default and preserves weighted tenant fairness; `drr` uses `work_units` as a
+task cost and `weight` as its tenant quantum; `fifo` dispatches the oldest
 queued task first. Policies control task-boundary submission order and do not
 preempt a kernel that is already running.
 
-`--bind-leases-to-process` binds `HEARTBEAT`, `COMPLETE`, and `FAIL` to the
-Linux process that claimed the lease, using the authenticated Unix-socket
-peer identity. Keep claim and execution in the same worker process when this
-option is enabled. The option is disabled by default so separate command-line
-smoke-test invocations remain compatible.
+`--bind-leases-to-process` binds submission, claim, `HEARTBEAT`, `COMPLETE`, and
+`FAIL` to an authenticated Linux Unix-socket peer identity. Keep submission,
+claim, and execution in the same worker process when this option is enabled.
+The option is disabled by default so separate command-line smoke-test
+invocations remain compatible.
 
 `--max-queued-tasks` optionally bounds waiting tasks. A value of `0` (the
 default) leaves the queue unlimited; when the bound is reached, submission
 returns `ERROR QUEUE_FULL` without consuming quota.
 
 `stats` returns a read-only snapshot of task-state counts, quota bytes, and the
-configured running/queued limits. It is intended for diagnostics and smoke
-checks, not as a durable time-series metrics export.
+configured running/queued limits. `metrics` additionally reports aggregate and
+maximum queue-wait and service-time microseconds. Both are intended for
+diagnostics and smoke checks, not as a durable time-series metrics export.
 
 Use `fail TASK_ID` when execution cannot complete. `CANCEL` is intentionally
 limited to queued tasks; the service does not pretend to preempt a running CUDA

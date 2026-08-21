@@ -24,12 +24,16 @@ Glimmer preserves application transparency at the CUDA ABI boundary:
   internal project interfaces; applications never construct or submit them.
 - The interceptor observes covered launch, stream, event, and completion
   boundaries and performs admission decisions before forwarding a real CUDA
-  call when enforcement is enabled.
-- The first scheduler does not queue arbitrary launch calls after the caller
-  returns, and it does not claim kernel-level preemption or cancellation.
+  call when enforcement is enabled. The process-local transparent launch gate
+  defined by [ADR 0021](0021-transparent-launch-admission.md) may block the
+  caller before forwarding and releases the slot from a Driver event.
+- The first scheduler does not queue a launch after the caller has returned,
+  and it does not claim kernel-level preemption or cancellation. The default
+  process-local gate is extended by the opt-in control-plane lease path in
+  [ADR 0022](0022-cross-process-launch-leases.md).
 - Scheduler configuration is supplied by a trusted launcher or control plane.
-  Environment variables are the MVP transport; a future control service may
-  replace them without changing the interceptor contract.
+  Environment variables select the local policy or the authenticated Linux
+  control-service socket without changing the interceptor contract.
 
 The configuration model has three modes:
 
@@ -41,9 +45,10 @@ The configuration model has three modes:
 
 The existing memory and tenant settings remain the resource configuration:
 `GLIMMER_MEMORY_LIMIT_BYTES`, `GLIMMER_QUOTA_MODE`,
-`GLIMMER_QUOTA_TENANT_ID`, and `GLIMMER_QUOTA_DEVICE_ID`. A future scheduler
-weight setting must come from the trusted launcher or control plane in shared
-mode; an untrusted workload must not be able to raise its own weight.
+`GLIMMER_QUOTA_TENANT_ID`, and `GLIMMER_QUOTA_DEVICE_ID`. The transparent
+launch gate's optional weight setting must come from the trusted launcher or
+control plane in shared mode; an untrusted workload must not be able to raise
+its own weight.
 
 `GLIMMER_TRACE_KERNEL_LAUNCHES=1` is an opt-in diagnostic setting. It reports
 structured launch observations without changing admission, ordering, or CUDA
@@ -67,6 +72,9 @@ ordering and failure handling without pretending to be a CUDA execution path.
 The first enforcement guarantee is admission at observable boundaries and
 memory accounting, not transparent preemption. Workloads with long-running
 kernels may still occupy the device until a completion boundary is observed.
-Implementing delayed launch queues, cooperative cancellation, or stronger
-latency guarantees requires a new design that safely captures launch state and
-documents its CUDA-specific limitations.
+The launch gates are deliberately bounded to pre-forward blocking;
+cooperative cancellation, kernel preemption, or stronger latency guarantees
+require a new design that safely captures launch state and documents its
+CUDA-specific limitations. Process-local details are recorded in [ADR
+0021](0021-transparent-launch-admission.md); the opt-in cross-process lease
+contract is recorded in [ADR 0022](0022-cross-process-launch-leases.md).

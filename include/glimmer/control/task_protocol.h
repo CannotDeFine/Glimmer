@@ -23,6 +23,7 @@ enum class TaskProtocolOperation : std::uint8_t {
     kComplete,
     kFail,
     kStats,
+    kMetrics,
 };
 
 enum class TaskProtocolParseError : std::uint8_t {
@@ -75,6 +76,7 @@ enum class TaskProtocolResponseKind : std::uint8_t {
     kLease,
     kEmpty,
     kStats,
+    kMetrics,
 };
 
 struct TaskProtocolStats {
@@ -89,6 +91,10 @@ struct TaskProtocolStats {
     core::MemoryBytes quota_allocated_bytes = 0;
     std::uint64_t max_running_tasks = 0;
     std::uint64_t max_queued_tasks = 0;
+    std::uint64_t total_queue_wait_microseconds = 0;
+    std::uint64_t max_queue_wait_microseconds = 0;
+    std::uint64_t total_service_time_microseconds = 0;
+    std::uint64_t max_service_time_microseconds = 0;
 };
 
 struct TaskProtocolResponse {

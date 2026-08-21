@@ -49,6 +49,9 @@ glimmer::control::TaskProtocolResponse response_from(TaskControlEndpoint& endpoi
     const auto encoded = endpoint.handle(request);
     expect(encoded.has_value(), "endpoint should return a response");
     const auto parsed = parse_task_protocol_response(encoded.value_or(""));
+    if (!parsed.parsed()) {
+        std::cerr << "Endpoint response was: " << encoded.value_or("<empty>") << '\n';
+    }
     expect(parsed.parsed(), "endpoint response should parse");
     expect(parsed.response.has_value(), "endpoint response should contain a value");
     return parsed.response.value_or(glimmer::control::TaskProtocolResponse{});
@@ -60,6 +63,9 @@ glimmer::control::TaskProtocolResponse response_from(TaskControlEndpoint& endpoi
     const auto encoded = endpoint.handle(request, peer);
     expect(encoded.has_value(), "endpoint should return a response");
     const auto parsed = parse_task_protocol_response(encoded.value_or(""));
+    if (!parsed.parsed()) {
+        std::cerr << "Endpoint response was: " << encoded.value_or("<empty>") << '\n';
+    }
     expect(parsed.parsed(), "endpoint response should parse");
     expect(parsed.response.has_value(), "endpoint response should contain a value");
     return parsed.response.value_or(glimmer::control::TaskProtocolResponse{});
@@ -161,6 +167,12 @@ void test_endpoint_reports_scheduler_stats() {
                stats.stats.quota_reserved_bytes == 0 && stats.stats.quota_allocated_bytes == 0 &&
                stats.stats.max_running_tasks == 2 && stats.stats.max_queued_tasks == 4,
            "stats endpoint should expose scheduler state and quota usage");
+
+    const auto metrics = response_from(endpoint, "GLIMMER_TASK_V1 METRICS");
+    expect(metrics.kind == TaskProtocolResponseKind::kMetrics &&
+               metrics.stats.max_queue_wait_microseconds <=
+                   metrics.stats.total_queue_wait_microseconds,
+           "metrics endpoint should expose bounded queue latency aggregates");
 }
 
 void test_registration_failure_and_running_cancel() {
@@ -399,7 +411,11 @@ void test_endpoint_binds_lease_to_peer_process() {
     const TaskPeerIdentity owner{.pid = 101, .uid = 1000, .start_time_ticks = 1};
     const TaskPeerIdentity other_process{.pid = 202, .uid = 1000, .start_time_ticks = 2};
 
-    const auto accepted = response_from(endpoint, "GLIMMER_TASK_V1 SUBMIT tenant-a 20 1 1");
+    const auto missing_submit = response_from(endpoint, "GLIMMER_TASK_V1 SUBMIT tenant-a 20 1 1");
+    expect(missing_submit.kind == TaskProtocolResponseKind::kError &&
+               missing_submit.error == TaskProtocolErrorCode::kInvalidRequest,
+           "a process-bound submit without peer identity must be rejected");
+    const auto accepted = response_from(endpoint, "GLIMMER_TASK_V1 SUBMIT tenant-a 20 1 1", owner);
     expect(accepted.kind == TaskProtocolResponseKind::kAccepted,
            "process-bound lease task should be admitted");
     const auto missing_identity = response_from(endpoint, "GLIMMER_TASK_V1 CLAIM");

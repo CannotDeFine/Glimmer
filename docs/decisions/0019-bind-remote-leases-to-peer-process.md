@@ -20,17 +20,18 @@ Add an opt-in `--bind-leases-to-process` control-service option:
 
 - the Unix socket server derives a peer identity from `SO_PEERCRED` and
   `/proc/<pid>/stat`;
-- the lease records the peer PID, UID, and process start-time ticks when it is
-  claimed;
-- `HEARTBEAT`, `COMPLETE`, and `FAIL` must come from the same identity;
+- the pending lease records the peer PID, UID, and process start-time ticks at
+  submission, and the active lease preserves that identity when it is claimed;
+- submission, claim, `HEARTBEAT`, `COMPLETE`, and `FAIL` must come from the
+  same identity;
 - a recycled PID does not match because its start-time value changes;
 - no identity or CUDA handle is serialized in the protocol; and
 - the default remains unbound for compatibility with the existing CLI smoke
   workflow.
 
-When process binding is enabled, a claim without a trusted local peer identity
-is rejected. A worker must keep the same process for the complete lease
-lifecycle. Lease timeout and expiry recovery remain unchanged.
+When process binding is enabled, a submission or claim without a trusted local
+peer identity is rejected. A worker must keep the same process for the
+complete lease lifecycle. Lease timeout and expiry recovery remain unchanged.
 
 ## Consequences
 

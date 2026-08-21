@@ -83,13 +83,13 @@ once. It defaults to `1`; increase it only when the GPU workload and quota are
 intended to overlap. Each worker must use a distinct process and claims are
 serialized by the service.
 
-The service supports `weighted_rr` (the default) and `fifo` scheduling
-policies. Both apply at explicit task boundaries; they do not preempt a CUDA
-kernel after submission.
+The service supports `weighted_rr` (the default), `drr` (deficit
+round-robin), and `fifo` scheduling policies. All apply at explicit task
+boundaries; they do not preempt a CUDA kernel after submission.
 
-With `--bind-leases-to-process`, the worker that claims a lease must also send
-its heartbeats and terminal report. The service authenticates this ownership
-with the Unix peer PID, UID, and process start-time identity.
+With `--bind-leases-to-process`, the worker that submits and claims a lease
+must also send its heartbeats and terminal report. The service authenticates
+this ownership with the Unix peer PID, UID, and process start-time identity.
 
 `--max-queued-tasks` provides optional admission backpressure for waiting work.
 When the bound is reached, the service returns `QUEUE_FULL` without reserving
@@ -105,3 +105,30 @@ The standalone client can inspect the service without changing task state:
 The response contains task-state counts, quota bytes, and configured scheduler
 limits. It is a bounded diagnostic snapshot rather than a persistent metrics
 export.
+
+Queue and service latency aggregates are available through the separate
+metrics operation:
+
+```sh
+./build/cuda-gpu/bin/glimmer_control_client \
+    --socket /tmp/glimmer-control.sock metrics
+```
+
+For transparent CUDA applications, start the service in remote mode and set
+`GLIMMER_SCHEDULER_CONTROL_SOCKET` in the trusted launcher. The preload
+interceptor then acquires a task-specific lease before forwarding each covered
+kernel launch, renews long-running leases while their events are pending, and
+reports completion after each CUDA event:
+
+```sh
+export GLIMMER_SCHEDULER_MODE=enforce
+export GLIMMER_SCHEDULER_CONTROL_SOCKET=/tmp/glimmer-control.sock
+export GLIMMER_SCHEDULER_TENANT_ID=tenant-a
+export LD_PRELOAD="$PWD/build/cuda-gpu/lib/libglimmer_cuda_interceptor.so"
+./your_cuda_application
+```
+
+Remote launch admission requires a running service with
+`--execution-mode remote`; `--bind-leases-to-process` is recommended for
+multi-tenant deployments. Transport or lease failures fail the covered launch
+closed. The default remains process-local when the socket variable is unset.

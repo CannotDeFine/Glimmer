@@ -134,6 +134,10 @@ using MemFreeAsyncFunction = CUresult (*)(CUdeviceptr device_pointer, CUstream s
 using MemGetInfoFunction = CUresult (*)(std::size_t* free_bytes, std::size_t* total_bytes);
 using DeviceTotalMemFunction = CUresult (*)(std::size_t* total_bytes, CUdevice device);
 using ContextSynchronizeFunction = CUresult (*)();
+using EventCreateFunction = CUresult (*)(CUevent* event, unsigned int flags);
+using EventRecordFunction = CUresult (*)(CUevent event, CUstream stream);
+using EventQueryFunction = CUresult (*)(CUevent event);
+using EventDestroyFunction = CUresult (*)(CUevent event);
 using ContextGetCurrentFunction = CUresult (*)(CUcontext* context);
 using ContextGetDeviceFunction = CUresult (*)(CUdevice* device);
 using ContextDestroyFunction = CUresult (*)(CUcontext context);
@@ -219,6 +223,10 @@ struct DriverFunctionTable {
     MemGetInfoFunction mem_get_info = nullptr;
     DeviceTotalMemFunction device_total_mem = nullptr;
     ContextSynchronizeFunction context_synchronize = nullptr;
+    EventCreateFunction event_create = nullptr;
+    EventRecordFunction event_record = nullptr;
+    EventQueryFunction event_query = nullptr;
+    EventDestroyFunction event_destroy = nullptr;
     ContextGetCurrentFunction context_get_current = nullptr;
     ContextGetDeviceFunction context_get_device = nullptr;
     ContextDestroyFunction context_destroy = nullptr;
@@ -397,6 +405,10 @@ class DriverDispatch {
     [[nodiscard]] CUresult mem_get_info(std::size_t* free_bytes, std::size_t* total_bytes) const;
     [[nodiscard]] CUresult device_total_mem(std::size_t* total_bytes, CUdevice device) const;
     [[nodiscard]] CUresult context_synchronize() const;
+    [[nodiscard]] CUresult event_create(CUevent* event, unsigned int flags) const;
+    [[nodiscard]] CUresult event_record(CUevent event, CUstream stream) const;
+    [[nodiscard]] CUresult event_query(CUevent event) const;
+    [[nodiscard]] CUresult event_destroy(CUevent event) const;
     [[nodiscard]] CUresult context_get_current(CUcontext* context) const;
     [[nodiscard]] CUresult context_get_device(CUdevice* device) const;
     [[nodiscard]] CUresult context_destroy(CUcontext context) const;
@@ -481,6 +493,7 @@ class DriverDispatch {
     [[nodiscard]] bool has_mem_free_async_ptsz() const;
     [[nodiscard]] bool has_device_total_mem() const;
     [[nodiscard]] bool has_context_synchronize() const;
+    [[nodiscard]] bool has_event_api() const;
     [[nodiscard]] bool has_context_queries() const;
     [[nodiscard]] bool has_context_destroy() const;
     [[nodiscard]] bool has_stream_identity() const;
@@ -565,6 +578,10 @@ class DriverDispatch {
     MemGetInfoFunction mem_get_info_ = nullptr;
     DeviceTotalMemFunction device_total_mem_ = nullptr;
     ContextSynchronizeFunction context_synchronize_ = nullptr;
+    EventCreateFunction event_create_ = nullptr;
+    EventRecordFunction event_record_ = nullptr;
+    EventQueryFunction event_query_ = nullptr;
+    EventDestroyFunction event_destroy_ = nullptr;
     ContextGetCurrentFunction context_get_current_ = nullptr;
     ContextGetDeviceFunction context_get_device_ = nullptr;
     ContextDestroyFunction context_destroy_ = nullptr;

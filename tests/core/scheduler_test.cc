@@ -191,9 +191,12 @@ void test_fifo_policy_order() {
 void test_scheduling_policy_configuration() {
     const auto fifo = glimmer::core::parse_scheduling_policy("fifo");
     const auto weighted = glimmer::core::parse_scheduling_policy("weighted_rr");
+    const auto deficit = glimmer::core::parse_scheduling_policy("drr");
     expect(fifo.has_value() && fifo.value() == SchedulingPolicy::kFifo, "FIFO policy should parse");
     expect(weighted.has_value() && weighted.value() == SchedulingPolicy::kWeightedRoundRobin,
            "weighted policy should parse");
+    expect(deficit.has_value() && deficit.value() == SchedulingPolicy::kDeficitRoundRobin,
+           "deficit policy should parse");
     expect(!glimmer::core::parse_scheduling_policy("unknown").has_value(),
            "unknown policy should be rejected");
     expect(glimmer::core::scheduling_policy_name(SchedulingPolicy::kFifo) == "fifo",
@@ -202,6 +205,40 @@ void test_scheduling_policy_configuration() {
     const Scheduler scheduler(100, SchedulerOptions{.scheduling_policy = invalid_policy});
     expect(scheduler.stats().scheduling_policy == SchedulingPolicy::kWeightedRoundRobin,
            "invalid direct API policy should fall back to weighted round-robin");
+}
+
+void test_specific_dispatch_preserves_policy_order() {
+    Scheduler scheduler(100);
+    const TaskId first = submit(scheduler, "tenant-a", 1);
+    const TaskId second = submit(scheduler, "tenant-b", 1);
+    expect(!scheduler.dispatch_task(second).has_value(),
+           "a task behind the policy head must not bypass fairness");
+    const auto first_lease = scheduler.dispatch_task(first);
+    expect(first_lease.has_value() && first_lease->task_id == first,
+           "the policy head should be claimable by its submitting process");
+    expect(scheduler.complete(first), "the first specific lease should complete");
+    const auto second_lease = scheduler.dispatch_task(second);
+    expect(second_lease.has_value() && second_lease->task_id == second,
+           "the next specific lease should become claimable after completion");
+    expect(scheduler.complete(second), "the second specific lease should complete");
+}
+
+void test_deficit_round_robin_and_latency_stats() {
+    Scheduler scheduler(
+        100, SchedulerOptions{.scheduling_policy = SchedulingPolicy::kDeficitRoundRobin});
+    const auto result = scheduler.submit(
+        TaskSpec{.tenant_id = "tenant-a", .memory_bytes = 1, .weight = 2, .work_units = 2});
+    expect(result.accepted(), "DRR task should be accepted");
+    expect(!scheduler.dispatch_next().has_value(),
+           "DRR should accumulate a quantum before dispatching an expensive task");
+    const auto lease = scheduler.dispatch_next();
+    expect(lease.has_value() && lease->task_id == result.task_id,
+           "DRR should dispatch once the deficit covers task cost");
+    expect(scheduler.complete(result.task_id), "DRR task should complete");
+    const auto stats = scheduler.stats();
+    expect(stats.total_queue_wait_microseconds >= stats.max_queue_wait_microseconds &&
+               stats.total_service_time_microseconds >= stats.max_service_time_microseconds,
+           "scheduler stats should expose consistent queue and service latency aggregates");
 }
 
 void test_weighted_round_robin_order() {
@@ -315,6 +352,8 @@ int main() {
     test_scheduler_stats_snapshot();
     test_fifo_policy_order();
     test_scheduling_policy_configuration();
+    test_specific_dispatch_preserves_policy_order();
+    test_deficit_round_robin_and_latency_stats();
     test_weighted_round_robin_order();
     test_cancellation_and_failure_release_quota();
     test_input_validation_and_tenant_weight_consistency();

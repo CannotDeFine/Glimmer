@@ -22,9 +22,13 @@ TaskAdmissionService::TaskAdmissionService(core::Scheduler& scheduler,
 
 core::SubmitResult TaskAdmissionService::submit(const TaskAdmissionRequest& request,
                                                 TaskResourceRegistrar registrar,
-                                                void* registrar_context) {
+                                                void* registrar_context,
+                                                std::optional<TaskPeerIdentity> peer) {
     if (registrar == nullptr) {
         return {.status = core::SubmitStatus::kInternalError};
+    }
+    if (bind_leases_to_process_ && !valid_peer_identity(peer)) {
+        return {.status = core::SubmitStatus::kInvalidTask};
     }
 
     const core::SubmitResult admission =
@@ -37,6 +41,26 @@ core::SubmitResult TaskAdmissionService::submit(const TaskAdmissionRequest& requ
     }
 
     if (registrar(registrar_context, admission.task_id)) {
+        if (bind_leases_to_process_ || lease_timeout_ != std::chrono::milliseconds::zero()) {
+            bool recorded = false;
+            try {
+                std::scoped_lock lock(lease_mutex_);
+                const auto deadline = lease_timeout_ == std::chrono::milliseconds::zero()
+                                          ? Clock::time_point::max()
+                                          : Clock::now() + lease_timeout_;
+                recorded =
+                    pending_leases_
+                        .emplace(admission.task_id,
+                                 LeaseRecord{.deadline = deadline, .reaping = false, .owner = peer})
+                        .second;
+            } catch (...) {
+                recorded = false;
+            }
+            if (!recorded) {
+                static_cast<void>(scheduler_.cancel(admission.task_id));
+                return {.status = core::SubmitStatus::kInternalError, .task_id = admission.task_id};
+            }
+        }
         return admission;
     }
 
@@ -49,12 +73,18 @@ bool TaskAdmissionService::cancel(core::TaskId task_id) {
     if (cancelled) {
         std::scoped_lock lock(lease_mutex_);
         active_leases_.erase(task_id);
+        pending_leases_.erase(task_id);
     }
     return cancelled;
 }
 
 bool TaskAdmissionService::cancel_queued(core::TaskId task_id) {
-    return scheduler_.cancel_queued(task_id);
+    const bool cancelled = scheduler_.cancel_queued(task_id);
+    if (cancelled) {
+        std::scoped_lock lock(lease_mutex_);
+        pending_leases_.erase(task_id);
+    }
+    return cancelled;
 }
 
 std::optional<core::TaskSnapshot> TaskAdmissionService::claim_next(
@@ -62,10 +92,38 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::claim_next(
     if (bind_leases_to_process_ && !valid_peer_identity(peer)) {
         return std::nullopt;
     }
-    auto snapshot = scheduler_.dispatch_next();
+    return record_lease(scheduler_.dispatch_next(), peer);
+}
+
+std::optional<core::TaskSnapshot> TaskAdmissionService::claim(
+    core::TaskId task_id, std::optional<TaskPeerIdentity> peer) {
+    if (task_id == 0 || (bind_leases_to_process_ && !valid_peer_identity(peer))) {
+        return std::nullopt;
+    }
+    auto existing = scheduler_.find(task_id);
+    if (existing.has_value() && existing->state == core::TaskState::kRunning) {
+        std::scoped_lock lock(lease_mutex_);
+        const auto iterator = active_leases_.find(task_id);
+        if (iterator != active_leases_.end() && owner_matches(iterator->second, peer)) {
+            return existing;
+        }
+        if (!bind_leases_to_process_ && lease_timeout_ == std::chrono::milliseconds::zero()) {
+            return existing;
+        }
+        return std::nullopt;
+    }
+    return record_lease(scheduler_.dispatch_task(task_id), peer);
+}
+
+std::optional<core::TaskSnapshot> TaskAdmissionService::record_lease(
+    std::optional<core::TaskSnapshot> snapshot, std::optional<TaskPeerIdentity> peer) {
     if (!snapshot.has_value() ||
         (!bind_leases_to_process_ && lease_timeout_ == std::chrono::milliseconds::zero())) {
         return snapshot;
+    }
+    {
+        std::scoped_lock lock(lease_mutex_);
+        pending_leases_.erase(snapshot->task_id);
     }
     bool lease_recorded = false;
     try {
@@ -155,25 +213,54 @@ bool TaskAdmissionService::reap_expired() {
     if (lease_timeout_ == std::chrono::milliseconds::zero()) {
         return false;
     }
-    std::optional<core::TaskId> expired_task;
+    std::optional<core::TaskId> expired_pending_task;
+    std::optional<core::TaskId> expired_running_task;
     {
         std::scoped_lock lock(lease_mutex_);
         const auto now = Clock::now();
-        for (auto& [task_id, lease] : active_leases_) {
+        for (auto& [task_id, lease] : pending_leases_) {
             if (!lease.reaping && now >= lease.deadline) {
-                expired_task = task_id;
+                expired_pending_task = task_id;
                 lease.reaping = true;
                 break;
             }
         }
+        if (expired_pending_task.has_value()) {
+            // Reclaim queued work before considering running leases. This
+            // prevents a crashed submitter from blocking the policy head.
+            expired_running_task = std::nullopt;
+        } else {
+            for (auto& [task_id, lease] : active_leases_) {
+                if (!lease.reaping && now >= lease.deadline) {
+                    expired_running_task = task_id;
+                    lease.reaping = true;
+                    break;
+                }
+            }
+        }
     }
-    if (!expired_task.has_value()) {
+    if (expired_pending_task.has_value()) {
+        const bool cancelled = scheduler_.cancel_queued(expired_pending_task.value());
+        std::scoped_lock lock(lease_mutex_);
+        const auto iterator = pending_leases_.find(expired_pending_task.value());
+        if (iterator == pending_leases_.end()) {
+            return cancelled;
+        }
+        if (cancelled) {
+            pending_leases_.erase(iterator);
+            return cancelled;
+        }
+        iterator->second.reaping = false;
+        iterator->second.deadline = Clock::now() + lease_timeout_;
         return false;
     }
-    const bool failed = scheduler_.fail(expired_task.value());
-    const auto snapshot = scheduler_.find(expired_task.value());
+    if (!expired_running_task.has_value()) {
+        return false;
+    }
+    const bool failed = scheduler_.fail(expired_running_task.value());
+    const auto snapshot = scheduler_.find(expired_running_task.value());
     std::scoped_lock lock(lease_mutex_);
-    const auto lease_iterator = active_leases_.find(expired_task.value());
+    const auto lease_iterator = active_leases_.find(expired_running_task.value());
     if (lease_iterator == active_leases_.end()) {
         return failed;
     }

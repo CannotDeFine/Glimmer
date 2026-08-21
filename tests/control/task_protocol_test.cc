@@ -71,6 +71,18 @@ void test_request_round_trip() {
                parsed_claim.request->operation == TaskProtocolOperation::kClaim,
            "claim should round trip");
 
+    const TaskProtocolRequest specific_claim{
+        .operation = TaskProtocolOperation::kClaim, .admission = {}, .task_id = 42};
+    const auto specific_claim_text = format_task_protocol_request(specific_claim);
+    expect(specific_claim_text.has_value() &&
+               specific_claim_text.value_or("") == "GLIMMER_TASK_V1 CLAIM 42\n",
+           "specific claim should format canonically");
+    const auto parsed_specific_claim =
+        parse_task_protocol_request(specific_claim_text.value_or(""));
+    expect(parsed_specific_claim.parsed() && parsed_specific_claim.request.has_value() &&
+               parsed_specific_claim.request->task_id == 42,
+           "specific claim should round trip");
+
     const TaskProtocolRequest stats{.operation = TaskProtocolOperation::kStats, .admission = {}};
     const auto stats_text = format_task_protocol_request(stats);
     expect(stats_text.has_value() && stats_text.value_or("") == "GLIMMER_TASK_V1 STATS\n",
@@ -79,6 +91,16 @@ void test_request_round_trip() {
     expect(parsed_stats.parsed() && parsed_stats.request.has_value() &&
                parsed_stats.request->operation == TaskProtocolOperation::kStats,
            "stats should round trip");
+
+    const TaskProtocolRequest metrics{.operation = TaskProtocolOperation::kMetrics,
+                                      .admission = {}};
+    const auto metrics_text = format_task_protocol_request(metrics);
+    expect(metrics_text.has_value() && metrics_text.value_or("") == "GLIMMER_TASK_V1 METRICS\n",
+           "metrics should format canonically");
+    const auto parsed_metrics = parse_task_protocol_request(metrics_text.value_or(""));
+    expect(parsed_metrics.parsed() && parsed_metrics.request.has_value() &&
+               parsed_metrics.request->operation == TaskProtocolOperation::kMetrics,
+           "metrics should round trip");
 }
 
 void test_request_rejects_invalid_input() {
@@ -192,7 +214,30 @@ void test_response_round_trip() {
                                          .quota_reserved_bytes = 1024,
                                          .quota_allocated_bytes = 2048,
                                          .max_running_tasks = 2,
-                                         .max_queued_tasks = 4}}}) {
+                                         .max_queued_tasks = 4}},
+          TaskProtocolResponse{.kind = TaskProtocolResponseKind::kMetrics,
+                               .task_id = 0,
+                               .state = TaskProtocolState::kQueued,
+                               .error = TaskProtocolErrorCode::kInternalError,
+                               .tenant_id = {},
+                               .memory_bytes = 0,
+                               .weight = 0,
+                               .work_units = 0,
+                               .stats = {.total_task_count = 7,
+                                         .queued_task_count = 1,
+                                         .running_task_count = 2,
+                                         .completed_task_count = 2,
+                                         .cancelled_task_count = 1,
+                                         .failed_task_count = 1,
+                                         .quota_limit_bytes = 8192,
+                                         .quota_reserved_bytes = 1024,
+                                         .quota_allocated_bytes = 2048,
+                                         .max_running_tasks = 2,
+                                         .max_queued_tasks = 4,
+                                         .total_queue_wait_microseconds = 11,
+                                         .max_queue_wait_microseconds = 7,
+                                         .total_service_time_microseconds = 19,
+                                         .max_service_time_microseconds = 13}}}) {
         const auto encoded = format_task_protocol_response(response);
         expect(encoded.has_value(), "valid response should format");
         const auto parsed = parse_task_protocol_response(encoded.value_or(""));
@@ -222,7 +267,15 @@ void test_response_round_trip() {
                     parsed.response->stats.quota_allocated_bytes ==
                         response.stats.quota_allocated_bytes &&
                     parsed.response->stats.max_running_tasks == response.stats.max_running_tasks &&
-                    parsed.response->stats.max_queued_tasks == response.stats.max_queued_tasks,
+                    parsed.response->stats.max_queued_tasks == response.stats.max_queued_tasks &&
+                    parsed.response->stats.total_queue_wait_microseconds ==
+                        response.stats.total_queue_wait_microseconds &&
+                    parsed.response->stats.max_queue_wait_microseconds ==
+                        response.stats.max_queue_wait_microseconds &&
+                    parsed.response->stats.total_service_time_microseconds ==
+                        response.stats.total_service_time_microseconds &&
+                    parsed.response->stats.max_service_time_microseconds ==
+                        response.stats.max_service_time_microseconds,
                 "response fields should round trip");
         }
     }

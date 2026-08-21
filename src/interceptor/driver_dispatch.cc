@@ -247,6 +247,10 @@ DriverDispatch::DriverDispatch(DriverFunctionTable functions) noexcept
       mem_get_info_(functions.mem_get_info),
       device_total_mem_(functions.device_total_mem),
       context_synchronize_(functions.context_synchronize),
+      event_create_(functions.event_create),
+      event_record_(functions.event_record),
+      event_query_(functions.event_query),
+      event_destroy_(functions.event_destroy),
       context_get_current_(functions.context_get_current),
       context_get_device_(functions.context_get_device),
       context_destroy_(functions.context_destroy),
@@ -420,6 +424,13 @@ bool DriverDispatch::initialize() {
         reinterpret_cast<DeviceTotalMemFunction>(load_symbol("cuDeviceTotalMem_v2"));
     context_synchronize_ =
         reinterpret_cast<ContextSynchronizeFunction>(load_symbol("cuCtxSynchronize"));
+    event_create_ = reinterpret_cast<EventCreateFunction>(load_symbol("cuEventCreate"));
+    event_record_ = reinterpret_cast<EventRecordFunction>(load_symbol("cuEventRecord"));
+    event_query_ = reinterpret_cast<EventQueryFunction>(load_symbol("cuEventQuery"));
+    event_destroy_ = reinterpret_cast<EventDestroyFunction>(load_symbol("cuEventDestroy_v2"));
+    if (event_destroy_ == nullptr) {
+        event_destroy_ = reinterpret_cast<EventDestroyFunction>(load_symbol("cuEventDestroy"));
+    }
     context_get_current_ =
         reinterpret_cast<ContextGetCurrentFunction>(load_symbol("cuCtxGetCurrent"));
     context_get_device_ = reinterpret_cast<ContextGetDeviceFunction>(load_symbol("cuCtxGetDevice"));
@@ -1069,6 +1080,38 @@ CUresult DriverDispatch::context_synchronize() const {
     return context_synchronize_();
 }
 
+CUresult DriverDispatch::event_create(CUevent* event, unsigned int flags) const {
+    DriverCallScope scope;
+    if (event_create_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return event_create_(event, flags);
+}
+
+CUresult DriverDispatch::event_record(CUevent event, CUstream stream) const {
+    DriverCallScope scope;
+    if (event_record_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return event_record_(event, stream);
+}
+
+CUresult DriverDispatch::event_query(CUevent event) const {
+    DriverCallScope scope;
+    if (event_query_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return event_query_(event);
+}
+
+CUresult DriverDispatch::event_destroy(CUevent event) const {
+    DriverCallScope scope;
+    if (event_destroy_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return event_destroy_(event);
+}
+
 CUresult DriverDispatch::context_get_current(CUcontext* context) const {
     DriverCallScope scope;
     if (context_get_current_ == nullptr) {
@@ -1470,6 +1513,11 @@ bool DriverDispatch::has_device_total_mem() const {
 
 bool DriverDispatch::has_context_synchronize() const {
     return context_synchronize_ != nullptr;
+}
+
+bool DriverDispatch::has_event_api() const {
+    return event_create_ != nullptr && event_record_ != nullptr && event_query_ != nullptr &&
+           event_destroy_ != nullptr;
 }
 
 bool DriverDispatch::has_context_queries() const {

@@ -38,9 +38,9 @@ concrete responsibility and a testable interface.
 | --- | --- | --- |
 | `core` | `include/glimmer/core/`, `src/core/` | Provides the thread-safe quota ledger and task-boundary scheduler with explicit admission, configurable FIFO or weighted-round-robin dispatch policies, weighted tenant queues, configurable concurrent dispatch slots, optional queued-work backpressure, completion, cancellation, and failure transitions. It has no CUDA, dynamic-linker, transport, or process-global dependencies. |
 | `backend` | `include/glimmer/backend/`, `src/backend/` | Defines the internal task execution contract, provides a deterministic simulated backend, provides the single-threaded executor that translates backend progress into scheduler terminal transitions, and optionally provides the explicit CUDA task backend under `src/backend/cuda/`. It does not own tenant fairness, quota policy, or transparent CUDA interception. |
-| `control` | `include/glimmer/control/`, `src/control/` | Defines the quota-store contract, adapts process-local quota requests to `core`, provides transactional explicit-task admission with backend-registration rollback, composes aggregate, task, and physical-device capacity quotas, implements the Linux shared-memory tenant accounting store, provides authenticated Unix-socket server/client transport adapters, and exposes bounded read-only scheduler/quota stats snapshots. It computes tenant/task/device-visible memory information and has no CUDA or dynamic-linker dependencies. |
+| `control` | `include/glimmer/control/`, `src/control/` | Defines the quota-store contract, adapts process-local quota requests to `core`, provides transactional explicit-task admission with backend-registration rollback, composes aggregate, task, and physical-device capacity quotas, implements the Linux shared-memory tenant accounting store, provides authenticated Unix-socket server/client transport adapters, coordinates optional cross-process transparent launch leases, and exposes bounded read-only scheduler/quota stats and latency snapshots. It computes tenant/task/device-visible memory information and has no CUDA or dynamic-linker dependencies. |
 | `app` | `src/control_service_main.cc`, `src/control_client_main.cc` | Provides standalone control-service/client entry points. The service supports deterministic simulated execution and remote worker leases; neither binary serializes or owns CUDA resources. |
-| `interceptor` | `src/interceptor/` and `src/interceptor/internal/` | Provides ABI-compatible wrappers for covered CUDA Driver, PTDS stream-ordered Driver, CUDA kernel-launch, Runtime, memory-pool, IPC, external-memory, array, graphics, and graph-memory APIs, routes supported symbol lookups, and owns process-local allocation metadata while using `control` for quota decisions. Accounted allocations update the ledger; APIs whose ownership or byte lifetime cannot be reconstructed are explicitly fail-closed under quota and delegated when quota is disabled. Kernel launches are forwarded unchanged; `GLIMMER_SCHEDULER_MODE=observe` emits a sampled boundary diagnostic. The `internal/` headers are private implementation interfaces and are not public project headers. |
+| `interceptor` | `src/interceptor/` and `src/interceptor/internal/` | Provides ABI-compatible wrappers for covered CUDA Driver, PTDS stream-ordered Driver, CUDA kernel-launch, Runtime, memory-pool, IPC, external-memory, array, graphics, and graph-memory APIs, routes supported symbol lookups, and owns process-local allocation metadata while using `control` for quota decisions. Accounted allocations update the ledger; APIs whose ownership or byte lifetime cannot be reconstructed are explicitly fail-closed under quota and delegated when quota is disabled. Observe mode forwards launches and emits a sampled boundary diagnostic; enforce mode admits covered launches through a process-local `control::LaunchGate`, or an opt-in authenticated Unix-socket launch lease, and releases the slot after an internal CUDA event completes. Neither path provides kernel preemption. The `internal/` headers are private implementation interfaces and are not public project headers. |
 | `examples` | `examples/` | Contains independent real-GPU CUDA workload harnesses and the opt-in `cuda_task_backend/` demonstration. Each directory owns its source and generated artifacts; examples do not modify transparent interception behavior or define scheduler policy. |
 
 `control::CompositeQuota` is the isolation boundary used when a shared tenant
@@ -54,15 +54,16 @@ The interceptor is split into focused implementation units:
 
 | Unit | Responsibility |
 | --- | --- |
-| `driver_api_interceptor.cc` | CUDA Driver admission, quota accounting, context/stream completion, and symbol-resolution policy. |
+| `driver_api_interceptor.cc` | CUDA Driver admission, quota accounting, context/stream completion, launch-gate admission, and symbol-resolution policy. |
 | `driver_api_wrappers.cc` | Exported C/CUDA ABI entry points. These wrappers only contain boundary exception handling and delegate to the interceptor implementation. |
-| `runtime_api_interceptor.cc` | CUDA Runtime symbol resolution, Runtime-call reentrancy, compiler-generated and public kernel-launch forwarding, independent Runtime async/pool accounting entry points, and memory-pool import policy. |
-| `driver_dispatch.cc` | Dynamic loading and guarded invocation of real CUDA Driver functions, including PTDS variants, kernel launch entry points, and Linux loader/vendor Driver discovery. |
+| `runtime_api_interceptor.cc` | CUDA Runtime symbol resolution, Runtime-call reentrancy, compiler-generated and public kernel-launch admission, independent Runtime async/pool accounting entry points, and memory-pool import policy. |
+| `driver_dispatch.cc` | Dynamic loading and guarded invocation of real CUDA Driver functions, including PTDS variants, kernel launch and event entry points, and Linux loader/vendor Driver discovery. |
 | `nvml_dispatch.cc` | Dynamic loading and guarded invocation of the real NVML library and its optional v1/v2 entry points. |
 | `nvml_api_wrappers.cc` | Exported NVML ABI entry points that route to the interceptor's NVML presentation policy. |
 | `symbol_interceptor.cc` | `dlsym` interception, caller classification, and safe delegation to the real loader. |
 | `symbol_registry.cc` | The single registry of exported aliases used by `dlsym` and `cuGetProcAddress`. |
 | `internal/allocation_registry.cc` | Process-local allocation metadata, release state, and deferred stream completion. |
+| `launch_completion_tracker.cc` | Records a Driver event after an admitted launch and completes or fails the corresponding process-local launch lease from a monitor thread. |
 | `internal/diagnostics.cc` | Allocation-free diagnostics for loader and accounting failure paths, plus opt-in structured kernel-launch and virtualized memory-view observations. |
 
 ## Dependency direction
@@ -105,9 +106,10 @@ owning targets and tests.
 - The scheduler operates at explicit task boundaries. It does not claim to
   preempt arbitrary running CUDA kernels.
 - Scheduling policy is selected when the scheduler is constructed. The
-  current policies are FIFO and weighted round-robin; both control dispatch
-  order only and keep quota admission and terminal state transitions in the
-  scheduler core.
+  current policies are FIFO, weighted round-robin, and deficit round-robin;
+  all control dispatch order only and keep quota admission and terminal state
+  transitions in the scheduler core. DRR uses `work_units` as task cost and
+  `weight` as tenant quantum.
 - Explicit clients use `control::TaskAdmissionService` to bind a logical task
   admission to backend-resource registration. A failed registration cancels the
   queued task and releases its scheduler reservation.
@@ -130,10 +132,11 @@ owning targets and tests.
   reservation. With timeout disabled, a running lease remains visible until an
   explicit terminal report or service restart.
 - The control service can opt into process-bound leases. The Unix transport
-  derives a PID/UID/start-time identity from `SO_PEERCRED` and `/proc`; only
-  the claiming process may renew or complete that lease. This is an ownership
-  check, not CUDA kernel preemption, and the default remains unbound for CLI
-  compatibility.
+  derives a PID/UID/start-time identity from `SO_PEERCRED` and `/proc`; submit,
+  claim, heartbeat, completion, and failure must then use a valid peer, and
+  only the submitting/claiming process may renew or complete that lease. This
+  is an ownership check, not CUDA kernel preemption, and the default remains
+  unbound for CLI compatibility.
 - The optional queued-task capacity rejects new work with explicit
   `QUEUE_FULL` backpressure before quota reservation; it does not limit running
   tasks or change weighted ordering.
@@ -144,6 +147,18 @@ owning targets and tests.
   contract; the core owns admission and accounting decisions.
 - An interceptor runs inside an application process and must treat all CUDA
   handles and device pointers as process-local.
+- In scheduler enforce mode, the interceptor blocks a covered launch caller
+  before forwarding until the process-local launch gate admits it. A Driver
+  event recorded on the same stream releases the slot after the work reaches
+  that event. Event support is required; an unavailable event path fails
+  closed rather than forwarding an unenforced launch.
+- With `GLIMMER_SCHEDULER_CONTROL_SOCKET`, the same gate submits a one-unit
+  task and polls a task-specific control-plane claim. The service applies the
+  global policy and may bind the lease to the requesting process identity.
+  Completion and failure are reported over the same protocol. A missing or
+  failed remote lease fails the launch closed.
+- Transparent launch admission remains a task-boundary mechanism: it does not
+  preempt a running kernel or capture CUDA graph/cooperative-launch state.
 
 ## Change rules
 

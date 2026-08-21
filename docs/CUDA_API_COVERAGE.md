@@ -96,11 +96,29 @@ The interceptor must cover each supported path before claiming compatibility.
 | `dlsym` | Return a supported wrapper when a CUDA Driver allocation, release, VMM handle, kernel launch, stream identity, or query symbol is requested. Delegate all other symbols to the real resolver. | M2/M3 (implemented) | A preload fixture resolves supported PTDS, kernel-launch, and VMM symbols and verifies delegation for an unsupported symbol. |
 | `cuGetProcAddress` and `cuGetProcAddress_v2` | Return a supported wrapper for requested CUDA Driver APIs and versions. Delegate unsupported requests unchanged. | M2 (implemented) | A CUDA integration test resolves and calls `cuMemGetInfo` through the versioned API and verifies an unsupported request. |
 | CUDA Runtime interception | Wrap synchronous allocation/free (`cudaMalloc`, `cudaMallocManaged`, `cudaMallocPitch`, `cudaMalloc3D`) and stream-ordered allocation/free APIs, including `cudaMallocFromPoolAsync`/`cudaMallocFromPoolAsync_ptsz`, completion boundaries, memory-pool lifecycle/query APIs, and memory-pool import/export APIs. Runtime calls use a reentrancy guard; allocation bytes are independently accounted through the shared registry, while imported pool handles/pointers are rejected when quota mode is enabled. | M2/M3 (implemented) | Fake Runtime and CUDA integration tests plus the real workload matrix for synchronous, stream-ordered, managed, pitched, multi-stream, and memory-pool Runtime calls. |
-| CUDA kernel launch observation | Forward `cuLaunchKernel`, `cuLaunchKernel_ptsz`, `cudaLaunchKernel`, `cudaLaunchKernel_ptsz`, `__cudaLaunchKernel`, and `__cudaLaunchKernel_ptsz` with their exact ABIs and preserve the caller's launch arguments. In `observe` mode, emit one allocation-free boundary diagnostic after a successful launch; no queueing, delay, rejection, or kernel preemption is performed. | M4 partial | Dispatch, symbol-registry, and fake Runtime forwarding tests plus real GPU Driver-PTX and Runtime-compiled workloads that allocate memory, launch a kernel, synchronize, and verify the result through `LD_PRELOAD`. |
+| CUDA kernel launch scheduling | Forward `cuLaunchKernel`, `cuLaunchKernel_ptsz`, `cudaLaunchKernel`, `cudaLaunchKernel_ptsz`, `__cudaLaunchKernel`, and `__cudaLaunchKernel_ptsz` with their exact ABIs and preserve the caller's launch arguments. In `observe` mode, emit an allocation-free boundary diagnostic after a successful launch. In `enforce` mode, block at the call boundary until the process-local gate or opt-in control-plane launch lease admits the call, then record a Driver event on the same stream and release the slot after that event completes. Missing event support rejects admission with `CUDA_ERROR_NOT_SUPPORTED`; a post-launch event-recording failure returns `CUDA_ERROR_UNKNOWN` after failing the lease. The control-plane path coordinates processes but still does not preempt running kernels or capture graph/cooperative launches. | M4 partial | Dispatch, symbol-registry, fake enforce/observe tests, real GPU Driver-PTX and Runtime-compiled workloads, and no-GPU remote lease process tests. |
 
 `cuInit` is also wrapped as an initialization safety boundary. It does not
 make an accounting decision; it establishes the Driver-call guard so that
 Driver-internal `dlsym` requests are delegated to the real resolver.
+
+When `GLIMMER_SCHEDULER_MODE=enforce`, the launch wrappers use
+`control::LaunchGate`. `GLIMMER_MAX_CONCURRENT_KERNELS` sets the number of
+admitted launches (default `1`) in local mode, and
+`GLIMMER_SCHEDULER_POLICY` selects `weighted_rr` (the default), `drr`, or
+`fifo`.
+`GLIMMER_SCHEDULER_TENANT_ID` identifies the local queue and falls back to
+`GLIMMER_QUOTA_TENANT_ID`; `GLIMMER_SCHEDULER_WEIGHT` optionally sets its
+positive weight. The caller may therefore block before the real CUDA launch
+while another admitted launch is still running. The completion tracker creates
+an internal non-timing Driver event and records it on the caller's stream;
+event completion, launch failure, or tracker failure releases the lease. If
+`GLIMMER_SCHEDULER_CONTROL_SOCKET` is set, the gate submits and claims a
+task-specific lease from the authenticated Linux control service, renews a
+long-running lease while its completion event is pending, and reports
+`COMPLETE` or `FAIL` after the event boundary. The tracker is deliberately
+separate from the public symbol registry, so its event calls cannot recurse
+through Glimmer's wrappers. Neither mode claims kernel preemption.
 
 The real Driver implementation is resolved from `libcuda.so.1` and cached
 outside the public wrapper path. On Linux installations that split the Driver
@@ -324,21 +342,25 @@ The VMM increment is complete only when all of the following are true:
    presentation. CUDA IPC imports follow the same fail-closed policy, while
    IPC exports and closes remain transparent in both quota modes.
 
-## Kernel launch observation increment
+## Kernel launch scheduling increment
 
-The current launch increment proves transparent execution for a real CUDA
-Driver workload. `cuLaunchKernel` and its PTDS entry point are dynamically
-resolved, exported through the preload library, and forwarded without changing
-the launch configuration, argument storage, stream, or return code. The
-optional `GLIMMER_SCHEDULER_MODE=observe` setting reports the first successful
-launch through the interceptor's allocation-free diagnostic path. Set
+The launch increment proves transparent execution for a real CUDA Driver and
+Runtime workload while adding an opt-in admission boundary. The covered
+Driver, PTDS, public Runtime, and compiler-generated `__cuda` entry points
+preserve the caller's launch configuration, argument storage, stream, and ABI.
+The optional `GLIMMER_SCHEDULER_MODE=observe` setting reports successful
+launches through the interceptor's allocation-free diagnostic path. Set
 `GLIMMER_TRACE_KERNEL_LAUNCHES=1` to report every successful launch with its
 API, dimensions, shared-memory size, stream, and process-local sequence number.
 Set `GLIMMER_TRACE_MEMORY_INFO=1` to report the virtualized memory view returned
 by the CUDA memory-information APIs.
-`enforce`
-is intentionally not an admission queue: it currently forwards CUDA calls and
-reports that enforcement is not implemented. Cooperative and graph launch
-families remain separate follow-up coverage. The Runtime compiler-generated
-path is covered by the optional CUDA GPU test, while its public and `__cuda`
-ABI forwarding wrappers remain transparent and non-enforcing.
+
+With `GLIMMER_SCHEDULER_MODE=enforce`, the process-local launch gate blocks a
+caller before forwarding when the configured in-flight capacity is full. A
+non-timing Driver event recorded on the same stream releases the slot after
+completion. Event API absence rejects the launch with
+`CUDA_ERROR_NOT_SUPPORTED`; launch or event-tracking failures fail and release
+the lease. Without `GLIMMER_SCHEDULER_CONTROL_SOCKET`, this gate is
+process-local; the opt-in socket path adds cross-process admission and lease
+heartbeats without moving CUDA handles. Neither path preempts running kernels.
+Cooperative and graph launch families remain separate follow-up coverage.

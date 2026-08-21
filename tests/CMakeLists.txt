@@ -107,6 +107,36 @@ glimmer_enable_clang_tidy(glimmer_control_task_admission_test)
 add_test(NAME glimmer_control_task_admission_test
     COMMAND glimmer_control_task_admission_test)
 
+add_executable(glimmer_control_launch_gate_test control/launch_gate_test.cc)
+
+target_link_libraries(glimmer_control_launch_gate_test
+    PRIVATE
+        Glimmer::control
+)
+
+glimmer_enable_clang_tidy(glimmer_control_launch_gate_test)
+
+add_test(NAME glimmer_control_launch_gate_test
+    COMMAND glimmer_control_launch_gate_test)
+
+add_executable(glimmer_control_launch_gate_remote_process_test
+    control/launch_gate_remote_process_test.cc
+)
+
+target_link_libraries(glimmer_control_launch_gate_remote_process_test
+    PRIVATE
+        Glimmer::control
+)
+
+glimmer_enable_clang_tidy(glimmer_control_launch_gate_remote_process_test)
+
+add_test(NAME glimmer_control_launch_gate_remote_process_test
+    COMMAND glimmer_control_launch_gate_remote_process_test)
+set_tests_properties(glimmer_control_launch_gate_remote_process_test PROPERTIES
+    SKIP_RETURN_CODE 77
+    TIMEOUT 10
+)
+
 add_executable(glimmer_control_task_endpoint_test control/task_endpoint_test.cc)
 
 target_link_libraries(glimmer_control_task_endpoint_test

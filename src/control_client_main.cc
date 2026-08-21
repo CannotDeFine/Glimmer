@@ -18,7 +18,8 @@ void print_usage(std::ostream& output, std::string_view program) {
            << "  " << program << " --socket PATH heartbeat TASK_ID\n"
            << "  " << program << " --socket PATH complete TASK_ID\n"
            << "  " << program << " --socket PATH fail TASK_ID\n"
-           << "  " << program << " --socket PATH stats\n";
+           << "  " << program << " --socket PATH stats\n"
+           << "  " << program << " --socket PATH metrics\n";
 }
 
 template <typename Integer>
@@ -68,12 +69,14 @@ int main(int argc, char** argv) {
             return EXIT_FAILURE;
         }
         request.operation = glimmer::control::TaskProtocolOperation::kClaim;
-    } else if (operation == "stats") {
+    } else if (operation == "stats" || operation == "metrics") {
         if (argc != 4) {
             print_usage(std::cerr, argv[0]);
             return EXIT_FAILURE;
         }
-        request.operation = glimmer::control::TaskProtocolOperation::kStats;
+        request.operation = operation == "stats"
+                                ? glimmer::control::TaskProtocolOperation::kStats
+                                : glimmer::control::TaskProtocolOperation::kMetrics;
     } else {
         if (argc != 5 || !parse_positive(argv[4], &request.task_id)) {
             print_usage(std::cerr, argv[0]);

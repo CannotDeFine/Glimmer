@@ -99,8 +99,14 @@ int main(int argc, char** argv) {
 
     glimmer::core::Scheduler scheduler(glimmer::core::MemoryBytes{8} * 1024 * 1024,
                                        glimmer::core::SchedulerOptions{.max_running_tasks = 2});
-    glimmer::control::TaskAdmissionService admission_service(scheduler,
-                                                             std::chrono::milliseconds{200}, true);
+    // This fixture submits work from the parent and lets independent workers
+    // claim it. Process-bound ownership is covered by the dedicated remote
+    // launch-gate process test, where each worker submits its own lease.
+    // CUDA context/module startup can take longer than the worker's first
+    // polling window. Keep the lease timeout long enough for admission while
+    // still exercising heartbeat-based renewal during execution.
+    glimmer::control::TaskAdmissionService admission_service(
+        scheduler, std::chrono::milliseconds{2'000}, false);
     glimmer::control::TaskControlEndpoint endpoint(admission_service, register_resource,
                                                    &scheduler);
     glimmer::control::UnixSocketControlServer server(

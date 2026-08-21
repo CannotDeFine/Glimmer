@@ -43,7 +43,8 @@ class TaskAdmissionService final {
 
     [[nodiscard]] core::SubmitResult submit(const TaskAdmissionRequest& request,
                                             TaskResourceRegistrar registrar,
-                                            void* registrar_context);
+                                            void* registrar_context,
+                                            std::optional<TaskPeerIdentity> peer = std::nullopt);
     [[nodiscard]] bool cancel(core::TaskId task_id);
     [[nodiscard]] bool cancel_queued(core::TaskId task_id);
     // Claims the next queued task and transitions it to running. The returned
@@ -52,6 +53,11 @@ class TaskAdmissionService final {
     // local identity with a non-zero start-time value.
     [[nodiscard]] std::optional<core::TaskSnapshot> claim_next(
         std::optional<TaskPeerIdentity> peer = std::nullopt);
+    // Claims a specific queued task when it is next under the scheduler
+    // policy. This is used by process-bound transparent launch clients so a
+    // process cannot accidentally execute another tenant's lease.
+    [[nodiscard]] std::optional<core::TaskSnapshot> claim(
+        core::TaskId task_id, std::optional<TaskPeerIdentity> peer = std::nullopt);
     [[nodiscard]] bool heartbeat(core::TaskId task_id,
                                  std::optional<TaskPeerIdentity> peer = std::nullopt);
     [[nodiscard]] bool complete(core::TaskId task_id,
@@ -75,11 +81,14 @@ class TaskAdmissionService final {
 
     [[nodiscard]] bool owner_matches(const LeaseRecord& lease,
                                      const std::optional<TaskPeerIdentity>& peer) const noexcept;
+    [[nodiscard]] std::optional<core::TaskSnapshot> record_lease(
+        std::optional<core::TaskSnapshot> snapshot, std::optional<TaskPeerIdentity> peer);
 
     std::chrono::milliseconds lease_timeout_;
     bool bind_leases_to_process_ = false;
     std::mutex lease_mutex_;
     std::unordered_map<core::TaskId, LeaseRecord> active_leases_;
+    std::unordered_map<core::TaskId, LeaseRecord> pending_leases_;
 };
 
 }  // namespace glimmer::control

@@ -12,6 +12,7 @@
 #include "internal/diagnostics.h"
 #include "internal/driver_api_interceptor.h"
 #include "internal/driver_dispatch.h"
+#include "internal/launch_completion_tracker.h"
 #include "internal/runtime_api_bridge.h"
 #include "internal/symbol_registry.h"
 #include "internal/nvml_dispatch.h"
@@ -31,6 +32,7 @@
 #include <optional>
 #include <system_error>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -43,6 +45,8 @@ using glimmer::control::DeviceCapacityQuota;
 using glimmer::control::DeviceId;
 using glimmer::control::DeviceMemoryCapacity;
 using glimmer::control::DeviceMemoryCapacityResolver;
+using glimmer::control::LaunchGate;
+using glimmer::control::LaunchGateOptions;
 using glimmer::control::ProcessMemoryQuota;
 using glimmer::control::QuotaStore;
 using glimmer::control::SharedMemoryQuota;
@@ -64,6 +68,8 @@ struct InterceptorState {
     std::once_flag initialization_once;
     DriverDispatch driver;
     NvmlDispatch nvml;
+    std::unique_ptr<LaunchGate> launch_gate;
+    std::unique_ptr<LaunchCompletionTracker> launch_tracker;
     QuotaMode quota_mode = QuotaMode::kDisabled;
     glimmer::core::SchedulerMode scheduler_mode = glimmer::core::SchedulerMode::kOff;
     std::atomic<bool> launch_observation_reported = false;
@@ -73,6 +79,7 @@ struct InterceptorState {
     std::unique_ptr<QuotaStore> quota;
     glimmer::interceptor::AllocationRegistry allocations;
     bool is_driver_ready = false;
+    bool launch_scheduler_ready = false;
     bool uses_shared_quota = false;
 };
 
@@ -93,8 +100,18 @@ class ProcAddressV2Scope {
 };
 
 [[nodiscard]] InterceptorState& get_state() {
-    static InterceptorState state;
-    return state;
+    // The state intentionally outlives normal C++ teardown. A forked child
+    // cannot join threads inherited from the parent, so it receives a fresh
+    // state on its first intercepted call instead of destroying the parent's
+    // thread objects during child exit.
+    static InterceptorState* state = new InterceptorState();
+    static pid_t state_pid = ::getpid();
+    const pid_t current_pid = ::getpid();
+    if (state_pid != current_pid) {
+        state = new InterceptorState();
+        state_pid = current_pid;
+    }
+    return *state;
 }
 
 [[nodiscard]] std::optional<MemoryBytes> read_memory_limit(const char* variable_name) {
@@ -117,6 +134,32 @@ class ProcAddressV2Scope {
 
 [[nodiscard]] std::optional<MemoryBytes> read_quota_limit() {
     return read_memory_limit("GLIMMER_MEMORY_LIMIT_BYTES");
+}
+
+[[nodiscard]] std::optional<std::size_t> read_positive_size(const char* variable_name) {
+    const std::optional<MemoryBytes> value = read_memory_limit(variable_name);
+    if (!value.has_value() || value.value() == 0 ||
+        value.value() > std::numeric_limits<std::size_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>(value.value());
+}
+
+[[nodiscard]] std::optional<std::uint32_t> read_positive_weight() {
+    const std::optional<MemoryBytes> value = read_memory_limit("GLIMMER_SCHEDULER_WEIGHT");
+    if (!value.has_value() || value.value() == 0 ||
+        value.value() > std::numeric_limits<std::uint32_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(value.value());
+}
+
+[[nodiscard]] std::optional<glimmer::core::SchedulingPolicy> read_scheduling_policy() {
+    const char* value = std::getenv("GLIMMER_SCHEDULER_POLICY");
+    if (value == nullptr) {
+        return glimmer::core::SchedulingPolicy::kWeightedRoundRobin;
+    }
+    return glimmer::core::parse_scheduling_policy(value);
 }
 
 [[nodiscard]] std::optional<glimmer::control::DeviceId> read_quota_device() {
@@ -212,6 +255,60 @@ std::uint64_t next_launch_observation_count(std::atomic<std::uint64_t>& count) n
     return left * right;
 }
 
+// The setup owns allocator-backed scheduler state but converts every setup
+// failure into a diagnostic and a disabled enforcement path.
+// NOLINTNEXTLINE(bugprone-exception-escape)
+void initialize_launch_scheduler(InterceptorState& state) noexcept {
+    if (state.scheduler_mode != glimmer::core::SchedulerMode::kEnforce) {
+        return;
+    }
+
+    const char* configured_max_concurrent = std::getenv("GLIMMER_MAX_CONCURRENT_KERNELS");
+    const std::optional<std::size_t> max_concurrent =
+        configured_max_concurrent == nullptr ? std::optional<std::size_t>{1}
+                                             : read_positive_size("GLIMMER_MAX_CONCURRENT_KERNELS");
+    const std::optional<glimmer::core::SchedulingPolicy> policy = read_scheduling_policy();
+    const std::optional<std::uint32_t> weight = read_positive_weight();
+    const char* configured_tenant = std::getenv("GLIMMER_SCHEDULER_TENANT_ID");
+    const char* quota_tenant = std::getenv("GLIMMER_QUOTA_TENANT_ID");
+    const char* tenant = configured_tenant != nullptr ? configured_tenant : quota_tenant;
+    const char* configured_socket = std::getenv("GLIMMER_SCHEDULER_CONTROL_SOCKET");
+    if (!max_concurrent.has_value() || !policy.has_value() ||
+        (configured_tenant != nullptr && *configured_tenant == '\0') ||
+        (configured_socket != nullptr && *configured_socket == '\0') ||
+        (weight.has_value() == false && std::getenv("GLIMMER_SCHEDULER_WEIGHT") != nullptr)) {
+        glimmer::interceptor::report_diagnostic(
+            "[glimmer] launch scheduler configuration is invalid\n");
+        return;
+    }
+
+    try {
+        state.launch_gate = std::make_unique<LaunchGate>(LaunchGateOptions{
+            .max_concurrent_launches = max_concurrent.value(),
+            .scheduling_policy = policy.value(),
+            .tenant_id = tenant == nullptr ? "default" : tenant,
+            .tenant_weight = weight.value_or(1),
+            .control_socket =
+                configured_socket == nullptr ? std::string{} : std::string(configured_socket),
+        });
+        state.launch_tracker =
+            std::make_unique<LaunchCompletionTracker>(state.driver, *state.launch_gate);
+        state.launch_scheduler_ready =
+            state.driver.has_event_api() && state.launch_tracker->start();
+        if (!state.launch_scheduler_ready) {
+            state.launch_tracker.reset();
+            state.launch_gate.reset();
+            glimmer::interceptor::report_diagnostic(
+                "[glimmer] launch scheduler event tracking is unavailable\n");
+        }
+    } catch (...) {
+        state.launch_tracker.reset();
+        state.launch_gate.reset();
+        glimmer::interceptor::report_diagnostic(
+            "[glimmer] launch scheduler initialization failed\n");
+    }
+}
+
 void initialize_state(InterceptorState& state) noexcept {
     state.trace_kernel_launches = read_kernel_launch_trace_setting();
     state.trace_memory_info = read_memory_info_trace_setting();
@@ -222,10 +319,6 @@ void initialize_state(InterceptorState& state) noexcept {
             "[glimmer] GLIMMER_SCHEDULER_MODE is invalid; scheduler integration disabled\n");
     } else {
         state.scheduler_mode = *configured_scheduler_mode;
-        if (state.scheduler_mode == glimmer::core::SchedulerMode::kEnforce) {
-            glimmer::interceptor::report_diagnostic(
-                "[glimmer] scheduler enforce mode is not implemented; forwarding CUDA calls\n");
-        }
     }
 
     state.is_driver_ready = state.driver.initialize();
@@ -233,6 +326,8 @@ void initialize_state(InterceptorState& state) noexcept {
         glimmer::interceptor::report_diagnostic(
             "[glimmer] CUDA Driver symbol initialization failed\n");
     }
+
+    initialize_launch_scheduler(state);
 
     const char* configured_mode = std::getenv("GLIMMER_QUOTA_MODE");
     if (configured_mode != nullptr && std::strcmp(configured_mode, "process") != 0 &&
@@ -3191,6 +3286,52 @@ void report_memory_info_observed(const char* api_name, std::int32_t device,
     }
 }
 
+bool launch_scheduling_is_enforced() noexcept {
+    try {
+        InterceptorState& state = get_state();
+        ensure_state_initialized(state);
+        return state.scheduler_mode == glimmer::core::SchedulerMode::kEnforce;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::optional<glimmer::core::TaskId> acquire_launch_slot() noexcept {
+    try {
+        InterceptorState& state = get_state();
+        ensure_state_initialized(state);
+        if (state.scheduler_mode != glimmer::core::SchedulerMode::kEnforce ||
+            !state.launch_scheduler_ready || state.launch_gate == nullptr) {
+            return std::nullopt;
+        }
+        return state.launch_gate->acquire();
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+void fail_launch_slot(glimmer::core::TaskId task_id) noexcept {
+    try {
+        InterceptorState& state = get_state();
+        if (state.launch_gate != nullptr) {
+            static_cast<void>(state.launch_gate->fail(task_id));
+        }
+    } catch (...) {
+        glimmer::interceptor::report_diagnostic(
+            "[glimmer] launch scheduler failure transition failed\n");
+    }
+}
+
+bool track_launch_completion(glimmer::core::TaskId task_id, CUstream stream) noexcept {
+    try {
+        InterceptorState& state = get_state();
+        return state.launch_tracker != nullptr && state.launch_tracker->track(task_id, stream);
+    } catch (...) {
+        fail_launch_slot(task_id);
+        return false;
+    }
+}
+
 CUresult intercept_launch_kernel(CUfunction function, unsigned int grid_dim_x,
                                  unsigned int grid_dim_y, unsigned int grid_dim_z,
                                  unsigned int block_dim_x, unsigned int block_dim_y,
@@ -3224,7 +3365,22 @@ CUresult intercept_launch_kernel(CUfunction function, unsigned int grid_dim_x,
         return CUDA_ERROR_NOT_SUPPORTED;
     }
 
+    std::optional<glimmer::core::TaskId> launch_task;
+    if (launch_scheduling_is_enforced()) {
+        launch_task = acquire_launch_slot();
+        if (!launch_task.has_value()) {
+            return CUDA_ERROR_NOT_SUPPORTED;
+        }
+    }
+
     const CUresult launch_result = invoke();
+    if (launch_task.has_value() && launch_result != CUDA_SUCCESS) {
+        fail_launch_slot(launch_task.value());
+    }
+    if (launch_task.has_value() && launch_result == CUDA_SUCCESS &&
+        !track_launch_completion(launch_task.value(), stream)) {
+        return CUDA_ERROR_UNKNOWN;
+    }
     if (launch_result == CUDA_SUCCESS) {
         report_kernel_launch_observed({
             .api_name = per_thread_default_stream ? "cuLaunchKernel_ptsz" : "cuLaunchKernel",
