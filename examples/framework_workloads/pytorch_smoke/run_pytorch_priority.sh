@@ -14,6 +14,7 @@ Options:
   --mode native|priority          execution mode (default: priority)
   --build-dir DIR                 CUDA build directory (default: build/cuda-gpu)
   --output-dir DIR                output directory
+  --python PATH                   Python executable (default: local venv or python3)
   --iterations N                  measured iterations per process (default: 20)
   --warmup N                      warmup iterations per process (default: 3)
   --batch-size N                  batch size (default: 32)
@@ -30,6 +31,7 @@ EOF
 mode="priority"
 build_dir="build/cuda-gpu"
 output_dir=""
+python_executable=""
 iterations=20
 warmup=3
 batch_size=32
@@ -64,6 +66,14 @@ while (($# > 0)); do
                 exit 2
             fi
             output_dir="$2"
+            shift 2
+            ;;
+        --python)
+            if (($# < 2)); then
+                echo "--python requires a value" >&2
+                exit 2
+            fi
+            python_executable="$2"
             shift 2
             ;;
         --iterations)
@@ -159,6 +169,12 @@ for numeric_value in "$iterations" "$warmup" "$batch_size" "$hidden_size" \
         exit 2
     fi
 done
+if [[ "$mode" == "priority" && "$max_concurrent_kernels" -eq 1 &&
+    "$training_launch_batch_size" -gt 1 ]]; then
+    echo "training launch batches larger than one require at least two concurrent kernels in the co-location runner" >&2
+    echo "increase --max-concurrent-kernels or use --training-launch-batch-size 1" >&2
+    exit 2
+fi
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 if [[ "$build_dir" != /* ]]; then
@@ -166,9 +182,11 @@ if [[ "$build_dir" != /* ]]; then
 fi
 script="$repo_dir/examples/framework_workloads/pytorch_smoke/pytorch_smoke.py"
 local_python="$repo_dir/examples/framework_workloads/pytorch_smoke/.venv/bin/python"
-python_executable="$local_python"
-if [[ ! -x "$python_executable" ]]; then
-    python_executable="python3"
+if [[ -z "$python_executable" ]]; then
+    python_executable="$local_python"
+    if [[ ! -x "$python_executable" ]]; then
+        python_executable="python3"
+    fi
 fi
 if [[ "$python_executable" == */* ]]; then
     if [[ ! -x "$python_executable" ]]; then
@@ -249,6 +267,7 @@ if [[ "$mode" == "priority" ]]; then
         --socket "$socket_path" \
         --quota-bytes 4294967296 \
         --execution-mode remote \
+        --lease-timeout-ms 5000 \
         --max-queued-tasks 256 \
         --max-concurrent-tasks "$max_concurrent_kernels" \
         --scheduler-policy priority \

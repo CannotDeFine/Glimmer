@@ -27,7 +27,9 @@ protocol compatibility.
 
 ## Consequences
 
-The uncontended transparent launch path removes one request/response and one
-socket setup. The operation does not batch leases, reuse connections, or
-preempt running CUDA kernels; those are separate optimizations. A queued task
-still incurs claim polling, so contention latency remains an explicit metric.
+The uncontended transparent launch path removes one request/response. The
+Unix transport now reuses the authenticated connection for subsequent requests
+from the same calling thread, so uncontended admission and completion avoid
+repeated socket setup as well. The operation does not batch leases or preempt
+running CUDA kernels; those are separate optimizations. A queued task still
+incurs claim polling, so contention latency remains an explicit metric.

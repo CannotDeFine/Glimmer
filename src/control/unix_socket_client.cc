@@ -145,6 +145,65 @@ enum class PollEvent : std::uint8_t {
     return false;
 }
 
+class ThreadConnection final {
+   public:
+    ThreadConnection() noexcept = default;
+    ~ThreadConnection() noexcept {
+        reset();
+    }
+
+    ThreadConnection(const ThreadConnection&) = delete;
+    ThreadConnection& operator=(const ThreadConnection&) = delete;
+
+    void reset() noexcept {
+        if (file_descriptor_ >= 0) {
+            static_cast<void>(::close(file_descriptor_));
+            file_descriptor_ = -1;
+        }
+        socket_path_.clear();
+        io_timeout_ms_ = 0;
+        process_id_ = 0;
+    }
+
+    [[nodiscard]] bool ensure(const std::string& socket_path,
+                              std::uint32_t io_timeout_ms) noexcept {
+        if (file_descriptor_ >= 0 &&
+            (socket_path_ != socket_path || io_timeout_ms_ != io_timeout_ms ||
+             process_id_ != ::getpid())) {
+            reset();
+        }
+        if (file_descriptor_ >= 0) {
+            return true;
+        }
+        const int file_descriptor = connect_to_server(socket_path);
+        if (file_descriptor < 0) {
+            return false;
+        }
+        try {
+            socket_path_ = socket_path;
+            io_timeout_ms_ = io_timeout_ms;
+            file_descriptor_ = file_descriptor;
+            process_id_ = ::getpid();
+            return true;
+        } catch (...) {
+            static_cast<void>(::close(file_descriptor));
+            return false;
+        }
+    }
+
+    [[nodiscard]] int file_descriptor() const noexcept {
+        return file_descriptor_;
+    }
+
+   private:
+    std::string socket_path_;
+    std::uint32_t io_timeout_ms_ = 0;
+    pid_t process_id_ = 0;
+    int file_descriptor_ = -1;
+};
+
+thread_local ThreadConnection g_thread_connection;
+
 }  // namespace
 
 UnixSocketControlClient::UnixSocketControlClient(std::string socket_path,
@@ -158,21 +217,24 @@ std::optional<std::string> UnixSocketControlClient::request(
         line.back() != '\n' || line.size() > kTaskProtocolMaxLineBytes) {
         return std::nullopt;
     }
-    const int file_descriptor = connect_to_server(socket_path_);
-    if (file_descriptor < 0) {
+    if (!g_thread_connection.ensure(socket_path_, io_timeout_ms_)) {
         return std::nullopt;
     }
     std::optional<std::string> response;
     try {
         std::string response_line;
-        if (send_all(file_descriptor, line, io_timeout_ms_) &&
-            receive_line(file_descriptor, &response_line, io_timeout_ms_)) {
+        if (send_all(g_thread_connection.file_descriptor(), line, io_timeout_ms_) &&
+            receive_line(g_thread_connection.file_descriptor(), &response_line, io_timeout_ms_)) {
             response = std::move(response_line);
         }
     } catch (...) {
         response = std::nullopt;
     }
-    static_cast<void>(::close(file_descriptor));
+    if (!response.has_value()) {
+        // Do not retry a failed request: a side-effecting operation may have
+        // reached the service even when its response was lost.
+        g_thread_connection.reset();
+    }
     return response;
 }
 

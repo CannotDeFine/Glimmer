@@ -19,26 +19,27 @@ namespace {
 
 constexpr std::uint32_t kMaxIoTimeoutMs = 60'000;
 
-enum class PollEvent : std::uint8_t {
-    kRead = POLLIN,
-    kWrite = POLLOUT,
-};
+enum class PollEvent : std::uint8_t { kRead = POLLIN, kWrite = POLLOUT };
 
-[[nodiscard]] bool wait_for_io(int file_descriptor, PollEvent event,
-                               std::uint32_t timeout_ms) noexcept {
+enum class PollResult : std::uint8_t { kReady, kTimedOut, kError };
+
+[[nodiscard]] PollResult wait_for_io(int file_descriptor, PollEvent event,
+                                     std::uint32_t timeout_ms) noexcept {
     const short events = static_cast<short>(event);
     pollfd descriptor{.fd = file_descriptor, .events = events, .revents = 0};
     while (true) {
         const int result = ::poll(&descriptor, 1, static_cast<int>(timeout_ms));
         if (result > 0) {
-            return (descriptor.revents & events) != 0 &&
-                   (descriptor.revents & (POLLERR | POLLNVAL)) == 0;
+            if ((descriptor.revents & (POLLERR | POLLNVAL | POLLHUP)) != 0) {
+                return PollResult::kError;
+            }
+            return (descriptor.revents & events) != 0 ? PollResult::kReady : PollResult::kError;
         }
         if (result == 0) {
-            return false;
+            return PollResult::kTimedOut;
         }
         if (errno != EINTR) {
-            return false;
+            return PollResult::kError;
         }
     }
 }
@@ -171,6 +172,8 @@ bool UnixSocketControlServer::start() noexcept {
         return false;
     }
     listen_fd_ = socket_fd;
+    stopping_.store(false, std::memory_order_release);
+    served_request_count_.store(0, std::memory_order_release);
     return true;
 }
 
@@ -182,6 +185,7 @@ UnixSocketServeStatus UnixSocketControlServer::serve_one_for(std::uint32_t timeo
     if (listen_fd_ < 0) {
         return UnixSocketServeStatus::kError;
     }
+    reap_finished_clients();
     if (timeout_ms != 0) {
         pollfd descriptor{.fd = listen_fd_, .events = POLLIN, .revents = 0};
         while (true) {
@@ -205,16 +209,47 @@ UnixSocketServeStatus UnixSocketControlServer::serve_one_for(std::uint32_t timeo
     if (client_fd < 0) {
         return errno == EINTR ? UnixSocketServeStatus::kTimedOut : UnixSocketServeStatus::kError;
     }
-    const bool handled = handle_client(client_fd);
-    close_client(client_fd);
-    return handled ? UnixSocketServeStatus::kServed : UnixSocketServeStatus::kError;
+    register_client(client_fd);
+    std::thread client_thread;
+    try {
+        const auto finished = std::make_shared<std::atomic<bool>>(false);
+        client_thread = std::thread([this, client_fd, finished] {
+            static_cast<void>(handle_client(client_fd));
+            close_client(client_fd);
+            finished->store(true, std::memory_order_release);
+        });
+        client_threads_.push_back(
+            ClientThread{.thread = std::move(client_thread), .finished = finished});
+    } catch (...) {
+        if (client_thread.joinable()) {
+            static_cast<void>(::shutdown(client_fd, SHUT_RDWR));
+            client_thread.join();
+        } else {
+            close_client(client_fd);
+        }
+        return UnixSocketServeStatus::kError;
+    }
+    return UnixSocketServeStatus::kServed;
 }
 
 void UnixSocketControlServer::stop() noexcept {
+    stopping_.store(true, std::memory_order_release);
     if (listen_fd_ >= 0) {
         static_cast<void>(::close(listen_fd_));
         listen_fd_ = -1;
     }
+    {
+        std::scoped_lock lock(clients_mutex_);
+        for (const int client_fd : client_fds_) {
+            static_cast<void>(::shutdown(client_fd, SHUT_RDWR));
+        }
+    }
+    for (ClientThread& client_thread : client_threads_) {
+        if (client_thread.thread.joinable()) {
+            client_thread.thread.join();
+        }
+    }
+    client_threads_.clear();
     if (socket_device_ != 0 || socket_inode_ != 0) {
         std::uint64_t current_device = 0;
         std::uint64_t current_inode = 0;
@@ -231,20 +266,29 @@ bool UnixSocketControlServer::running() const noexcept {
     return listen_fd_ >= 0;
 }
 
+std::uint64_t UnixSocketControlServer::served_request_count() const noexcept {
+    return served_request_count_.load(std::memory_order_acquire);
+}
+
 bool UnixSocketControlServer::handle_client(int client_fd) noexcept {
     TaskPeerIdentity peer;
     if (!authenticate_client(client_fd, &peer)) {
         return true;
     }
-    std::string request;
-    if (!read_line(client_fd, &request)) {
-        return false;
+    bool handled_request = false;
+    while (!stopping_.load(std::memory_order_acquire)) {
+        std::string request;
+        if (!read_line(client_fd, &request)) {
+            break;
+        }
+        const auto response = endpoint_.handle(request, peer);
+        if (!response.has_value() || !write_response(client_fd, response.value())) {
+            break;
+        }
+        handled_request = true;
+        served_request_count_.fetch_add(1, std::memory_order_release);
     }
-    const auto response = endpoint_.handle(request, peer);
-    if (!response.has_value()) {
-        return false;
-    }
-    return write_response(client_fd, response.value());
+    return handled_request;
 }
 
 bool UnixSocketControlServer::authenticate_client(int client_fd,
@@ -280,7 +324,21 @@ bool UnixSocketControlServer::read_line(int client_fd, std::string* line) const 
         line->clear();
         line->reserve(kTaskProtocolMaxLineBytes + 1);
         while (line->size() <= kTaskProtocolMaxLineBytes) {
-            if (!wait_for_io(client_fd, PollEvent::kRead, config_.io_timeout_ms)) {
+            const PollResult poll_result =
+                wait_for_io(client_fd, PollEvent::kRead, config_.io_timeout_ms);
+            if (poll_result == PollResult::kTimedOut) {
+                if (!line->empty()) {
+                    // Do not allow a partially written line to hold a worker
+                    // indefinitely. An idle, already-authenticated client is
+                    // different: it may be between long-running CUDA calls.
+                    return false;
+                }
+                // A persistent client may be idle while its CUDA work is
+                // running. The timeout bounds each poll, not the lifetime of
+                // an authenticated connection.
+                continue;
+            }
+            if (poll_result == PollResult::kError || stopping_.load(std::memory_order_acquire)) {
                 return false;
             }
             char value = '\0';
@@ -309,7 +367,8 @@ bool UnixSocketControlServer::write_response(int client_fd,
                                              const std::string& response) const noexcept {
     std::size_t offset = 0;
     while (offset < response.size()) {
-        if (!wait_for_io(client_fd, PollEvent::kWrite, config_.io_timeout_ms)) {
+        if (wait_for_io(client_fd, PollEvent::kWrite, config_.io_timeout_ms) !=
+            PollResult::kReady) {
             return false;
         }
         const ssize_t sent =
@@ -328,9 +387,47 @@ bool UnixSocketControlServer::write_response(int client_fd,
     return true;
 }
 
-void UnixSocketControlServer::close_client(int client_fd) const noexcept {
+void UnixSocketControlServer::register_client(int client_fd) noexcept {
+    if (client_fd < 0) {
+        return;
+    }
+    try {
+        std::scoped_lock lock(clients_mutex_);
+        client_fds_.insert(client_fd);
+    } catch (...) {
+        // The worker still owns the descriptor. Failure to track it only
+        // means stop() cannot proactively wake this client, so fail closed
+        // rather than leaving an unbounded worker behind.
+        static_cast<void>(::shutdown(client_fd, SHUT_RDWR));
+        return;
+    }
+}
+
+void UnixSocketControlServer::unregister_client(int client_fd) noexcept {
+    if (client_fd < 0) {
+        return;
+    }
+    std::scoped_lock lock(clients_mutex_);
+    client_fds_.erase(client_fd);
+}
+
+void UnixSocketControlServer::close_client(int client_fd) noexcept {
     if (client_fd >= 0) {
+        unregister_client(client_fd);
         static_cast<void>(::close(client_fd));
+    }
+}
+
+void UnixSocketControlServer::reap_finished_clients() noexcept {
+    for (auto iterator = client_threads_.begin(); iterator != client_threads_.end();) {
+        if (!iterator->finished->load(std::memory_order_acquire)) {
+            ++iterator;
+            continue;
+        }
+        if (iterator->thread.joinable()) {
+            iterator->thread.join();
+        }
+        iterator = client_threads_.erase(iterator);
     }
 }
 

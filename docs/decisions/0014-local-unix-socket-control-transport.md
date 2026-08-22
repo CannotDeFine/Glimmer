@@ -16,7 +16,8 @@ Add `control::UnixSocketControlServer` as a small transport adapter. It:
 
 - binds a caller-selected filesystem socket path and refuses to remove an
   existing filesystem entry;
-- accepts one request and emits one response per client connection;
+- accepts a client connection and emits one response per complete request
+  line, allowing sequential request/response pairs on the same connection;
 - bounds line reads to the task protocol limit and applies an I/O timeout;
 - authenticates the peer with Linux `SO_PEERCRED`, accepting only the
   configured UID (the server's effective UID by default);
@@ -25,10 +26,13 @@ Add `control::UnixSocketControlServer` as a small transport adapter. It:
 - delegates request semantics to `TaskControlEndpoint` rather than owning
   scheduling, quota, or CUDA resources.
 
-The transport is intentionally synchronous and single-request-per-connection
-for the first version. A future daemon may run `serve_one()` in a controlled
-loop and add service supervision, authorization policy, rate limiting,
-backpressure, and recovery without changing the wire format.
+The transport uses one worker thread per accepted client connection. This keeps
+an idle client from blocking other tenants while allowing the transparent
+launch path to reuse its authenticated connection. Clients keep one
+connection per calling thread and never retry a request after a transport
+failure because requests may have side effects. A future daemon may add
+service supervision, authorization policy, rate limiting, backpressure, and
+recovery without changing the wire format.
 
 ## Consequences
 

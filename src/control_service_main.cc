@@ -184,9 +184,8 @@ int run_service(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    std::uint64_t request_count = 0;
     while (g_stop_requested == 0 &&
-           (options.max_requests == 0 || request_count < options.max_requests)) {
+           (options.max_requests == 0 || server.served_request_count() < options.max_requests)) {
         static_cast<void>(admission_service.reap_expired());
         if (options.execution_mode == ServiceOptions::ExecutionMode::kSimulated) {
             backend.advance();
@@ -204,7 +203,6 @@ int run_service(int argc, char** argv) {
             server.stop();
             return EXIT_FAILURE;
         }
-        ++request_count;
     }
     server.stop();
     return EXIT_SUCCESS;

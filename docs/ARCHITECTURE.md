@@ -123,8 +123,13 @@ owning targets and tests.
   pointers, or kernel argument addresses; a future transport adapter must
   authenticate peers and bind the decoded request to the admission service.
 - `control::UnixSocketControlServer` is the first Linux transport adapter. It
-  authenticates `SO_PEERCRED`, bounds and times out one request per connection,
-  and delegates all semantics to the endpoint; it does not own CUDA resources.
+  authenticates `SO_PEERCRED`, bounds each request line and I/O operation, and
+  serves sequential request/response pairs on persistent client connections;
+  each connection is handled independently so one idle client cannot block
+  other tenants. It delegates all semantics to the endpoint and does not own
+  CUDA resources. `UnixSocketControlClient` reuses one connection per calling
+  thread and discards a connection after any transport failure without
+  retrying a side-effecting request.
 - In remote execution mode, `ACQUIRE` combines submission with an immediate
   task-specific claim when a scheduler slot is available. If the task is
   queued, it returns the accepted task id and the worker polls `CLAIM` for

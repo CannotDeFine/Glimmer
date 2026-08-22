@@ -11,8 +11,10 @@ struct ControlRequestTiming {
     std::uint64_t elapsed_nanoseconds = 0;
 };
 
-// Linux client for the one-request/one-response Unix socket control protocol.
-// The client owns no scheduler or CUDA state and is safe to use sequentially.
+// Linux client for the line-oriented Unix socket control protocol. Requests
+// issued by the same thread reuse one authenticated connection; different
+// threads keep independent connections. The client owns no scheduler or CUDA
+// state.
 class UnixSocketControlClient final {
    public:
     explicit UnixSocketControlClient(std::string socket_path,
@@ -25,9 +27,11 @@ class UnixSocketControlClient final {
 
     // Sends one complete protocol line and returns the server's response line.
     // A null result indicates an invalid configuration, timeout, transport
-    // failure, or response exceeding the protocol bound.
+    // failure, or response exceeding the protocol bound. Failed connections
+    // are discarded without retrying the request because protocol operations
+    // may have side effects.
     // When timing is non-null, it receives the complete request duration,
-    // including connect, I/O, response parsing, and close handling.
+    // including a connection setup when the thread has no reusable connection.
     [[nodiscard]] std::optional<std::string> request(
         std::string_view line, ControlRequestTiming* timing = nullptr) const noexcept;
 

@@ -113,6 +113,11 @@ remote control service and one concurrent scheduler slot, with inference at
 priority 100 and training at priority 10. The generated ready/status files,
 logs, CSV files, and local virtual environment are ignored by Git.
 
+The runner configures a five-second process-bound lease timeout. Active
+workloads renew leases through interceptor heartbeats; if a workload exits
+without closing a batched lease, the service reclaims the slot instead of
+leaving a permanent scheduler stall.
+
 The strict one-slot setting is useful for measuring scheduler ordering, but it
 serializes all admitted kernels. To measure a larger concurrency window, pass
 `--max-concurrent-kernels N` to the priority runner. The value is applied to
@@ -137,6 +142,7 @@ runs:
 ```sh
 ./examples/framework_workloads/pytorch_smoke/run_pytorch_priority.sh \
     --mode priority \
+    --max-concurrent-kernels 2 \
     --training-launch-batch-size 4 \
     --inference-launch-batch-size 1 \
     --iterations 20 --warmup 3
@@ -145,6 +151,9 @@ runs:
 Larger launch batches reduce control-plane overhead but delay priority and
 fairness decisions until the batch closes. A launch or completion failure
 fails the whole batch; batching does not preempt a running CUDA kernel.
+The co-location runner rejects a training batch larger than one when the
+concurrency window is one, because that combination can hold the only slot
+across several training launches and starve the latency-sensitive peer.
 
 To inspect the per-launch cost breakdown during the priority run, add
 `--trace-timings`. The child logs then include admission, socket transport,
@@ -155,3 +164,21 @@ timing records:
 ./examples/framework_workloads/pytorch_smoke/run_pytorch_priority.sh \
     --mode priority --iterations 20 --warmup 3 --trace-timings
 ```
+
+For a repeatable comparison, use the matrix runner. It keeps the PyTorch
+tensor batch fixed and compares native execution with priority configurations
+using one or two concurrent scheduler slots and training launch batches of one
+or four. The output CSV contains one row per repetition and separates tensor
+batch size from scheduler launch batch size:
+
+```sh
+./examples/framework_workloads/pytorch_smoke/run_priority_matrix.sh \
+    --repetitions 3 --iterations 20 --warmup 3 \
+    --batch-size 32 --hidden-size 1024 \
+    --output-dir /tmp/glimmer-priority-matrix
+```
+
+The matrix is a measurement aid, not a performance guarantee. Repeat it on an
+otherwise idle GPU and compare inference p95/p99 latency with training
+throughput. Enabling `--trace-timings` adds diagnostic logging and should be
+used for path analysis rather than latency baselines.

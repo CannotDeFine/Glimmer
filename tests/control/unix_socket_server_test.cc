@@ -62,6 +62,26 @@ std::string exchange(UnixSocketControlServer& server, const std::string& path,
     return std::string(response, static_cast<std::size_t>(received));
 }
 
+void send_request(int client_fd, std::string_view request) {
+    const ssize_t sent = ::send(client_fd, request.data(), request.size(), MSG_NOSIGNAL);
+    expect(sent == static_cast<ssize_t>(request.size()), "persistent client should send request");
+}
+
+std::string receive_response(int client_fd) {
+    std::string response;
+    char value = '\0';
+    while (response.size() <= glimmer::control::kTaskProtocolMaxLineBytes) {
+        const ssize_t received = ::recv(client_fd, &value, 1, 0);
+        expect(received == 1, "persistent client should receive response");
+        response.push_back(value);
+        if (value == '\n') {
+            return response;
+        }
+    }
+    expect(false, "persistent response should stay within protocol bounds");
+    return {};
+}
+
 void test_server_lifecycle_and_authentication() {
     const std::string path = "/tmp/glimmer-control-test-" + std::to_string(::getpid()) + ".sock";
     static_cast<void>(::unlink(path.c_str()));
@@ -99,6 +119,33 @@ void test_server_lifecycle_and_authentication() {
                completed.response->kind == TaskProtocolResponseKind::kState &&
                completed.response->state == glimmer::control::TaskProtocolState::kCompleted,
            "socket peer should complete its own lease");
+
+    const int persistent_fd = connect_client(path.c_str());
+    send_request(persistent_fd, "GLIMMER_TASK_V1 SUBMIT tenant-a 20 1 1\n");
+    expect(server.serve_one(), "server should accept a persistent client");
+    const auto persistent_submit =
+        glimmer::control::parse_task_protocol_response(receive_response(persistent_fd));
+    expect(persistent_submit.parsed() && persistent_submit.response.has_value() &&
+               persistent_submit.response->kind == TaskProtocolResponseKind::kAccepted,
+           "persistent client should receive its first response");
+    send_request(persistent_fd, "GLIMMER_TASK_V1 CLAIM\n");
+    const auto persistent_claim =
+        glimmer::control::parse_task_protocol_response(receive_response(persistent_fd));
+    expect(persistent_claim.parsed() && persistent_claim.response.has_value() &&
+               persistent_claim.response->kind == TaskProtocolResponseKind::kLease,
+           "persistent client should reuse its connection for CLAIM");
+    const TaskId persistent_task_id =
+        persistent_claim.response.value_or(glimmer::control::TaskProtocolResponse{}).task_id;
+    send_request(persistent_fd,
+                 "GLIMMER_TASK_V1 COMPLETE " + std::to_string(persistent_task_id) + "\n");
+    const auto persistent_complete =
+        glimmer::control::parse_task_protocol_response(receive_response(persistent_fd));
+    expect(
+        persistent_complete.parsed() && persistent_complete.response.has_value() &&
+            persistent_complete.response->kind == TaskProtocolResponseKind::kState &&
+            persistent_complete.response->state == glimmer::control::TaskProtocolState::kCompleted,
+        "persistent client should complete its lease without reconnecting");
+    static_cast<void>(::close(persistent_fd));
     server.stop();
     expect(!server.running(), "server should stop");
     expect(::access(path.c_str(), F_OK) != 0 && errno == ENOENT,
