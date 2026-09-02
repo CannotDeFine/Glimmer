@@ -135,6 +135,8 @@ void report_launch_timing_diagnostic(const LaunchTimingObservation& observation)
     cursor = append_number(cursor, end, observation.acquire_request_count);
     cursor = append_text(cursor, end, " claim_polls=");
     cursor = append_number(cursor, end, observation.claim_poll_count);
+    cursor = append_text(cursor, end, " wait_requests=");
+    cursor = append_number(cursor, end, observation.wait_request_count);
     cursor = append_text(cursor, end, " cuda_launch_ns=");
     cursor = append_number(cursor, end, observation.cuda_launch_nanoseconds);
     cursor = append_text(cursor, end, " event_tracking_ns=");

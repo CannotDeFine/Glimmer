@@ -17,8 +17,10 @@ Glimmer adds an opt-in control-plane launch-lease mode:
 - The existing Linux Unix-socket control service remains the single scheduler
   owner. No scheduler state or CUDA handles cross the process boundary.
 - A preload client submits a one-unit launch task with its configured tenant
-  and weight, then polls `CLAIM <task_id>`. The scheduler dispatches that task
-  only when it is next under the configured policy and a running slot exists.
+  and weight, then waits for a task-specific lease. The scheduler dispatches
+  that task only when it is next under the configured policy and a running slot
+  exists. The low-overhead `WAIT` form and its legacy polling fallback are
+  defined by [ADR 0029](0029-blocking-task-claim-wait.md).
 - The client forwards the CUDA launch only after receiving its lease. A
   completion event then causes `COMPLETE <task_id>`; while the event is
   pending, the client renews the lease with `HEARTBEAT`. Launch or event
@@ -26,8 +28,9 @@ Glimmer adds an opt-in control-plane launch-lease mode:
 - Lease ownership can be bound to the peer PID, UID, and process start-time
   identity with `--bind-leases-to-process`; in that mode submission and every
   lease operation require a valid authenticated peer, and only the submitting
-  process may claim, renew, or finish its task. A configured lease timeout
-  remains the crash-recovery fallback.
+  process may claim, renew, or finish its task. Unscoped `CLAIM` is rejected
+  because it cannot prove ownership of a pending task. A configured lease
+  timeout remains the crash-recovery fallback.
 - The original no-socket process-local gate remains the default. The remote
   path is enabled only by the trusted launcher with
   `GLIMMER_SCHEDULER_CONTROL_SOCKET`.
@@ -49,7 +52,8 @@ linking an SDK or moving CUDA pointers through IPC. Admission fairness is
 enforced at task boundaries and can be tested with ordinary Linux processes.
 The remote path adds Unix-socket latency to every admitted launch and depends
 on a running control service; transport failure therefore fails closed for the
-enforced launch. It still does not preempt an already running CUDA kernel.
+enforced launch. Bounded waits reduce contended polling overhead but do not
+remove the per-lease transport cost or preempt an already running CUDA kernel.
 
 The central service is deliberately not a durable database or a security
 boundary against a process that bypasses `LD_PRELOAD`. A future low-latency

@@ -8,6 +8,7 @@ namespace glimmer::control {
 namespace {
 
 constexpr std::size_t kMaxTokens = 24;
+constexpr std::uint32_t kMaxWaitTimeoutMs = 60'000;
 
 struct TokenList {
     std::array<std::string_view, kMaxTokens> values{};
@@ -240,6 +241,20 @@ TaskProtocolRequestParseResult parse_task_protocol_request(std::string_view line
                                                   .request = std::move(request)};
         }
 
+        if (tokens.values[1] == "WAIT") {
+            if (tokens.count != 4) {
+                return request_error(TaskProtocolParseError::kMalformed);
+            }
+            request.operation = TaskProtocolOperation::kWait;
+            if (!parse_positive_integer(tokens.values[2], &request.task_id) ||
+                !parse_positive_integer(tokens.values[3], &request.wait_timeout_ms) ||
+                request.wait_timeout_ms > kMaxWaitTimeoutMs) {
+                return request_error(TaskProtocolParseError::kInvalidValue);
+            }
+            return TaskProtocolRequestParseResult{.error = TaskProtocolParseError::kNone,
+                                                  .request = std::move(request)};
+        }
+
         if (tokens.values[1] == "STATS" || tokens.values[1] == "METRICS") {
             if (tokens.count != 2) {
                 return request_error(TaskProtocolParseError::kMalformed);
@@ -328,6 +343,13 @@ std::optional<std::string> format_task_protocol_request(const TaskProtocolReques
             formatted = std::string(kTaskProtocolVersion) + " CLAIM " +
                         std::to_string(request.task_id) + "\n";
         }
+    } else if (request.operation == TaskProtocolOperation::kWait) {
+        if (request.task_id == 0 || request.wait_timeout_ms == 0 ||
+            request.wait_timeout_ms > kMaxWaitTimeoutMs) {
+            return std::nullopt;
+        }
+        formatted = std::string(kTaskProtocolVersion) + " WAIT " + std::to_string(request.task_id) +
+                    " " + std::to_string(request.wait_timeout_ms) + "\n";
     } else if (request.operation == TaskProtocolOperation::kStats ||
                request.operation == TaskProtocolOperation::kMetrics) {
         formatted =

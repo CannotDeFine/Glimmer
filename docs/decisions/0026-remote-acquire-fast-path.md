@@ -20,10 +20,11 @@ task-specific claim in one request. The endpoint returns:
 - `LEASE` when the task is immediately running; or
 - `ACCEPTED` with the task id when the task remains queued.
 
-The caller polls `CLAIM <task_id>` only for the queued case, then uses the
-existing `COMPLETE`, `FAIL`, `HEARTBEAT`, and `CANCEL` operations. Existing
-`SUBMIT` and `CLAIM` operations remain available for explicit clients and
-protocol compatibility.
+The caller waits for a queued task with the task-specific `WAIT` operation
+defined in [ADR 0029](0029-blocking-task-claim-wait.md), then uses the existing
+`COMPLETE`, `FAIL`, `HEARTBEAT`, and `CANCEL` operations. Existing `SUBMIT` and
+`CLAIM` operations remain available for explicit clients and protocol
+compatibility.
 
 ## Consequences
 
@@ -31,5 +32,5 @@ The uncontended transparent launch path removes one request/response. The
 Unix transport now reuses the authenticated connection for subsequent requests
 from the same calling thread, so uncontended admission and completion avoid
 repeated socket setup as well. The operation does not batch leases or preempt
-running CUDA kernels; those are separate optimizations. A queued task still
-incurs claim polling, so contention latency remains an explicit metric.
+running CUDA kernels; those are separate optimizations. Older services may
+still use claim polling through the compatibility fallback.

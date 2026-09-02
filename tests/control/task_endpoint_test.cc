@@ -110,17 +110,27 @@ void test_endpoint_acquire_fast_path_and_queue_fallback() {
            "acquire should return an accepted queued task when the slot is occupied");
     expect(registrar_state.calls == 2, "acquire should register both tasks exactly once");
 
+    const auto timed_out =
+        response_from(endpoint, "GLIMMER_TASK_V1 WAIT " + std::to_string(second.task_id) + " 1");
+    expect(timed_out.kind == TaskProtocolResponseKind::kEmpty,
+           "wait should return empty when its bounded timeout expires");
+
     expect(response_from(endpoint, "GLIMMER_TASK_V1 COMPLETE " + std::to_string(first.task_id))
                    .state == TaskProtocolState::kCompleted,
            "the immediate acquire lease should complete");
     const auto queued_lease =
-        response_from(endpoint, "GLIMMER_TASK_V1 CLAIM " + std::to_string(second.task_id));
+        response_from(endpoint, "GLIMMER_TASK_V1 WAIT " + std::to_string(second.task_id) + " 100");
     expect(queued_lease.kind == TaskProtocolResponseKind::kLease &&
                queued_lease.task_id == second.task_id,
            "the queued acquire task should remain claimable by task id");
     expect(response_from(endpoint, "GLIMMER_TASK_V1 COMPLETE " + std::to_string(second.task_id))
                    .state == TaskProtocolState::kCompleted,
            "the queued acquire task should complete after its claim");
+    const auto terminal_wait =
+        response_from(endpoint, "GLIMMER_TASK_V1 WAIT " + std::to_string(second.task_id) + " 100");
+    expect(terminal_wait.kind == TaskProtocolResponseKind::kState &&
+               terminal_wait.state == TaskProtocolState::kCompleted,
+           "wait should expose a terminal task instead of retrying forever");
     expect(scheduler.usage().used_bytes() == 0,
            "acquire completion should release all scheduler quota");
 }
@@ -487,7 +497,18 @@ void test_endpoint_binds_lease_to_peer_process() {
         response_from(endpoint, "GLIMMER_TASK_V1 CLAIM", incomplete_identity);
     expect(incomplete_claim.kind == TaskProtocolResponseKind::kEmpty,
            "a process-bound claim without start-time identity must be rejected");
-    const auto lease = response_from(endpoint, "GLIMMER_TASK_V1 CLAIM", owner);
+    const std::string specific_claim = "GLIMMER_TASK_V1 CLAIM " + std::to_string(accepted.task_id);
+    const auto rejected_specific_claim = response_from(endpoint, specific_claim, other_process);
+    expect(rejected_specific_claim.kind == TaskProtocolResponseKind::kEmpty,
+           "a different process must not claim another process's pending task");
+    const auto rejected_specific_wait = response_from(
+        endpoint, "GLIMMER_TASK_V1 WAIT " + std::to_string(accepted.task_id) + " 1", other_process);
+    expect(rejected_specific_wait.kind == TaskProtocolResponseKind::kEmpty,
+           "a different process must not wait-claim another process's pending task");
+    const auto rejected_unscoped_claim = response_from(endpoint, "GLIMMER_TASK_V1 CLAIM", owner);
+    expect(rejected_unscoped_claim.kind == TaskProtocolResponseKind::kEmpty,
+           "process-bound services must reject unscoped claims");
+    const auto lease = response_from(endpoint, specific_claim, owner);
     expect(lease.kind == TaskProtocolResponseKind::kLease,
            "the owner process should claim the task");
 

@@ -22,8 +22,10 @@ Add an opt-in `--bind-leases-to-process` control-service option:
   `/proc/<pid>/stat`;
 - the pending lease records the peer PID, UID, and process start-time ticks at
   submission, and the active lease preserves that identity when it is claimed;
-- submission, claim, `HEARTBEAT`, `COMPLETE`, and `FAIL` must come from the
-  same identity;
+- submission, task-specific claim, `HEARTBEAT`, `COMPLETE`, and `FAIL` must
+  come from the same identity; and
+- unscoped `CLAIM` is rejected because it cannot prove ownership of the
+  selected pending task;
 - a recycled PID does not match because its start-time value changes;
 - no identity or CUDA handle is serialized in the protocol; and
 - the default remains unbound for compatibility with the existing CLI smoke

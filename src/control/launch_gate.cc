@@ -1,6 +1,7 @@
 #include "glimmer/control/launch_gate.h"
 #include "glimmer/control/task_protocol.h"
 
+#include <algorithm>
 #include <chrono>
 #include <limits>
 #include <thread>
@@ -9,6 +10,8 @@
 namespace glimmer::control {
 
 namespace {
+
+constexpr std::chrono::milliseconds kRemoteWaitSlice{500};
 
 class LaunchTimingScope final {
    public:
@@ -40,7 +43,7 @@ class LaunchTimingScope final {
 };
 
 void add_request_timing(LaunchGateTiming* timing, const ControlRequestTiming& request_timing,
-                        bool is_claim) noexcept {
+                        bool is_claim, bool is_wait = false) noexcept {
     if (timing == nullptr) {
         return;
     }
@@ -54,6 +57,9 @@ void add_request_timing(LaunchGateTiming* timing, const ControlRequestTiming& re
     }
     if (is_claim && timing->claim_poll_count != std::numeric_limits<std::uint32_t>::max()) {
         ++timing->claim_poll_count;
+    }
+    if (is_wait && timing->wait_request_count != std::numeric_limits<std::uint32_t>::max()) {
+        ++timing->wait_request_count;
     }
 }
 
@@ -161,40 +167,98 @@ std::optional<core::TaskId> LaunchGate::acquire(std::chrono::milliseconds timeou
                 add_request_timing(timing, request_timing, false);
             }
         };
-        const TaskProtocolRequest claim{
-            .operation = TaskProtocolOperation::kClaim, .admission = {}, .task_id = task_id};
-        const auto encoded_claim = format_task_protocol_request(claim);
-        if (!encoded_claim.has_value()) {
-            cancel_task();
-            return std::nullopt;
-        }
+        const auto claim_with_polling = [&]() -> std::optional<core::TaskId> {
+            const TaskProtocolRequest claim{
+                .operation = TaskProtocolOperation::kClaim, .admission = {}, .task_id = task_id};
+            const auto encoded_claim = format_task_protocol_request(claim);
+            if (!encoded_claim.has_value()) {
+                cancel_task();
+                return std::nullopt;
+            }
+            while (true) {
+                const auto claim_response = remote_client_->request(
+                    encoded_claim.value(), timing == nullptr ? nullptr : &request_timing);
+                add_request_timing(timing, request_timing, true);
+                if (!claim_response.has_value()) {
+                    cancel_task();
+                    return std::nullopt;
+                }
+                const auto parsed_claim = parse_task_protocol_response(claim_response.value());
+                if (!parsed_claim.parsed() || !parsed_claim.response.has_value()) {
+                    cancel_task();
+                    return std::nullopt;
+                }
+                if (parsed_claim.response->kind == TaskProtocolResponseKind::kLease &&
+                    parsed_claim.response->task_id == task_id) {
+                    return task_id;
+                }
+                if (parsed_claim.response->kind == TaskProtocolResponseKind::kError) {
+                    cancel_task();
+                    return std::nullopt;
+                }
+                if (effective_timeout != std::chrono::milliseconds::zero() &&
+                    std::chrono::steady_clock::now() >= deadline) {
+                    cancel_task();
+                    return std::nullopt;
+                }
+                std::this_thread::sleep_for(remote_poll_interval_);
+            }
+        };
+
         while (true) {
-            const auto claim_response = remote_client_->request(
-                encoded_claim.value(), timing == nullptr ? nullptr : &request_timing);
-            add_request_timing(timing, request_timing, true);
-            if (!claim_response.has_value()) {
-                cancel_task();
-                return std::nullopt;
-            }
-            const auto parsed_claim = parse_task_protocol_response(claim_response.value());
-            if (!parsed_claim.parsed() || !parsed_claim.response.has_value()) {
-                cancel_task();
-                return std::nullopt;
-            }
-            if (parsed_claim.response->kind == TaskProtocolResponseKind::kLease &&
-                parsed_claim.response->task_id == task_id) {
-                return task_id;
-            }
-            if (parsed_claim.response->kind == TaskProtocolResponseKind::kError) {
-                cancel_task();
-                return std::nullopt;
-            }
             if (effective_timeout != std::chrono::milliseconds::zero() &&
                 std::chrono::steady_clock::now() >= deadline) {
                 cancel_task();
                 return std::nullopt;
             }
-            std::this_thread::sleep_for(remote_poll_interval_);
+            std::chrono::milliseconds wait_slice = kRemoteWaitSlice;
+            if (effective_timeout != std::chrono::milliseconds::zero()) {
+                const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now());
+                if (remaining <= std::chrono::milliseconds::zero()) {
+                    cancel_task();
+                    return std::nullopt;
+                }
+                wait_slice = std::min(wait_slice, remaining);
+            }
+            const TaskProtocolRequest wait_request{
+                .operation = TaskProtocolOperation::kWait,
+                .admission = {},
+                .task_id = task_id,
+                .wait_timeout_ms = static_cast<std::uint32_t>(wait_slice.count())};
+            const auto encoded_wait = format_task_protocol_request(wait_request);
+            if (!encoded_wait.has_value()) {
+                cancel_task();
+                return std::nullopt;
+            }
+            const auto wait_response = remote_client_->request(
+                encoded_wait.value(), timing == nullptr ? nullptr : &request_timing);
+            add_request_timing(timing, request_timing, false, true);
+            if (!wait_response.has_value()) {
+                cancel_task();
+                return std::nullopt;
+            }
+            const auto parsed_wait = parse_task_protocol_response(wait_response.value());
+            if (!parsed_wait.parsed() || !parsed_wait.response.has_value()) {
+                cancel_task();
+                return std::nullopt;
+            }
+            if (parsed_wait.response->kind == TaskProtocolResponseKind::kLease &&
+                parsed_wait.response->task_id == task_id) {
+                return task_id;
+            }
+            if (parsed_wait.response->kind == TaskProtocolResponseKind::kError &&
+                (parsed_wait.response->error == TaskProtocolErrorCode::kInvalidRequest ||
+                 parsed_wait.response->error == TaskProtocolErrorCode::kUnsupportedVersion)) {
+                // Mixed-version deployments may not know WAIT. Preserve the
+                // original task-specific claim path in that case.
+                return claim_with_polling();
+            }
+            if (parsed_wait.response->kind == TaskProtocolResponseKind::kEmpty) {
+                continue;
+            }
+            cancel_task();
+            return std::nullopt;
         }
     }
     std::unique_lock lock(mutex_);

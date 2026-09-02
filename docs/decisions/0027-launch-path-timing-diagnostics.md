@@ -20,7 +20,8 @@ records include:
 
 - admission duration and, for remote leases, summed request transport time;
 - whether the launch reused a batched lease;
-- request and task-specific claim-poll counts;
+- request counts, bounded wait-request counts, and legacy task-specific
+  claim-poll counts;
 - real CUDA launch and Driver-event tracking duration;
 - completion transition duration and remote completion transport time.
 

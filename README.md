@@ -139,10 +139,10 @@ successful memory-information query.
 For enforce-mode launch-path timing, add `GLIMMER_TRACE_LAUNCH_TIMINGS=1`.
 The interceptor then prints one allocation-free diagnostic for each admitted
 or forwarded launch and one when its completion lease is released. The fields
-separate admission time, remote control transport time, claim-poll count,
-CUDA launch time, event tracking time, completion transport time, and whether
-the launch reused a batched lease. This is an opt-in diagnostic stream, not a
-stable metrics export.
+separate admission time, remote control transport time, bounded wait-request
+count and legacy claim-poll count, CUDA launch time, event tracking time,
+completion transport time, and whether the launch reused a batched lease. This
+is an opt-in diagnostic stream, not a stable metrics export.
 
 ### Transparent launch scheduling
 
@@ -177,7 +177,10 @@ service socket. The gate then submits a task-specific lease before each
 covered launch, renews long-running leases while their events are pending, and
 reports completion after the final CUDA event for that lease. Set
 `GLIMMER_SCHEDULER_BATCH_SIZE` to
-reuse one admitted lease for that many launches within the same process. The
+reuse one admitted lease for that many launches within the same process. When a
+remote lease is queued, the client uses a bounded `WAIT` request instead of
+busy-polling `CLAIM`; older services are supported through the legacy polling
+fallback. The
 default is `1`, which gives the finest scheduling granularity. A larger value
 reduces control-plane overhead for throughput-oriented work but delays priority
 or fairness decisions by up to the batch size; keep latency-sensitive inference
@@ -241,9 +244,13 @@ To run the explicit worker-lease mode, add `--execution-mode remote`:
     --lease-timeout-ms 5000 \
     --max-concurrent-tasks 2 \
     --max-queued-tasks 64 \
-    --scheduler-policy weighted_rr \
-    --bind-leases-to-process
+    --scheduler-policy weighted_rr
 ```
+
+Add `--trace-scheduler` when you need to audit the service-side dispatch
+order. It writes one structured line per successful dispatch to stderr (or the
+service log when stderr is redirected), including sequence, task, tenant, and
+priority. The option is disabled by default and does not change scheduling.
 
 Submit and inspect tasks from another shell:
 
@@ -264,6 +271,20 @@ The optional priority argument sets priority when the service uses
     --socket /tmp/glimmer-control.sock submit tenant-a 1048576 2 1 10
 ```
 
+The framework co-location example exposes the same diagnostic for its remote
+priority service:
+
+```sh
+./examples/framework_workloads/pytorch_smoke/run_pytorch_priority.sh \
+    --mode priority --trace-scheduler --iterations 20 --warmup 3
+```
+
+Inspect `control-service.log` in the reported output directory to verify that
+higher-priority queued tasks were dispatched first. The process CSV files and
+the reported `overlap_ms` remain the evidence for workload latency and
+co-location; scheduler trace timestamps are diagnostic rather than a
+benchmark metric.
+
 A worker claims the next queued task, executes its local CUDA work, and reports
 the terminal result:
 
@@ -273,6 +294,12 @@ the terminal result:
 ./build/debug/bin/glimmer_control_client \
     --socket /tmp/glimmer-control.sock complete 1
 ```
+
+This command-line smoke workflow intentionally uses the default unbound mode:
+submission, claim, and completion are separate client processes. With
+`--bind-leases-to-process`, the submitting process must also claim the same
+task by id and keep the lease lifecycle in that process; an unrelated worker
+cannot claim it with unscoped `CLAIM`.
 
 When `--lease-timeout-ms` is enabled, the CUDA lease worker renews its lease
 automatically. The standalone client can renew a lease explicitly with
@@ -293,11 +320,12 @@ preserving submission order for ties. Priority is strict and can starve lower
 priority work under sustained load. Policies control task-boundary submission
 order and do not preempt a kernel that is already running.
 
-`--bind-leases-to-process` binds submission, claim, `HEARTBEAT`, `COMPLETE`, and
-`FAIL` to an authenticated Linux Unix-socket peer identity. Keep submission,
-claim, and execution in the same worker process when this option is enabled.
-The option is disabled by default so separate command-line smoke-test
-invocations remain compatible.
+`--bind-leases-to-process` binds submission, task-specific claim,
+`HEARTBEAT`, `COMPLETE`, and `FAIL` to an authenticated Linux Unix-socket peer
+identity. Unscoped `CLAIM` is rejected because it cannot prove ownership of a
+pending task. Keep submission, claim, and execution in the same worker process
+when this option is enabled. The option is disabled by default so separate
+command-line smoke-test invocations remain compatible.
 
 `--max-queued-tasks` optionally bounds waiting tasks. A value of `0` (the
 default) leaves the queue unlimited; when the bound is reached, submission

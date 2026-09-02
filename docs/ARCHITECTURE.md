@@ -115,6 +115,10 @@ owning targets and tests.
 - Explicit clients use `control::TaskAdmissionService` to bind a logical task
   admission to backend-resource registration. A failed registration cancels the
   queued task and releases its scheduler reservation.
+- If another component advances the same scheduler directly, it must call
+  `TaskAdmissionService::notify_scheduler_change()` so blocked task-specific
+  waits observe that progress; the simulated control service does this after
+  each externally executed state transition.
 - External lease cancellation is limited to queued tasks. A running CUDA task
   remains owned by its backend until a completion or failure event, because the
   scheduler cannot preempt an arbitrary kernel safely.
@@ -132,12 +136,14 @@ owning targets and tests.
   retrying a side-effecting request.
 - In remote execution mode, `ACQUIRE` combines submission with an immediate
   task-specific claim when a scheduler slot is available. If the task is
-  queued, it returns the accepted task id and the worker polls `CLAIM` for
-  that id. This removes one control-plane round trip from the uncontended
-  launch path while preserving the versioned `SUBMIT`/`CLAIM` operations for
-  explicit clients. Up to the configured concurrency limit may run at once. A
-  worker must report `COMPLETE` or `FAIL`; the service retains the reservation
-  while the lease is running.
+  queued, the client uses a bounded task-specific `WAIT` request so the
+  service blocks the connection until the task is dispatchable or the wait
+  expires; it falls back to `CLAIM` polling when talking to an older service.
+  This removes busy polling from the contended launch path while preserving
+  the versioned `SUBMIT`/`CLAIM` operations for explicit clients. Up to the
+  configured concurrency limit may run at once. A worker must report
+  `COMPLETE` or `FAIL`; the service retains the reservation while the lease is
+  running.
 - When a lease timeout is configured, workers renew running leases with
   `HEARTBEAT`; the service reaps an unrenewed lease as `FAILED` and releases its
   reservation. With timeout disabled, a running lease remains visible until an
@@ -145,12 +151,18 @@ owning targets and tests.
 - The control service can opt into process-bound leases. The Unix transport
   derives a PID/UID/start-time identity from `SO_PEERCRED` and `/proc`; submit,
   claim, heartbeat, completion, and failure must then use a valid peer, and
-  only the submitting/claiming process may renew or complete that lease. This
-  is an ownership check, not CUDA kernel preemption, and the default remains
-  unbound for CLI compatibility.
+  only the submitting process may claim it while only the claiming process may
+  renew or complete that lease. Unscoped `CLAIM` is rejected because it cannot
+  prove pending-task ownership. This is an ownership check, not CUDA kernel
+  preemption, and the default remains unbound for CLI compatibility.
 - The optional queued-task capacity rejects new work with explicit
   `QUEUE_FULL` backpressure before quota reservation; it does not limit running
   tasks or change weighted ordering.
+- The control service accepts `--trace-scheduler` as a disabled-by-default
+  diagnostic. It emits one stderr record for each successful admission-service
+  dispatch, including a monotonic sequence, task identity, tenant, priority,
+  and dispatch timestamp. The trace is observational only; it does not change
+  policy, admission, lease ownership, or CUDA execution.
 - The versioned `STATS` control operation is read-only and reports task-state
   counts, quota bytes, and configured scheduler limits. It is a diagnostic
   snapshot, not durable metrics storage or a CUDA resource API.
@@ -164,11 +176,11 @@ owning targets and tests.
   that event. Event support is required; an unavailable event path fails
   closed rather than forwarding an unenforced launch.
 - With `GLIMMER_SCHEDULER_CONTROL_SOCKET`, the same gate uses a one-unit
-  `ACQUIRE` request and polls a task-specific `CLAIM` only when the first
-  request is queued. The service applies the global policy and may bind the
-  lease to the requesting process identity. Completion and failure are
-  reported over the same protocol. A missing or failed remote lease fails the
-  launch closed.
+  `ACQUIRE` request and sends bounded task-specific `WAIT` requests only when
+  the first request is queued. The service applies the global policy and may
+  bind the lease to the requesting process identity. Completion and failure
+  are reported over the same protocol. A missing or failed remote lease fails
+  the launch closed.
 - `GLIMMER_SCHEDULER_BATCH_SIZE` may group consecutive covered launches within a
   process under one lease, including launches from multiple host threads. The
   completion tracker records one event per launch and closes the lease only
@@ -178,9 +190,10 @@ owning targets and tests.
   size is one, and batching must not be presented as kernel preemption or a
   memory-isolation boundary.
 - `GLIMMER_TRACE_LAUNCH_TIMINGS=1` enables an allocation-free diagnostic path
-  that measures launch admission, remote request transport, claim polling,
-  CUDA forwarding, event tracking, and completion reporting. It is disabled by
-  default and does not alter admission, scheduling, or completion behavior.
+  that measures launch admission, remote request transport, wait requests and
+  legacy claim polling, CUDA forwarding, event tracking, and completion
+  reporting. It is disabled by default and does not alter admission,
+  scheduling, or completion behavior.
 - Transparent launch admission remains a task-boundary mechanism: it does not
   preempt a running kernel or capture CUDA graph/cooperative-launch state.
 

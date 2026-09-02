@@ -237,6 +237,29 @@ std::optional<std::string> TaskControlEndpoint::handle(
                 }
                 return format_response(lease_response(snapshot.value()));
             }
+            case TaskProtocolOperation::kWait: {
+                const auto snapshot = admission_service_.wait_claim(
+                    request.task_id, std::chrono::milliseconds{request.wait_timeout_ms}, peer);
+                if (snapshot.has_value()) {
+                    return format_response(lease_response(snapshot.value()));
+                }
+                const auto current = admission_service_.find(request.task_id);
+                if (!current.has_value()) {
+                    return format_response(error_response(TaskProtocolErrorCode::kUnknownTask));
+                }
+                if (current->state != core::TaskState::kQueued) {
+                    return format_response(state_response(current->task_id, current->state));
+                }
+                return format_response({.kind = TaskProtocolResponseKind::kEmpty,
+                                        .task_id = 0,
+                                        .state = TaskProtocolState::kQueued,
+                                        .error = TaskProtocolErrorCode::kInternalError,
+                                        .tenant_id = {},
+                                        .memory_bytes = 0,
+                                        .weight = 0,
+                                        .work_units = 0,
+                                        .stats = {}});
+            }
             case TaskProtocolOperation::kStats:
                 return format_response(stats_response(admission_service_.stats(), false));
             case TaskProtocolOperation::kMetrics:

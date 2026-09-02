@@ -22,6 +22,9 @@ enum class TaskProtocolOperation : std::uint8_t {
     kCancel,
     kQuery,
     kClaim,
+    // Wait for a task-specific claim without client-side polling. The
+    // request carries a bounded wait timeout in milliseconds.
+    kWait,
     kHeartbeat,
     kComplete,
     kFail,
@@ -44,6 +47,7 @@ struct TaskProtocolRequest {
     TaskProtocolOperation operation = TaskProtocolOperation::kSubmit;
     TaskAdmissionRequest admission;
     core::TaskId task_id = 0;
+    std::uint32_t wait_timeout_ms = 0;
 };
 
 struct TaskProtocolRequestParseResult {

@@ -24,6 +24,7 @@ Options:
   --training-launch-batch-size N  training launches per scheduler lease (default: 1)
   --inference-launch-batch-size N inference launches per scheduler lease (default: 1)
   --trace-timings                 enable launch-path timing diagnostics
+  --trace-scheduler               enable service-side dispatch order diagnostics
   --help                          show this message
 EOF
 }
@@ -41,6 +42,7 @@ max_concurrent_kernels=1
 training_launch_batch_size=1
 inference_launch_batch_size=1
 trace_timings=0
+trace_scheduler=0
 
 while (($# > 0)); do
     case "$1" in
@@ -142,6 +144,10 @@ while (($# > 0)); do
             ;;
         --trace-timings)
             trace_timings=1
+            shift
+            ;;
+        --trace-scheduler)
+            trace_scheduler=1
             shift
             ;;
         --help)
@@ -263,15 +269,20 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ "$mode" == "priority" ]]; then
-    "$service" \
-        --socket "$socket_path" \
-        --quota-bytes 4294967296 \
-        --execution-mode remote \
-        --lease-timeout-ms 5000 \
-        --max-queued-tasks 256 \
-        --max-concurrent-tasks "$max_concurrent_kernels" \
-        --scheduler-policy priority \
-        --bind-leases-to-process \
+    service_arguments=(
+        --socket "$socket_path"
+        --quota-bytes 4294967296
+        --execution-mode remote
+        --lease-timeout-ms 5000
+        --max-queued-tasks 256
+        --max-concurrent-tasks "$max_concurrent_kernels"
+        --scheduler-policy priority
+        --bind-leases-to-process
+    )
+    if ((trace_scheduler)); then
+        service_arguments+=(--trace-scheduler)
+    fi
+    "$service" "${service_arguments[@]}" \
         >"$service_log" 2>&1 &
     service_pid=$!
     for _ in {1..6000}; do

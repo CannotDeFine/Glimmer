@@ -34,6 +34,7 @@ struct LaunchGateTiming {
     std::uint64_t transport_nanoseconds = 0;
     std::uint32_t request_count = 0;
     std::uint32_t claim_poll_count = 0;
+    std::uint32_t wait_request_count = 0;
 };
 
 // A launch gate admits host-side launch calls at explicit scheduler boundaries.

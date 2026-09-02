@@ -6,6 +6,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
@@ -33,6 +34,7 @@ struct ServiceOptions {
     glimmer::core::SchedulingPolicy scheduling_policy =
         glimmer::core::SchedulingPolicy::kWeightedRoundRobin;
     bool bind_leases_to_process = false;
+    bool trace_scheduler = false;
     ExecutionMode execution_mode = ExecutionMode::kSimulated;
 };
 
@@ -42,7 +44,7 @@ void print_usage(std::ostream& output, std::string_view program) {
               " [--completion-steps N] [--lease-timeout-ms N]"
               " [--max-concurrent-tasks N] [--max-queued-tasks N]"
               " [--scheduler-policy fifo|weighted_rr|drr|priority]"
-              " [--max-requests N] [--bind-leases-to-process]\n";
+              " [--max-requests N] [--bind-leases-to-process] [--trace-scheduler]\n";
 }
 
 template <typename Integer>
@@ -85,6 +87,10 @@ bool parse_options(int argc, char** argv, ServiceOptions* options) {
         }
         if (argument == "--bind-leases-to-process") {
             options->bind_leases_to_process = true;
+            continue;
+        }
+        if (argument == "--trace-scheduler") {
+            options->trace_scheduler = true;
             continue;
         }
         if (index + 1 >= argc) {
@@ -142,6 +148,19 @@ bool register_simulated_task(void* context, glimmer::core::TaskId) noexcept {
     return context != nullptr;
 }
 
+void trace_scheduler_dispatch(
+    void*, const glimmer::control::TaskDispatchObservation& observation) noexcept {
+    static_cast<void>(std::fprintf(
+        stderr,
+        "[glimmer] scheduler dispatch sequence=%llu task_id=%llu tenant=%s priority=%u "
+        "memory_bytes=%llu work_units=%u timestamp_ns=%llu\n",
+        static_cast<unsigned long long>(observation.sequence),
+        static_cast<unsigned long long>(observation.task.task_id),
+        observation.task.tenant_id.c_str(), observation.task.priority,
+        static_cast<unsigned long long>(observation.task.memory_bytes), observation.task.work_units,
+        static_cast<unsigned long long>(observation.dispatched_at_nanoseconds)));
+}
+
 }  // namespace
 
 int run_service(int argc, char** argv) {
@@ -172,7 +191,8 @@ int run_service(int argc, char** argv) {
     glimmer::backend::TaskExecutor executor(scheduler, backend);
     glimmer::control::TaskAdmissionService admission_service(
         scheduler, std::chrono::milliseconds(options.lease_timeout_ms),
-        options.bind_leases_to_process);
+        options.bind_leases_to_process,
+        options.trace_scheduler ? trace_scheduler_dispatch : nullptr, nullptr);
     glimmer::control::TaskControlEndpoint endpoint(admission_service, register_simulated_task,
                                                    &backend);
     glimmer::control::UnixSocketControlServer server(
@@ -189,7 +209,11 @@ int run_service(int argc, char** argv) {
         static_cast<void>(admission_service.reap_expired());
         if (options.execution_mode == ServiceOptions::ExecutionMode::kSimulated) {
             backend.advance();
-            static_cast<void>(executor.step());
+            const auto execution = executor.step();
+            if (execution.status != glimmer::backend::ExecutorStepStatus::kIdle &&
+                execution.status != glimmer::backend::ExecutorStepStatus::kPending) {
+                admission_service.notify_scheduler_change();
+            }
         }
         const auto serve_status = server.serve_one_for(100);
         if (serve_status == glimmer::control::UnixSocketServeStatus::kTimedOut) {

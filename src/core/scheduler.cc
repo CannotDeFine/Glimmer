@@ -235,6 +235,11 @@ std::optional<TaskSnapshot> Scheduler::dispatch_selected_task_locked(TaskId sele
         return std::nullopt;
     }
     task_iterator->second.state = TaskState::kRunning;
+    task_iterator->second.dispatch_sequence = next_dispatch_sequence_;
+    if (next_dispatch_sequence_ != std::numeric_limits<std::uint64_t>::max()) {
+        ++next_dispatch_sequence_;
+    }
+    dispatched_snapshot.dispatch_sequence = task_iterator->second.dispatch_sequence;
     task_iterator->second.running_at = std::chrono::steady_clock::now();
     const auto queue_wait = std::chrono::duration_cast<std::chrono::microseconds>(
         task_iterator->second.running_at - task_iterator->second.queued_at);
@@ -636,7 +641,8 @@ TaskSnapshot Scheduler::snapshot_locked(TaskId task_id, const TaskRecord& task) 
                         .weight = task.spec.weight,
                         .work_units = task.spec.work_units,
                         .priority = task.spec.priority,
-                        .state = task.state};
+                        .state = task.state,
+                        .dispatch_sequence = task.dispatch_sequence};
 }
 
 bool Scheduler::finish_running_task_locked(TaskId task_id, TaskState terminal_state) {

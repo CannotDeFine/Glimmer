@@ -76,6 +76,10 @@ struct TaskSnapshot {
     std::uint32_t work_units = 0;
     std::uint32_t priority = 0;
     TaskState state = TaskState::kFailed;
+    // Non-zero for a task that has been dispatched by this scheduler. The
+    // value is monotonic within one scheduler instance and is useful for
+    // correlating optional control-plane dispatch diagnostics.
+    std::uint64_t dispatch_sequence = 0;
 };
 
 struct SchedulerStats {
@@ -131,6 +135,7 @@ class Scheduler {
         std::optional<QuotaReservation> reservation;
         std::chrono::steady_clock::time_point queued_at{};
         std::chrono::steady_clock::time_point running_at{};
+        std::uint64_t dispatch_sequence = 0;
     };
 
     struct TenantQueue {
@@ -158,6 +163,7 @@ class Scheduler {
     mutable std::mutex mutex_;
     QuotaLedger quota_ledger_;
     TaskId next_task_id_ = 1;
+    std::uint64_t next_dispatch_sequence_ = 1;
     std::unordered_map<TaskId, TaskRecord> tasks_;
     std::unordered_map<TenantId, TenantQueue> tenant_queues_;
     std::vector<TenantId> tenant_order_;

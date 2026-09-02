@@ -34,7 +34,7 @@ replace it.
 | `core` | Quota reservation admission, rejection, commit, cancellation, release failures, concurrent reservations, lifetime safety, counter overflow protection, task admission, FIFO, weighted, deficit-round-robin, and strict-priority ordering, policy-preserving task-specific dispatch, configurable concurrent dispatch slots, queued-work backpressure, scheduler state and latency snapshots, completion, cancellation, failure, and input validation. | No |
 | `backend` | Simulated task submission, deterministic progress, completion, cancellation, duplicate rejection, unknown-task handling, executor-to-scheduler submission/progress/terminal transitions, and fake-Driver CUDA launch/event state mapping. | No |
 | `examples` | Optional CUDA workload harnesses cover synchronous, stream-ordered/pool, managed, pitched, and multi-stream Runtime paths with device-side validation and visible-memory reporting under `LD_PRELOAD`; the priority demo compares native scheduling with transparent priority enforcement using configurable cuBLAS model-shaped, tiled-GEMM, or pointwise workloads; the optional framework workload directory provides a public-API PyTorch CUDA MLP smoke test for native/observe/enforce comparisons; explicit task demos cover Driver-API PTX launch, scheduler admission, event polling, terminal quota release, and remote Unix-socket lease workers with process-local CUDA execution. The remote lease GPU integration test starts the endpoint with process-bound leases, forks two workers, and verifies both completed states. | CUDA and optional framework |
-| `control` | Quota-visible memory information, physical-memory bounds, physical-capacity admission and free-memory rejection, rejected reservations, shared-memory accounting, aggregate-plus-task quota composition, multi-process quota boundaries, per-device counters, fork re-registration, continuous stale-process recovery, committed-byte recovery grace, stale-process reservation/commit recovery, safe region cleanup, reservation lifecycle checks, robust-mutex owner-death recovery, transactional explicit-task admission with registration rollback, endpoint-to-executor lifecycle transitions, priority-ordered endpoint claims, combined remote `ACQUIRE` fast-path and queued fallback, remote lease claim/heartbeat/complete/fail transitions, task-specific process-bound claims, optional PID/UID/start-time lease ownership binding, lease expiry and quota recovery, queue-full backpressure, read-only stats and latency metrics snapshots, versioned task-protocol request/response validation, authenticated Unix-socket request/response handling, persistent request/response pairs, and request-count-aware service shutdown. | No |
+| `control` | Quota-visible memory information, physical-memory bounds, physical-capacity admission and free-memory rejection, rejected reservations, shared-memory accounting, aggregate-plus-task quota composition, multi-process quota boundaries, per-device counters, fork re-registration, continuous stale-process recovery, committed-byte recovery grace, stale-process reservation/commit recovery, safe region cleanup, reservation lifecycle checks, robust-mutex owner-death recovery, transactional explicit-task admission with registration rollback and dispatch serialization, endpoint-to-executor lifecycle transitions, priority-ordered endpoint claims, combined remote `ACQUIRE` fast-path and queued fallback, bounded task-specific `WAIT` admission, remote lease claim/heartbeat/complete/fail transitions, task-specific process-bound claims with cross-peer rejection, optional PID/UID/start-time lease ownership binding, lease expiry and quota recovery, queue-full backpressure, read-only stats and latency metrics snapshots, opt-in dispatch-order observations, versioned task-protocol request/response validation, authenticated Unix-socket request/response handling, persistent request/response pairs, and request-count-aware service shutdown. | No |
 | `app` | Service and client argument validation and usage smoke tests, plus a multi-process service/client check covering quota rejection, queued-work backpressure, stats snapshots, empty claims, lease metadata, running-slot exclusion, heartbeat renewal, explicit completion, and explicit failure. | No |
 | `interceptor` | Driver/Runtime preload coverage through fake CUDA Driver, Runtime, and NVML libraries, `cuInit`, `cuLaunchKernel` and PTDS launch forwarding, process-local enforce-mode launch admission and event completion, batched lease reuse and terminal event draining, `dlsym` including explicit CUDA Driver/Runtime/NVML handles, both `cuGetProcAddress` forms, invalid-argument rejection, legacy/versioned and PTDS allocation/query aliases, exact PTDS availability checks, context-aware allocation records, duplicate-pointer degraded-state handling, ambiguous successful-null allocation rollback, context-bound cleanup that preserves context-independent allocations, stream cleanup, device-grouped asynchronous completion, fork reinitialization of local allocation metadata, `cuDeviceTotalMem_v2`, `cuMemAllocManaged`, `cuMemAllocPitch_v2`, Runtime `cudaMalloc3D`, physical-capacity clamping and free-memory rejection, stream-ordered Driver/Runtime allocation/free and completion accounting, memory-pool lifecycle and import policy, device-resident `cuMemCreate`/`cuMemRelease` VMM handle accounting with retain/release references, VMM address reserve/map/access/unmap/free and query/import policy, CUDA IPC export/close forwarding and quota-enabled import rejection for Driver and Runtime APIs, NVML initialization/device lookup and passthrough plus v1/v2 memory-view virtualization, process-scoped task-limit enforcement, deterministic allocation-registry tests, and injectable Driver dispatch tests. | GPU tests for real CUDA/NVML routing, Driver and Runtime kernel launches, and cross-process shared quota; no GPU for symbol, fake preload, registry, dispatch, and core tests |
 
@@ -128,6 +128,12 @@ three weight-2 tasks for one tenant and two weight-1 tasks for another. Its GPU
 test checks the weighted dispatch order and verifies that all task quota is
 released after CUDA event completion.
 
+The priority co-location runner can pass `--trace-scheduler` to the remote
+service. The resulting `control-service.log` contains the authoritative
+admission order, including task priority and sequence, while the process CSV
+files retain latency and co-location measurements. The trace is for diagnosis
+and is disabled for benchmark timing unless explicitly requested.
+
 ## Test design
 
 - Use descriptive test names that state the condition and expected result.
@@ -143,14 +149,15 @@ released after CUDA event completion.
   batch-size-two variant verifies lease reuse and final-event draining.
 - The remote launch-gate process test starts the real Linux control service and
   runs two independent processes through one global launch slot. It verifies
-  task-specific claims, persistent per-process request reuse, and
-  serialization; environments that cannot bind Unix sockets report an
-  explicit CTest skip.
+  task-specific claims, bounded `WAIT` admission, persistent per-process
+  request reuse, and serialization; environments that cannot bind Unix sockets
+  report an explicit CTest skip.
 - If Driver event creation, recording, querying, or destruction fails after
   enforce-mode admission, verify that the launch lease is failed and no slot
   remains occupied. If the event API is unavailable, verify the fail-closed
   `CUDA_ERROR_NOT_SUPPORTED` result.
-- Exercise the control protocol codec with canonical round trips plus optional
+- Exercise the control protocol codec with canonical round trips plus bounded
+  `WAIT` requests, optional
   priority and legacy submit forms, empty,
   oversized, unsupported-version, malformed, unsafe-tenant, zero, and
   overflowing input. Test response states and error codes as well as request

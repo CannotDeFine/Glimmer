@@ -124,6 +124,19 @@ void test_request_round_trip() {
                parsed_specific_claim.request->task_id == 42,
            "specific claim should round trip");
 
+    const TaskProtocolRequest wait{.operation = TaskProtocolOperation::kWait,
+                                   .admission = {},
+                                   .task_id = 42,
+                                   .wait_timeout_ms = 500};
+    const auto wait_text = format_task_protocol_request(wait);
+    expect(wait_text.has_value() && wait_text.value_or("") == "GLIMMER_TASK_V1 WAIT 42 500\n",
+           "wait should format canonically");
+    const auto parsed_wait = parse_task_protocol_request(wait_text.value_or(""));
+    expect(parsed_wait.parsed() && parsed_wait.request.has_value() &&
+               parsed_wait.request->operation == TaskProtocolOperation::kWait &&
+               parsed_wait.request->task_id == 42 && parsed_wait.request->wait_timeout_ms == 500,
+           "wait should round trip");
+
     const TaskProtocolRequest stats{.operation = TaskProtocolOperation::kStats, .admission = {}};
     const auto stats_text = format_task_protocol_request(stats);
     expect(stats_text.has_value() && stats_text.value_or("") == "GLIMMER_TASK_V1 STATS\n",
@@ -168,6 +181,12 @@ void test_request_rejects_invalid_input() {
     expect(parse_task_protocol_request("GLIMMER_TASK_V1 CLAIM trailing").error ==
                TaskProtocolParseError::kMalformed,
            "claim fields should be rejected");
+    expect(parse_task_protocol_request("GLIMMER_TASK_V1 WAIT 1 0").error ==
+               TaskProtocolParseError::kInvalidValue,
+           "zero wait timeout should be rejected");
+    expect(parse_task_protocol_request("GLIMMER_TASK_V1 WAIT 1 60001").error ==
+               TaskProtocolParseError::kInvalidValue,
+           "oversized wait timeout should be rejected");
     expect(parse_task_protocol_request("GLIMMER_TASK_V1 STATS trailing").error ==
                TaskProtocolParseError::kMalformed,
            "stats fields should be rejected");
@@ -187,6 +206,13 @@ void test_request_rejects_invalid_input() {
                                     .admission = {.tenant_id = "tenant/a", .memory_bytes = 1}})
                 .has_value(),
            "invalid request should not format");
+    expect(
+        !format_task_protocol_request(TaskProtocolRequest{.operation = TaskProtocolOperation::kWait,
+                                                          .admission = {},
+                                                          .task_id = 1,
+                                                          .wait_timeout_ms = 0})
+             .has_value(),
+        "wait without a bounded timeout should not format");
 }
 
 void test_response_round_trip() {

@@ -34,6 +34,7 @@ struct LaunchTimingObservation {
     std::uint64_t acquire_transport_nanoseconds = 0;
     std::uint32_t acquire_request_count = 0;
     std::uint32_t claim_poll_count = 0;
+    std::uint32_t wait_request_count = 0;
     std::uint64_t cuda_launch_nanoseconds = 0;
     std::uint64_t event_tracking_nanoseconds = 0;
     std::uint32_t cuda_launch_status = 0;

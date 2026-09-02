@@ -58,8 +58,7 @@ second shell, and run the worker in a third shell:
     --lease-timeout-ms 5000 \
     --max-concurrent-tasks 2 \
     --max-queued-tasks 64 \
-    --scheduler-policy weighted_rr \
-    --bind-leases-to-process
+    --scheduler-policy weighted_rr
 ./build/cuda-gpu/bin/glimmer_control_client \
     --socket /tmp/glimmer-control.sock submit tenant-a 1048576 1 1
 ./build/cuda-gpu/examples/cuda_task_backend/glimmer_cuda_lease_worker \
@@ -83,11 +82,18 @@ once. It defaults to `1`; increase it only when the GPU workload and quota are
 intended to overlap. Each worker must use a distinct process and claims are
 serialized by the service.
 
+The three-shell workflow above intentionally leaves process binding disabled:
+the submission client and the lease worker are separate processes. If
+`--bind-leases-to-process` is enabled, a task must be submitted and claimed by
+the same process, using a task-specific `CLAIM <task-id>` or `WAIT <task-id>`.
+Use the transparent launch path, or integrate submission and execution into one
+worker process, when process-bound ownership is required.
+
 The service supports `weighted_rr` (the default), `drr` (deficit
 round-robin), and `fifo` scheduling policies. All apply at explicit task
 boundaries; they do not preempt a CUDA kernel after submission.
 
-With `--bind-leases-to-process`, the worker that submits and claims a lease
+With `--bind-leases-to-process`, the process that submits and claims a lease
 must also send its heartbeats and terminal report. The service authenticates
 this ownership with the Unix peer PID, UID, and process start-time identity.
 

@@ -104,7 +104,10 @@ void test_server_lifecycle_and_authentication() {
     expect(
         parsed.response.has_value() && parsed.response->kind == TaskProtocolResponseKind::kAccepted,
         "socket request should be admitted");
-    const std::string lease_response = exchange(server, path, "GLIMMER_TASK_V1 CLAIM\n");
+    const TaskId submitted_task_id =
+        parsed.response.value_or(glimmer::control::TaskProtocolResponse{}).task_id;
+    const std::string lease_response =
+        exchange(server, path, "GLIMMER_TASK_V1 CLAIM " + std::to_string(submitted_task_id) + "\n");
     const auto lease = glimmer::control::parse_task_protocol_response(lease_response);
     expect(lease.parsed() && lease.response.has_value() &&
                lease.response->kind == TaskProtocolResponseKind::kLease,
@@ -128,7 +131,10 @@ void test_server_lifecycle_and_authentication() {
     expect(persistent_submit.parsed() && persistent_submit.response.has_value() &&
                persistent_submit.response->kind == TaskProtocolResponseKind::kAccepted,
            "persistent client should receive its first response");
-    send_request(persistent_fd, "GLIMMER_TASK_V1 CLAIM\n");
+    const TaskId persistent_submitted_task_id =
+        persistent_submit.response.value_or(glimmer::control::TaskProtocolResponse{}).task_id;
+    send_request(persistent_fd,
+                 "GLIMMER_TASK_V1 CLAIM " + std::to_string(persistent_submitted_task_id) + "\n");
     const auto persistent_claim =
         glimmer::control::parse_task_protocol_response(receive_response(persistent_fd));
     expect(persistent_claim.parsed() && persistent_claim.response.has_value() &&
