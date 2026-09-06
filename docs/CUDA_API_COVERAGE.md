@@ -92,11 +92,11 @@ The interceptor must cover each supported path before claiming compatibility.
 
 | Path | Required behavior | Priority | Test |
 | --- | --- | --- | --- |
-| Direct dynamic import | Export ABI-compatible `cu*` wrapper symbols, including legacy, PTDS, allocation, kernel-launch, stream identity, and query aliases, from the preload library. | M1/M2/M3 | A fixture directly calls versioned, PTDS, legacy allocation/query, and kernel-launch symbols. |
-| `dlsym` | Return a supported wrapper when a CUDA Driver allocation, release, VMM handle, kernel launch, stream identity, or query symbol is requested. Delegate all other symbols to the real resolver. | M2/M3 (implemented) | A preload fixture resolves supported PTDS, kernel-launch, and VMM symbols and verifies delegation for an unsupported symbol. |
+| Direct dynamic import | Export ABI-compatible `cu*` wrapper symbols, including legacy, PTDS, allocation, kernel/graph-launch, stream identity, and query aliases, from the preload library. | M1/M2/M3/M4 | A fixture directly calls versioned, PTDS, legacy allocation/query, kernel-launch, and graph-launch symbols. |
+| `dlsym` | Return a supported wrapper when a CUDA Driver allocation, release, VMM handle, kernel or graph launch, stream identity, or query symbol is requested. Delegate all other symbols to the real resolver. | M2/M3/M4 (implemented) | A preload fixture resolves supported PTDS, kernel-launch, graph-launch, and VMM symbols and verifies delegation for an unsupported symbol. |
 | `cuGetProcAddress` and `cuGetProcAddress_v2` | Return a supported wrapper for requested CUDA Driver APIs and versions. Delegate unsupported requests unchanged. | M2 (implemented) | A CUDA integration test resolves and calls `cuMemGetInfo` through the versioned API and verifies an unsupported request. |
 | CUDA Runtime interception | Wrap synchronous allocation/free (`cudaMalloc`, `cudaMallocManaged`, `cudaMallocPitch`, `cudaMalloc3D`) and stream-ordered allocation/free APIs, including `cudaMallocFromPoolAsync`/`cudaMallocFromPoolAsync_ptsz`, completion boundaries, memory-pool lifecycle/query APIs, and memory-pool import/export APIs. Runtime calls use a reentrancy guard; allocation bytes are independently accounted through the shared registry, while imported pool handles/pointers are rejected when quota mode is enabled. | M2/M3 (implemented) | Fake Runtime and CUDA integration tests plus the real workload matrix for synchronous, stream-ordered, managed, pitched, multi-stream, and memory-pool Runtime calls. |
-| CUDA kernel launch scheduling | Forward `cuLaunchKernel`, `cuLaunchKernel_ptsz`, `cudaLaunchKernel`, `cudaLaunchKernel_ptsz`, `__cudaLaunchKernel`, and `__cudaLaunchKernel_ptsz` with their exact ABIs and preserve the caller's launch arguments. In `observe` mode, emit an allocation-free boundary diagnostic after a successful launch. In `enforce` mode, block at the call boundary until the process-local gate or opt-in control-plane launch lease admits the call, then record a Driver event on the same stream and release the slot after the final event belonging to that lease completes. Missing event support rejects admission with `CUDA_ERROR_NOT_SUPPORTED`; a post-launch event-recording failure returns `CUDA_ERROR_UNKNOWN` after failing the lease. The control-plane path coordinates processes but still does not preempt running kernels or capture graph/cooperative launches. | M4 partial | Dispatch, symbol-registry, fake enforce/observe tests, real GPU Driver-PTX and Runtime-compiled workloads, and no-GPU remote lease process tests. |
+| CUDA kernel and graph launch scheduling | Forward `cuLaunchKernel`, `cuLaunchKernel_ptsz`, `cuLaunchKernelEx`, `cuLaunchKernelEx_ptsz`, `cudaLaunchKernel`, `cudaLaunchKernel_ptsz`, `cudaLaunchKernelExC`, `cudaLaunchKernelExC_ptsz`, `__cudaLaunchKernel`, `__cudaLaunchKernel_ptsz`, `cuGraphLaunch`, `cuGraphLaunch_ptsz`, `cudaGraphLaunch`, and `cudaGraphLaunch_ptsz` with their exact ABIs and preserve caller arguments and extended launch attributes. PTDS null streams use the per-thread stream for completion tracking. In `observe` mode, emit an allocation-free boundary diagnostic after each successful launch. In `enforce` mode, block at the call boundary until the process-local gate or opt-in control-plane launch lease admits the call, then record a Driver event on the supplied stream and release the slot after the final event belonging to that lease completes. Missing event support rejects admission with `CUDA_ERROR_NOT_SUPPORTED`; a post-launch event-recording failure returns `CUDA_ERROR_UNKNOWN` after failing the lease. Graph launches are tracked as one task and their internal nodes are opaque; graph memory-node accounting remains fail-closed. | M4 implemented (graph and extended-launch increments) | Extended ABI forwarding and deterministic completion-race regressions; dispatch, symbol-registry, fake enforce/observe tests, real GPU Driver-PTX and Runtime-compiled workloads, and no-GPU remote lease process tests. |
 
 `cuInit` is also wrapped as an initialization safety boundary. It does not
 make an accounting decision; it establishes the Driver-call guard so that
@@ -118,6 +118,11 @@ round trips while preserving one global lease per batch.
 or `priority`. Under the priority policy, the trusted launcher may set
 `GLIMMER_SCHEDULER_PRIORITY`; larger values run first and equal values retain
 submission order. Other policies ignore that field.
+`GLIMMER_SCHEDULER_PRIORITY_RESERVED_SLOTS` optionally reserves running launch
+slots for tasks at or above `GLIMMER_SCHEDULER_PRIORITY_THRESHOLD` (default
+threshold `1`). Lower-priority launches cannot borrow the reserved slots. The
+reservation is disabled by default, applies only to the priority policy, and
+does not preempt work already running on the GPU.
 `GLIMMER_SCHEDULER_TENANT_ID` identifies the local queue and falls back to
 `GLIMMER_QUOTA_TENANT_ID`; `GLIMMER_SCHEDULER_WEIGHT` optionally sets its
 positive weight. The caller may therefore block before the real CUDA launch
@@ -157,6 +162,13 @@ handles. An explicit `libcuda.so` handle is restricted to Driver-style `cu*`
 names so a lookup on the wrong library cannot return a Runtime wrapper.
 Versioned `dlvsym` lookups are delegated unchanged and remain outside the
 current interception guarantee.
+
+The Glimmer `dlsym` boundary defensively returns null for a null symbol name.
+Its implementation uses a separate C++ identifier with the ELF name `dlsym`
+so libc's `nonnull` declaration cannot remove the check in optimized builds.
+The regression invokes the dynamically resolved Glimmer boundary; passing a
+null name to libc's declared `dlsym` is not a supported application contract.
+This check does not make arbitrary invalid handles or pointers safe.
 
 The preload library exports CUDA Runtime boundaries for synchronous
 (`cudaMalloc`, `cudaMallocManaged`, `cudaMallocPitch`, and `cudaMalloc3D`) and
@@ -357,8 +369,10 @@ The VMM increment is complete only when all of the following are true:
 
 The launch increment proves transparent execution for a real CUDA Driver and
 Runtime workload while adding an opt-in admission boundary. The covered
-Driver, PTDS, public Runtime, and compiler-generated `__cuda` entry points
-preserve the caller's launch configuration, argument storage, stream, and ABI.
+Driver, PTDS, public Runtime, compiler-generated `__cuda`, and graph-launch
+entry points preserve the caller's launch configuration, argument storage,
+stream, and ABI. Graph execution is treated as one task at its launch boundary;
+the interceptor does not inspect or rewrite graph nodes.
 The optional `GLIMMER_SCHEDULER_MODE=observe` setting reports successful
 launches through the interceptor's allocation-free diagnostic path. Set
 `GLIMMER_TRACE_KERNEL_LAUNCHES=1` to report every successful launch with its
@@ -381,4 +395,6 @@ completion. Event API absence rejects the launch with
 the lease. Without `GLIMMER_SCHEDULER_CONTROL_SOCKET`, this gate is
 process-local; the opt-in socket path adds cross-process admission and lease
 heartbeats without moving CUDA handles. Neither path preempts running kernels.
-Cooperative and graph launch families remain separate follow-up coverage.
+Cooperative launch remains separate follow-up coverage. Graph memory nodes remain
+fail-closed while quota mode is enabled because their allocation lifetime is not
+observable at the graph-launch boundary.

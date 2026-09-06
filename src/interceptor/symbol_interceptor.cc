@@ -10,7 +10,6 @@
 #include <dlfcn.h>
 #include <link.h>
 
-#include <cstdint>
 #include <string_view>
 
 namespace glimmer::interceptor {
@@ -108,9 +107,13 @@ namespace {
 
 }  // namespace glimmer::interceptor
 
-extern "C" void* dlsym(void* handle, const char* name) {
-    const std::uintptr_t name_address = reinterpret_cast<std::uintptr_t>(name);
-    if (name_address == 0U) {
+// The libc declaration marks the name nonnull, allowing an optimized definition
+// named dlsym to discard our defensive check. Keep the ELF ABI name without
+// inheriting that source-level precondition at the interceptor boundary.
+extern "C" void* glimmer_dlsym(void* handle, const char* name) noexcept __asm__("dlsym");
+
+extern "C" void* glimmer_dlsym(void* handle, const char* name) noexcept {
+    if (name == nullptr) {
         return nullptr;
     }
     try {

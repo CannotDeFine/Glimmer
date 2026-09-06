@@ -43,6 +43,21 @@ target_link_libraries(glimmer_cuda_interceptor
 glimmer_enable_clang_tidy(glimmer_cuda_interceptor)
 
 if(BUILD_TESTING)
+    add_executable(glimmer_cuda_launch_completion_tracker_test
+        driver_dispatch.cc
+        launch_completion_tracker.cc
+        internal/diagnostics.cc
+        "${PROJECT_SOURCE_DIR}/tests/interceptor/launch_completion_tracker_test.cc"
+    )
+    target_include_directories(glimmer_cuda_launch_completion_tracker_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/src/interceptor" "${CUDAToolkit_INCLUDE_DIRS}")
+    target_link_libraries(glimmer_cuda_launch_completion_tracker_test PRIVATE
+        Glimmer::control Glimmer::project_options "${CMAKE_DL_LIBS}" Threads::Threads)
+    glimmer_enable_clang_tidy(glimmer_cuda_launch_completion_tracker_test)
+    add_test(NAME glimmer_cuda_launch_completion_tracker_test
+        COMMAND glimmer_cuda_launch_completion_tracker_test)
+    set_tests_properties(glimmer_cuda_launch_completion_tracker_test PROPERTIES TIMEOUT 20)
+
     add_executable(glimmer_cuda_interceptor_dlsym_test
         "${PROJECT_SOURCE_DIR}/tests/interceptor/dlsym_interceptor_test.cc"
     )
@@ -185,6 +200,22 @@ if(BUILD_TESTING)
     add_test(NAME glimmer_cuda_interceptor_fake_driver_test
         COMMAND glimmer_cuda_interceptor_fake_driver_test
     )
+    add_executable(glimmer_cuda_extended_launch_test
+        "${PROJECT_SOURCE_DIR}/tests/interceptor/extended_launch_test.cc")
+    target_include_directories(glimmer_cuda_extended_launch_test PRIVATE "${CUDAToolkit_INCLUDE_DIRS}")
+    target_link_libraries(glimmer_cuda_extended_launch_test PRIVATE
+        Glimmer::project_options "${CMAKE_DL_LIBS}")
+    add_dependencies(glimmer_cuda_extended_launch_test glimmer_fake_cuda_driver
+        glimmer_fake_cuda_runtime glimmer_cuda_interceptor)
+    glimmer_enable_clang_tidy(glimmer_cuda_extended_launch_test)
+    add_test(NAME glimmer_cuda_extended_launch_test COMMAND glimmer_cuda_extended_launch_test)
+    add_test(NAME glimmer_cuda_extended_launch_missing_runtime_test
+        COMMAND glimmer_cuda_extended_launch_test --missing-runtime)
+    set_tests_properties(glimmer_cuda_extended_launch_missing_runtime_test PROPERTIES TIMEOUT 20
+        ENVIRONMENT "LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>")
+    set_tests_properties(glimmer_cuda_extended_launch_test PROPERTIES
+        TIMEOUT 20
+        ENVIRONMENT "LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>")
     set_tests_properties(glimmer_cuda_interceptor_fake_driver_test PROPERTIES
         ENVIRONMENT
             "GLIMMER_MEMORY_LIMIT_BYTES=4096;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
@@ -245,7 +276,7 @@ if(BUILD_TESTING)
         ENVIRONMENT
             "GLIMMER_MEMORY_LIMIT_BYTES=4096;GLIMMER_SCHEDULER_MODE=observe;GLIMMER_TRACE_KERNEL_LAUNCHES=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
         PASS_REGULAR_EXPRESSION
-            "observed CUDA kernel launch #6 api=__cudaLaunchKernel_ptsz grid="
+            "observed CUDA graph launch #3 api=cuGraphLaunch stream="
     )
 
     add_test(NAME glimmer_cuda_interceptor_trace_memory_fake_driver_test
@@ -267,6 +298,17 @@ if(BUILD_TESTING)
         PASS_REGULAR_EXPRESSION
             "launch timing task=1 remote=0 .*cuda_status=0 event_tracking=1"
     )
+
+    # PASS_REGULAR_EXPRESSION ignores exit status. A matched diagnostic must
+    # never hide a later failed assertion; preserve existing failure patterns.
+    set_property(TEST
+        glimmer_cuda_interceptor_physical_capacity_test
+        glimmer_cuda_interceptor_batched_enforce_fake_driver_test
+        glimmer_cuda_interceptor_observe_fake_driver_test
+        glimmer_cuda_interceptor_trace_fake_driver_test
+        glimmer_cuda_interceptor_trace_memory_fake_driver_test
+        glimmer_cuda_interceptor_trace_launch_timing_fake_driver_test
+        APPEND PROPERTY FAIL_REGULAR_EXPRESSION "test assertion failed:")
 
     add_executable(glimmer_cuda_interceptor_nvml_passthrough_test
         "${PROJECT_SOURCE_DIR}/tests/interceptor/nvml_passthrough_test.cc"
@@ -513,6 +555,14 @@ if(BUILD_TESTING)
         add_test(NAME glimmer_cuda_interceptor_runtime_kernel_gpu_test
             COMMAND glimmer_cuda_interceptor_runtime_kernel_gpu_test
         )
+        target_link_libraries(glimmer_cuda_interceptor_runtime_kernel_gpu_test PRIVATE "${CMAKE_DL_LIBS}")
+        add_test(NAME glimmer_cuda_extended_launch_gpu_test
+            COMMAND glimmer_cuda_interceptor_runtime_kernel_gpu_test)
+        set_tests_properties(glimmer_cuda_extended_launch_gpu_test PROPERTIES
+            TIMEOUT 60
+            ENVIRONMENT "GLIMMER_TEST_EXTENDED=1;GLIMMER_MEMORY_LIMIT_BYTES=8388608;GLIMMER_SCHEDULER_MODE=enforce;GLIMMER_TRACE_KERNEL_LAUNCHES=1;GLIMMER_MAX_CONCURRENT_KERNELS=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>"
+            PASS_REGULAR_EXPRESSION "api=cudaLaunchKernelExC_ptsz"
+            FAIL_REGULAR_EXPRESSION "test assertion failed:")
         set_tests_properties(glimmer_cuda_interceptor_runtime_kernel_gpu_test PROPERTIES
             ENVIRONMENT
                 "GLIMMER_MEMORY_LIMIT_BYTES=8388608;GLIMMER_SCHEDULER_MODE=observe;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>"
@@ -525,6 +575,18 @@ if(BUILD_TESTING)
         set_tests_properties(glimmer_cuda_interceptor_runtime_kernel_enforce_gpu_test PROPERTIES
             ENVIRONMENT
                 "GLIMMER_MEMORY_LIMIT_BYTES=8388608;GLIMMER_SCHEDULER_MODE=enforce;GLIMMER_MAX_CONCURRENT_KERNELS=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>"
+            TIMEOUT 60
+        )
+
+        add_test(NAME glimmer_cuda_interceptor_runtime_graph_gpu_test
+            COMMAND glimmer_cuda_interceptor_runtime_kernel_gpu_test
+        )
+        set_tests_properties(glimmer_cuda_interceptor_runtime_graph_gpu_test PROPERTIES
+            ENVIRONMENT
+                "GLIMMER_MEMORY_LIMIT_BYTES=8388608;GLIMMER_SCHEDULER_MODE=observe;GLIMMER_TRACE_KERNEL_LAUNCHES=1;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>"
+            PASS_REGULAR_EXPRESSION
+                "observed CUDA graph launch #2 api=cudaGraphLaunch stream="
+            FAIL_REGULAR_EXPRESSION "test assertion failed:"
             TIMEOUT 60
         )
 

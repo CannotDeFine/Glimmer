@@ -61,6 +61,7 @@ using RuntimeGraphicsResourceGetMappedMipmappedArrayFunction =
 using RuntimeGraphAddMemAllocNodeFunction = cudaError_t (*)(
     cudaGraphNode_t* graph_node, cudaGraph_t graph, const cudaGraphNode_t* dependencies,
     std::size_t dependency_count, struct cudaMemAllocNodeParams* parameters);
+using RuntimeGraphLaunchFunction = cudaError_t (*)(cudaGraphExec_t graph_exec, cudaStream_t stream);
 using RuntimeMemGetInfoFunction = cudaError_t (*)(std::size_t* free_bytes,
                                                   std::size_t* total_bytes);
 using RuntimeMallocAsyncFunction = cudaError_t (*)(void** device_pointer, std::size_t memory_bytes,
@@ -192,6 +193,11 @@ using RuntimeMemPoolImportPointerFunction = cudaError_t (*)(void** pointer_out, 
     cudaGraphNode_t* graph_node, cudaGraph_t graph, const cudaGraphNode_t* dependencies,
     std::size_t dependency_count, struct cudaMemAllocNodeParams* parameters,
     RuntimeGraphAddMemAllocNodeFunction add_node);
+[[nodiscard]] cudaError_t intercept_runtime_graph_launch(const char* api_name,
+                                                         cudaGraphExec_t graph_exec,
+                                                         cudaStream_t stream,
+                                                         RuntimeGraphLaunchFunction launch,
+                                                         bool per_thread_default_stream = false);
 [[nodiscard]] cudaError_t intercept_runtime_mem_get_info(std::size_t* free_bytes,
                                                          std::size_t* total_bytes,
                                                          RuntimeMemGetInfoFunction query);

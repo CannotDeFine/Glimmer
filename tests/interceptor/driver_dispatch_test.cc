@@ -43,6 +43,40 @@ CUresult CUDAAPI fake_launch_kernel(CUfunction, unsigned int, unsigned int, unsi
     return CUDA_SUCCESS;
 }
 
+CUresult CUDAAPI fake_graph_launch(CUgraphExec, CUstream) {
+    check_driver_guard();
+    return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI fake_launch_kernel_ex(const CUlaunchConfig* config, CUfunction function,
+                                       void** arguments, void** extra) {
+    check_driver_guard();
+    return config != nullptr && arguments != nullptr && arguments[0] == config &&
+                   reinterpret_cast<const void*>(function) == config && extra == arguments + 1
+               ? CUDA_ERROR_LAUNCH_FAILED
+               : CUDA_ERROR_INVALID_VALUE;
+}
+
+bool test_extended_dispatch() {
+    DriverFunctionTable functions;
+    functions.launch_kernel_ex = fake_launch_kernel_ex;
+    functions.launch_kernel_ex_ptsz = fake_launch_kernel_ex;
+    DriverDispatch dispatch(functions);
+    DriverDispatch missing(DriverFunctionTable{});
+    CUlaunchConfig config{};
+    void* arguments[] = {&config, nullptr};
+    bool passed = true;
+    for (const bool ptds : {false, true}) {
+        passed &= dispatch.has_launch_kernel_ex(ptds) && !missing.has_launch_kernel_ex(ptds);
+        passed &=
+            dispatch.launch_kernel_ex(&config, reinterpret_cast<CUfunction>(&config), arguments,
+                                      arguments + 1, ptds) == CUDA_ERROR_LAUNCH_FAILED;
+        passed &= missing.launch_kernel_ex(&config, nullptr, nullptr, nullptr, ptds) ==
+                  CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return passed && !is_inside_driver_call();
+}
+
 CUresult CUDAAPI fake_mem_alloc(CUdeviceptr* device_pointer, std::size_t) {
     check_driver_guard();
     if (device_pointer == nullptr) {
@@ -465,10 +499,15 @@ CUresult CUDAAPI recursive_get_proc_address_v2(const char* symbol, void** functi
 }  // namespace
 
 int main() {
+    if (!expect(test_extended_dispatch(), "extended dispatch or missing-symbol handling failed")) {
+        return EXIT_FAILURE;
+    }
     const glimmer::interceptor::DriverFunctionTable functions{
         .init = &fake_init,
         .launch_kernel = &fake_launch_kernel,
         .launch_kernel_ptsz = &fake_launch_kernel,
+        .graph_launch = &fake_graph_launch,
+        .graph_launch_ptsz = &fake_graph_launch,
         .mem_alloc = &fake_mem_alloc,
         .mem_alloc_managed = &fake_mem_alloc_managed,
         .mem_alloc_pitch = &fake_mem_alloc_pitch,
@@ -653,6 +692,10 @@ int main() {
     all_passed &= expect(dispatch.launch_kernel_ptsz(nullptr, 1, 1, 1, 1, 1, 1, 0, nullptr, nullptr,
                                                      nullptr) == CUDA_SUCCESS,
                          "fake cuLaunchKernel_ptsz failed");
+    all_passed &= expect(dispatch.graph_launch(nullptr, nullptr) == CUDA_SUCCESS,
+                         "fake cuGraphLaunch failed");
+    all_passed &= expect(dispatch.graph_launch_ptsz(nullptr, nullptr) == CUDA_SUCCESS,
+                         "fake cuGraphLaunch_ptsz failed");
     all_passed &=
         expect(dispatch.mem_alloc(&device_pointer, 16) == CUDA_SUCCESS, "fake cuMemAlloc failed");
     all_passed &= expect(dispatch.mem_alloc_managed(&device_pointer, 16, 0) == CUDA_SUCCESS,

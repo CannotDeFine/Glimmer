@@ -67,8 +67,11 @@ void add_request_timing(LaunchGateTiming* timing, const ControlRequestTiming& re
 
 LaunchGate::LaunchGate(LaunchGateOptions options)
     : scheduler_(std::numeric_limits<core::MemoryBytes>::max(),
-                 core::SchedulerOptions{.max_running_tasks = options.max_concurrent_launches,
-                                        .scheduling_policy = options.scheduling_policy}),
+                 core::SchedulerOptions{
+                     .max_running_tasks = options.max_concurrent_launches,
+                     .priority_reserved_slots = options.priority_reserved_slots,
+                     .priority_reservation_threshold = options.priority_reservation_threshold,
+                     .scheduling_policy = options.scheduling_policy}),
       tenant_id_(std::move(options.tenant_id)),
       tenant_weight_(options.tenant_weight == 0 ? 1 : options.tenant_weight),
       task_priority_(options.task_priority),

@@ -10,6 +10,12 @@
 #ifdef cuStreamDestroy
 #undef cuStreamDestroy
 #endif
+#ifdef cuGraphLaunch
+#undef cuGraphLaunch
+#endif
+#ifdef cuLaunchKernelEx
+#undef cuLaunchKernelEx
+#endif
 #ifdef cuIpcOpenMemHandle
 #undef cuIpcOpenMemHandle
 #endif
@@ -192,6 +198,30 @@ extern "C" CUresult CUDAAPI cuLaunchKernel_ptsz(CUfunction function, unsigned in
                                                 void** kernel_parameters, void** extra) {
     return cuLaunchKernel(function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y,
                           block_dim_z, shared_memory_bytes, stream, kernel_parameters, extra);
+}
+
+extern "C" CUresult CUDAAPI cuGraphLaunch(CUgraphExec graph_exec, CUstream) {
+    return graph_exec == nullptr ? CUDA_ERROR_INVALID_VALUE : CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction function,
+                                             void** arguments, void** extra) {
+    if (config == nullptr || function == nullptr || arguments == nullptr ||
+        extra != arguments + 3 || arguments[0] != config || arguments[1] != config->attrs ||
+        config->numAttrs != 1 || config->gridDimX != 3 || config->blockDimX != 32 ||
+        config->sharedMemBytes != 64) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return *static_cast<CUresult*>(arguments[2]);
+}
+
+extern "C" CUresult CUDAAPI cuLaunchKernelEx_ptsz(const CUlaunchConfig* config, CUfunction function,
+                                                  void** arguments, void** extra) {
+    return cuLaunchKernelEx(config, function, arguments, extra);
+}
+
+extern "C" CUresult CUDAAPI cuGraphLaunch_ptsz(CUgraphExec graph_exec, CUstream stream) {
+    return cuGraphLaunch(graph_exec, stream);
 }
 
 extern "C" CUresult CUDAAPI cuMemAlloc_v2(CUdeviceptr* device_pointer, std::size_t memory_bytes) {
@@ -900,6 +930,18 @@ void* lookup_symbol(const char* symbol) {
     }
     if (std::string_view(symbol) == "cuLaunchKernel_ptsz") {
         return reinterpret_cast<void*>(&cuLaunchKernel_ptsz);
+    }
+    if (std::string_view(symbol) == "cuGraphLaunch") {
+        return reinterpret_cast<void*>(&cuGraphLaunch);
+    }
+    if (std::string_view(symbol) == "cuLaunchKernelEx") {
+        return reinterpret_cast<void*>(&cuLaunchKernelEx);
+    }
+    if (std::string_view(symbol) == "cuLaunchKernelEx_ptsz") {
+        return reinterpret_cast<void*>(&cuLaunchKernelEx_ptsz);
+    }
+    if (std::string_view(symbol) == "cuGraphLaunch_ptsz") {
+        return reinterpret_cast<void*>(&cuGraphLaunch_ptsz);
     }
     if (std::string_view(symbol) == "cuMemAlloc" || std::string_view(symbol) == "cuMemAlloc_v2") {
         return reinterpret_cast<void*>(&cuMemAlloc_v2);

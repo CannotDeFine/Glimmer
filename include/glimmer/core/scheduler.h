@@ -65,6 +65,11 @@ struct SchedulerOptions {
     std::size_t max_running_tasks = 1;
     // Zero means that queued-task count is not bounded.
     std::size_t max_queued_tasks = 0;
+    // When priority scheduling is selected, reserve this many running slots
+    // for tasks at or above priority_reservation_threshold. Zero disables the
+    // reservation; lower-priority work cannot borrow these slots.
+    std::size_t priority_reserved_slots = 0;
+    std::uint32_t priority_reservation_threshold = 1;
     SchedulingPolicy scheduling_policy = SchedulingPolicy::kWeightedRoundRobin;
 };
 
@@ -92,6 +97,9 @@ struct SchedulerStats {
     std::size_t failed_task_count = 0;
     std::size_t max_running_tasks = 0;
     std::size_t max_queued_tasks = 0;
+    std::size_t priority_reserved_slots = 0;
+    std::uint32_t priority_reservation_threshold = 0;
+    bool priority_reservation_active = false;
     SchedulingPolicy scheduling_policy = SchedulingPolicy::kWeightedRoundRobin;
     std::uint64_t total_queue_wait_microseconds = 0;
     std::uint64_t max_queue_wait_microseconds = 0;
@@ -123,6 +131,10 @@ class Scheduler {
 
     [[nodiscard]] std::optional<TaskSnapshot> find(TaskId task_id) const;
     [[nodiscard]] std::optional<TaskState> task_state(TaskId task_id) const;
+    // Updates the reserved capacity used by strict-priority dispatch. The
+    // value is clamped to the configured running capacity. Returns false when
+    // the scheduler is not using the priority policy.
+    [[nodiscard]] bool set_priority_reserved_slots(std::size_t reserved_slots) noexcept;
     [[nodiscard]] QuotaUsage usage() const;
     [[nodiscard]] SchedulerStats stats() const;
     [[nodiscard]] std::size_t queued_task_count() const;
@@ -149,6 +161,7 @@ class Scheduler {
     [[nodiscard]] std::optional<TaskId> select_weighted_round_robin_task_locked();
     [[nodiscard]] std::optional<TaskId> select_deficit_round_robin_task_locked();
     [[nodiscard]] std::optional<TaskId> select_priority_task_locked();
+    [[nodiscard]] bool priority_reservation_blocks_low_dispatch_locked() const;
     [[nodiscard]] std::optional<TaskId> peek_next_task_locked() const;
     [[nodiscard]] std::optional<TaskId> peek_weighted_round_robin_task_locked() const;
     [[nodiscard]] std::optional<TaskId> peek_deficit_round_robin_task_locked() const;
@@ -172,6 +185,8 @@ class Scheduler {
     const SchedulingPolicy scheduling_policy;
     const std::size_t max_running_tasks;
     const std::size_t max_queued_tasks;
+    std::size_t priority_reserved_slots;
+    const std::uint32_t priority_reservation_threshold;
     std::vector<TaskId> running_task_ids_;
     std::size_t queued_task_count_ = 0;
     std::uint64_t total_queue_wait_microseconds_ = 0;

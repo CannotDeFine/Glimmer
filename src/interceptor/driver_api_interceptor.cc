@@ -165,6 +165,14 @@ class ProcAddressV2Scope {
     return static_cast<std::size_t>(value.value());
 }
 
+[[nodiscard]] std::optional<std::size_t> read_nonnegative_size(const char* variable_name) {
+    const std::optional<MemoryBytes> value = read_memory_limit(variable_name);
+    if (!value.has_value() || value.value() > std::numeric_limits<std::size_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>(value.value());
+}
+
 [[nodiscard]] std::optional<std::uint32_t> read_positive_weight() {
     const std::optional<MemoryBytes> value = read_memory_limit("GLIMMER_SCHEDULER_WEIGHT");
     if (!value.has_value() || value.value() == 0 ||
@@ -176,6 +184,15 @@ class ProcAddressV2Scope {
 
 [[nodiscard]] std::optional<std::uint32_t> read_scheduler_priority() {
     const std::optional<MemoryBytes> value = read_memory_limit("GLIMMER_SCHEDULER_PRIORITY");
+    if (!value.has_value() || value.value() > std::numeric_limits<std::uint32_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(value.value());
+}
+
+[[nodiscard]] std::optional<std::uint32_t> read_scheduler_priority_threshold() {
+    const std::optional<MemoryBytes> value =
+        read_memory_limit("GLIMMER_SCHEDULER_PRIORITY_THRESHOLD");
     if (!value.has_value() || value.value() > std::numeric_limits<std::uint32_t>::max()) {
         return std::nullopt;
     }
@@ -310,6 +327,16 @@ void initialize_launch_scheduler(InterceptorState& state) noexcept {
     const std::optional<std::size_t> batch_size =
         configured_batch_size == nullptr ? std::optional<std::size_t>{1}
                                          : read_positive_size("GLIMMER_SCHEDULER_BATCH_SIZE");
+    const char* configured_reserved_slots =
+        std::getenv("GLIMMER_SCHEDULER_PRIORITY_RESERVED_SLOTS");
+    const std::optional<std::size_t> reserved_slots =
+        configured_reserved_slots == nullptr
+            ? std::optional<std::size_t>{0}
+            : read_nonnegative_size("GLIMMER_SCHEDULER_PRIORITY_RESERVED_SLOTS");
+    const char* configured_priority_threshold = std::getenv("GLIMMER_SCHEDULER_PRIORITY_THRESHOLD");
+    const std::optional<std::uint32_t> priority_threshold =
+        configured_priority_threshold == nullptr ? std::optional<std::uint32_t>{1}
+                                                 : read_scheduler_priority_threshold();
     const std::optional<glimmer::core::SchedulingPolicy> policy = read_scheduling_policy();
     const std::optional<std::uint32_t> weight = read_positive_weight();
     const char* configured_priority = std::getenv("GLIMMER_SCHEDULER_PRIORITY");
@@ -320,8 +347,10 @@ void initialize_launch_scheduler(InterceptorState& state) noexcept {
     const char* quota_tenant = std::getenv("GLIMMER_QUOTA_TENANT_ID");
     const char* tenant = configured_tenant != nullptr ? configured_tenant : quota_tenant;
     const char* configured_socket = std::getenv("GLIMMER_SCHEDULER_CONTROL_SOCKET");
-    if (!max_concurrent.has_value() || !batch_size.has_value() || !policy.has_value() ||
-        !priority.has_value() || (configured_tenant != nullptr && *configured_tenant == '\0') ||
+    if (!max_concurrent.has_value() || !batch_size.has_value() || !reserved_slots.has_value() ||
+        !priority_threshold.has_value() || !policy.has_value() || !priority.has_value() ||
+        reserved_slots.value() > max_concurrent.value() ||
+        (configured_tenant != nullptr && *configured_tenant == '\0') ||
         (configured_socket != nullptr && *configured_socket == '\0') ||
         (weight.has_value() == false && std::getenv("GLIMMER_SCHEDULER_WEIGHT") != nullptr)) {
         glimmer::interceptor::report_diagnostic(
@@ -333,6 +362,8 @@ void initialize_launch_scheduler(InterceptorState& state) noexcept {
     try {
         state.launch_gate = std::make_unique<LaunchGate>(LaunchGateOptions{
             .max_concurrent_launches = max_concurrent.value(),
+            .priority_reserved_slots = reserved_slots.value(),
+            .priority_reservation_threshold = priority_threshold.value(),
             .scheduling_policy = policy.value(),
             .tenant_id = tenant == nullptr ? "default" : tenant,
             .tenant_weight = weight.value_or(1),
@@ -474,11 +505,8 @@ void ensure_state_initialized(InterceptorState& state) {
 }
 
 [[nodiscard]] void* find_proc_address_interceptor(const char* symbol, cuuint64_t flags) noexcept {
-    if (std::strcmp(symbol, "cuLaunchKernel") == 0 &&
-        (flags & CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM) != 0) {
-        return glimmer::interceptor::find_interceptor_symbol("cuLaunchKernel_ptsz");
-    }
-    return glimmer::interceptor::find_interceptor_symbol(symbol);
+    return glimmer::interceptor::find_interceptor_symbol(
+        symbol, (flags & CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM) != 0);
 }
 
 struct ContextIdentity {
@@ -1169,6 +1197,72 @@ cudaError_t intercept_runtime_graph_add_mem_alloc_node(
     return forward_untracked_runtime_call(state, [&] {
         return add_node(graph_node, graph, dependencies, dependency_count, parameters);
     });
+}
+
+cudaError_t intercept_runtime_graph_launch(const char* api_name, cudaGraphExec_t graph_exec,
+                                           cudaStream_t stream, RuntimeGraphLaunchFunction launch,
+                                           bool per_thread_default_stream) {
+    if (graph_exec == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (launch == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    const bool scheduling_enforced = launch_scheduling_is_enforced();
+    const bool trace_launch_timings = launch_timing_is_enabled();
+    glimmer::control::LaunchGateTiming gate_timing;
+    std::optional<glimmer::core::TaskId> launch_task;
+    if (scheduling_enforced) {
+        launch_task = acquire_launch_slot(trace_launch_timings ? &gate_timing : nullptr);
+        if (!launch_task.has_value()) {
+            return cudaErrorNotSupported;
+        }
+    }
+
+    const auto cuda_launch_started = trace_launch_timings ? std::chrono::steady_clock::now()
+                                                          : std::chrono::steady_clock::time_point{};
+    const cudaError_t launch_result = launch(graph_exec, stream);
+    const auto cuda_launch_finished = trace_launch_timings
+                                          ? std::chrono::steady_clock::now()
+                                          : std::chrono::steady_clock::time_point{};
+    if (launch_task.has_value() && launch_result != cudaSuccess) {
+        fail_launch_slot(launch_task.value());
+    }
+
+    bool event_tracking_succeeded = false;
+    bool batch_call_succeeded = true;
+    std::uint64_t event_tracking_nanoseconds = 0;
+    if (launch_task.has_value() && launch_result == cudaSuccess) {
+        const auto event_tracking_started = trace_launch_timings
+                                                ? std::chrono::steady_clock::now()
+                                                : std::chrono::steady_clock::time_point{};
+        event_tracking_succeeded = track_launch_completion(
+            launch_task.value(), per_thread_default_stream && stream == nullptr
+                                     ? CU_STREAM_PER_THREAD
+                                     : reinterpret_cast<CUstream>(stream));
+        if (trace_launch_timings) {
+            event_tracking_nanoseconds =
+                elapsed_nanoseconds(event_tracking_started, std::chrono::steady_clock::now());
+        }
+        if (event_tracking_succeeded) {
+            batch_call_succeeded = finish_launch_batch_call(launch_task.value());
+        }
+    }
+    if (trace_launch_timings) {
+        report_launch_timing_observed(
+            launch_task.value_or(0), gate_timing,
+            elapsed_nanoseconds(cuda_launch_started, cuda_launch_finished),
+            event_tracking_nanoseconds, static_cast<std::uint32_t>(launch_result),
+            event_tracking_succeeded);
+    }
+    if (launch_task.has_value() && launch_result == cudaSuccess &&
+        (!event_tracking_succeeded || !batch_call_succeeded)) {
+        return cudaErrorUnknown;
+    }
+    if (launch_result == cudaSuccess) {
+        report_graph_launch_observed(api_name, reinterpret_cast<const void*>(stream));
+    }
+    return launch_result;
 }
 
 cudaError_t intercept_runtime_graphics_unregister_resource(
@@ -3314,6 +3408,26 @@ void report_kernel_launch_observed(const KernelLaunchObservation& observation) n
     }
 }
 
+void report_graph_launch_observed(const char* api_name, const void* stream) noexcept {
+    try {
+        InterceptorState& state = get_state();
+        ensure_state_initialized(state);
+        const bool observe_first_launch =
+            state.scheduler_mode == glimmer::core::SchedulerMode::kObserve;
+        if (!state.trace_kernel_launches && !observe_first_launch) {
+            return;
+        }
+        const std::uint64_t launch_count =
+            next_launch_observation_count(state.launch_observation_count);
+        if (state.trace_kernel_launches || !state.launch_observation_reported.exchange(true)) {
+            glimmer::interceptor::report_graph_launch_diagnostic(api_name, stream, launch_count);
+        }
+    } catch (...) {
+        glimmer::interceptor::report_diagnostic(
+            "[glimmer] graph launch observation initialization failed\n");
+    }
+}
+
 void report_memory_info_observed(const char* api_name, std::int32_t device,
                                  std::uint64_t total_bytes, std::uint64_t free_bytes,
                                  std::uint64_t physical_total_bytes,
@@ -3524,25 +3638,13 @@ bool finish_launch_batch_call(glimmer::core::TaskId task_id) noexcept {
     }
 }
 
-CUresult intercept_launch_kernel(CUfunction function, unsigned int grid_dim_x,
-                                 unsigned int grid_dim_y, unsigned int grid_dim_z,
-                                 unsigned int block_dim_x, unsigned int block_dim_y,
-                                 unsigned int block_dim_z, unsigned int shared_memory_bytes,
-                                 CUstream stream, void** kernel_parameters, void** extra,
-                                 bool per_thread_default_stream) {
-    InterceptorState& state = get_state();
-    const auto invoke = [&state, function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x,
-                         block_dim_y, block_dim_z, shared_memory_bytes, stream, kernel_parameters,
-                         extra, per_thread_default_stream] {
-        return per_thread_default_stream
-                   ? state.driver.launch_kernel_ptsz(
-                         function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y,
-                         block_dim_z, shared_memory_bytes, stream, kernel_parameters, extra)
-                   : state.driver.launch_kernel(
-                         function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y,
-                         block_dim_z, shared_memory_bytes, stream, kernel_parameters, extra);
-    };
+namespace {
 
+template <typename Available, typename Invoke>
+CUresult intercept_driver_kernel_launch(InterceptorState& state,
+                                        const KernelLaunchObservation& observation,
+                                        CUstream completion_stream, Available&& available,
+                                        Invoke&& invoke) {
     if (glimmer::interceptor::is_inside_driver_call() ||
         glimmer::interceptor::is_inside_runtime_call()) {
         return invoke();
@@ -3551,9 +3653,7 @@ CUresult intercept_launch_kernel(CUfunction function, unsigned int grid_dim_x,
     if (!ensure_initialized(state)) {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
-    const bool launch_available = per_thread_default_stream ? state.driver.has_launch_kernel_ptsz()
-                                                            : state.driver.has_launch_kernel();
-    if (!launch_available) {
+    if (!available()) {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
 
@@ -3583,7 +3683,7 @@ CUresult intercept_launch_kernel(CUfunction function, unsigned int grid_dim_x,
         const auto event_tracking_started = trace_launch_timings
                                                 ? std::chrono::steady_clock::now()
                                                 : std::chrono::steady_clock::time_point{};
-        event_tracking_succeeded = track_launch_completion(launch_task.value(), stream);
+        event_tracking_succeeded = track_launch_completion(launch_task.value(), completion_stream);
         if (trace_launch_timings) {
             event_tracking_nanoseconds =
                 elapsed_nanoseconds(event_tracking_started, std::chrono::steady_clock::now());
@@ -3604,17 +3704,155 @@ CUresult intercept_launch_kernel(CUfunction function, unsigned int grid_dim_x,
         return CUDA_ERROR_UNKNOWN;
     }
     if (launch_result == CUDA_SUCCESS) {
-        report_kernel_launch_observed({
-            .api_name = per_thread_default_stream ? "cuLaunchKernel_ptsz" : "cuLaunchKernel",
-            .grid_dim_x = grid_dim_x,
-            .grid_dim_y = grid_dim_y,
-            .grid_dim_z = grid_dim_z,
-            .block_dim_x = block_dim_x,
-            .block_dim_y = block_dim_y,
-            .block_dim_z = block_dim_z,
-            .shared_memory_bytes = shared_memory_bytes,
-            .stream = reinterpret_cast<const void*>(stream),
+        report_kernel_launch_observed(observation);
+    }
+    return launch_result;
+}
+
+}  // namespace
+
+CUresult intercept_launch_kernel(CUfunction function, unsigned int grid_dim_x,
+                                 unsigned int grid_dim_y, unsigned int grid_dim_z,
+                                 unsigned int block_dim_x, unsigned int block_dim_y,
+                                 unsigned int block_dim_z, unsigned int shared_memory_bytes,
+                                 CUstream stream, void** kernel_parameters, void** extra,
+                                 bool per_thread_default_stream) {
+    InterceptorState& state = get_state();
+    const KernelLaunchObservation observation{
+        .api_name = per_thread_default_stream ? "cuLaunchKernel_ptsz" : "cuLaunchKernel",
+        .grid_dim_x = grid_dim_x,
+        .grid_dim_y = grid_dim_y,
+        .grid_dim_z = grid_dim_z,
+        .block_dim_x = block_dim_x,
+        .block_dim_y = block_dim_y,
+        .block_dim_z = block_dim_z,
+        .shared_memory_bytes = shared_memory_bytes,
+        .stream = stream};
+    const CUstream completion_stream =
+        per_thread_default_stream && stream == nullptr ? CU_STREAM_PER_THREAD : stream;
+    return intercept_driver_kernel_launch(
+        state, observation, completion_stream,
+        [&] {
+            return per_thread_default_stream ? state.driver.has_launch_kernel_ptsz()
+                                             : state.driver.has_launch_kernel();
+        },
+        [&] {
+            return per_thread_default_stream
+                       ? state.driver.launch_kernel_ptsz(
+                             function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y,
+                             block_dim_z, shared_memory_bytes, stream, kernel_parameters, extra)
+                       : state.driver.launch_kernel(
+                             function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y,
+                             block_dim_z, shared_memory_bytes, stream, kernel_parameters, extra);
         });
+}
+
+CUresult intercept_launch_kernel_ex(const CUlaunchConfig* config, CUfunction function,
+                                    void** kernel_parameters, void** extra,
+                                    bool per_thread_default_stream) {
+    if (config == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    const KernelLaunchObservation observation{
+        .api_name = per_thread_default_stream ? "cuLaunchKernelEx_ptsz" : "cuLaunchKernelEx",
+        .grid_dim_x = config->gridDimX,
+        .grid_dim_y = config->gridDimY,
+        .grid_dim_z = config->gridDimZ,
+        .block_dim_x = config->blockDimX,
+        .block_dim_y = config->blockDimY,
+        .block_dim_z = config->blockDimZ,
+        .shared_memory_bytes = config->sharedMemBytes,
+        .stream = config->hStream};
+    const CUstream completion_stream = per_thread_default_stream && config->hStream == nullptr
+                                           ? CU_STREAM_PER_THREAD
+                                           : config->hStream;
+    return intercept_driver_kernel_launch(
+        state, observation, completion_stream,
+        [&] { return state.driver.has_launch_kernel_ex(per_thread_default_stream); },
+        [&] {
+            return state.driver.launch_kernel_ex(config, function, kernel_parameters, extra,
+                                                 per_thread_default_stream);
+        });
+}
+
+CUresult intercept_graph_launch(CUgraphExec graph_exec, CUstream stream,
+                                bool per_thread_default_stream) {
+    if (graph_exec == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    InterceptorState& state = get_state();
+    const auto invoke = [&state, graph_exec, stream, per_thread_default_stream] {
+        return per_thread_default_stream ? state.driver.graph_launch_ptsz(graph_exec, stream)
+                                         : state.driver.graph_launch(graph_exec, stream);
+    };
+
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return invoke();
+    }
+    if (!ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    const bool launch_available = per_thread_default_stream ? state.driver.has_graph_launch_ptsz()
+                                                            : state.driver.has_graph_launch();
+    if (!launch_available) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+
+    const bool trace_launch_timings = state.trace_launch_timings;
+    glimmer::control::LaunchGateTiming gate_timing;
+    std::optional<glimmer::core::TaskId> launch_task;
+    if (launch_scheduling_is_enforced()) {
+        launch_task = acquire_launch_slot(trace_launch_timings ? &gate_timing : nullptr);
+        if (!launch_task.has_value()) {
+            return CUDA_ERROR_NOT_SUPPORTED;
+        }
+    }
+
+    const auto cuda_launch_started = trace_launch_timings ? std::chrono::steady_clock::now()
+                                                          : std::chrono::steady_clock::time_point{};
+    const CUresult launch_result = invoke();
+    const auto cuda_launch_finished = trace_launch_timings
+                                          ? std::chrono::steady_clock::now()
+                                          : std::chrono::steady_clock::time_point{};
+    if (launch_task.has_value() && launch_result != CUDA_SUCCESS) {
+        fail_launch_slot(launch_task.value());
+    }
+
+    bool event_tracking_succeeded = false;
+    bool batch_call_succeeded = true;
+    std::uint64_t event_tracking_nanoseconds = 0;
+    if (launch_task.has_value() && launch_result == CUDA_SUCCESS) {
+        const auto event_tracking_started = trace_launch_timings
+                                                ? std::chrono::steady_clock::now()
+                                                : std::chrono::steady_clock::time_point{};
+        event_tracking_succeeded = track_launch_completion(
+            launch_task.value(),
+            per_thread_default_stream && stream == nullptr ? CU_STREAM_PER_THREAD : stream);
+        if (trace_launch_timings) {
+            event_tracking_nanoseconds =
+                elapsed_nanoseconds(event_tracking_started, std::chrono::steady_clock::now());
+        }
+        if (event_tracking_succeeded) {
+            batch_call_succeeded = finish_launch_batch_call(launch_task.value());
+        }
+    }
+    if (trace_launch_timings) {
+        report_launch_timing_observed(
+            launch_task.value_or(0), gate_timing,
+            elapsed_nanoseconds(cuda_launch_started, cuda_launch_finished),
+            event_tracking_nanoseconds, static_cast<std::uint32_t>(launch_result),
+            event_tracking_succeeded);
+    }
+    if (launch_task.has_value() && launch_result == CUDA_SUCCESS &&
+        (!event_tracking_succeeded || !batch_call_succeeded)) {
+        return CUDA_ERROR_UNKNOWN;
+    }
+    if (launch_result == CUDA_SUCCESS) {
+        report_graph_launch_observed(
+            per_thread_default_stream ? "cuGraphLaunch_ptsz" : "cuGraphLaunch",
+            reinterpret_cast<const void*>(stream));
     }
     return launch_result;
 }

@@ -1,6 +1,7 @@
 #include "glimmer/control/unix_socket_client.h"
 
 #include "glimmer/control/task_protocol.h"
+#include "internal/socket_line_reader.h"
 
 #include <cerrno>
 #include <chrono>
@@ -111,40 +112,6 @@ enum class PollEvent : std::uint8_t {
     return true;
 }
 
-[[nodiscard]] bool receive_line(int file_descriptor, std::string* response,
-                                std::uint32_t timeout_ms) noexcept {
-    if (response == nullptr) {
-        return false;
-    }
-    try {
-        response->clear();
-        response->reserve(kTaskProtocolMaxLineBytes + 1);
-        while (response->size() <= kTaskProtocolMaxLineBytes) {
-            if (!wait_for_io(file_descriptor, PollEvent::kRead, timeout_ms)) {
-                return false;
-            }
-            char value = '\0';
-            const ssize_t received = ::recv(file_descriptor, &value, 1, 0);
-            if (received == 0) {
-                return !response->empty();
-            }
-            if (received < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
-                return false;
-            }
-            response->push_back(value);
-            if (value == '\n') {
-                return true;
-            }
-        }
-    } catch (...) {
-        return false;
-    }
-    return false;
-}
-
 class ThreadConnection final {
    public:
     ThreadConnection() noexcept = default;
@@ -156,6 +123,7 @@ class ThreadConnection final {
     ThreadConnection& operator=(const ThreadConnection&) = delete;
 
     void reset() noexcept {
+        reader_.reset();
         if (file_descriptor_ >= 0) {
             static_cast<void>(::close(file_descriptor_));
             file_descriptor_ = -1;
@@ -184,6 +152,7 @@ class ThreadConnection final {
             io_timeout_ms_ = io_timeout_ms;
             file_descriptor_ = file_descriptor;
             process_id_ = ::getpid();
+            reader_.reset(file_descriptor);
             return true;
         } catch (...) {
             static_cast<void>(::close(file_descriptor));
@@ -195,11 +164,16 @@ class ThreadConnection final {
         return file_descriptor_;
     }
 
+    [[nodiscard]] bool receive_line(std::string& response) noexcept {
+        return reader_.read_line(response, io_timeout_ms_) == internal::SocketLineStatus::kLine;
+    }
+
    private:
     std::string socket_path_;
     std::uint32_t io_timeout_ms_ = 0;
     pid_t process_id_ = 0;
     int file_descriptor_ = -1;
+    internal::SocketLineReader reader_;
 };
 
 thread_local ThreadConnection g_thread_connection;
@@ -224,7 +198,7 @@ std::optional<std::string> UnixSocketControlClient::request(
     try {
         std::string response_line;
         if (send_all(g_thread_connection.file_descriptor(), line, io_timeout_ms_) &&
-            receive_line(g_thread_connection.file_descriptor(), &response_line, io_timeout_ms_)) {
+            g_thread_connection.receive_line(response_line)) {
             response = std::move(response_line);
         }
     } catch (...) {

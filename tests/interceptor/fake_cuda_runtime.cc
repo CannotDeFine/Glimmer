@@ -15,6 +15,12 @@
 #ifdef cudaLaunchKernel
 #undef cudaLaunchKernel
 #endif
+#ifdef cudaGraphLaunch
+#undef cudaGraphLaunch
+#endif
+#ifdef cudaLaunchKernelExC
+#undef cudaLaunchKernelExC
+#endif
 
 namespace {
 
@@ -331,6 +337,30 @@ extern "C" cudaError_t CUDARTAPI cudaLaunchKernel_ptsz(const void* function, dim
                                                        std::size_t shared_memory_bytes,
                                                        cudaStream_t stream) {
     return cudaLaunchKernel(function, grid_dim, block_dim, arguments, shared_memory_bytes, stream);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaGraphLaunch(cudaGraphExec_t graph_exec, cudaStream_t) {
+    return graph_exec == nullptr ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaLaunchKernelExC(const cudaLaunchConfig_t* config,
+                                                     const void* function, void** arguments) {
+    if (config == nullptr || function == nullptr || arguments == nullptr ||
+        arguments[0] != config || arguments[1] != config->attrs || config->numAttrs != 1 ||
+        config->gridDim.x != 3 || config->blockDim.x != 32 || config->dynamicSmemBytes != 64) {
+        return cudaErrorInvalidValue;
+    }
+    return *static_cast<cudaError_t*>(arguments[2]);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaLaunchKernelExC_ptsz(const cudaLaunchConfig_t* config,
+                                                          const void* function, void** arguments) {
+    return cudaLaunchKernelExC(config, function, arguments);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaGraphLaunch_ptsz(cudaGraphExec_t graph_exec,
+                                                      cudaStream_t stream) {
+    return cudaGraphLaunch(graph_exec, stream);
 }
 
 // NOLINTBEGIN(bugprone-reserved-identifier, readability-identifier-naming): preserve CUDA

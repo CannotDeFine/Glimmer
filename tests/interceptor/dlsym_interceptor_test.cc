@@ -37,6 +37,12 @@ int main() {
         "cuInit",
         "cuLaunchKernel",
         "cuLaunchKernel_ptsz",
+        "cuLaunchKernelEx",
+        "cuLaunchKernelEx_ptsz",
+        "cudaLaunchKernelExC",
+        "cudaLaunchKernelExC_ptsz",
+        "cuGraphLaunch",
+        "cuGraphLaunch_ptsz",
         "cuMemAlloc",
         "cuMemAlloc_v2",
         "cuMemAllocManaged",
@@ -164,6 +170,8 @@ int main() {
                                          "cudaMalloc3D",
                                          "cudaLaunchKernel",
                                          "cudaLaunchKernel_ptsz",
+                                         "cudaGraphLaunch",
+                                         "cudaGraphLaunch_ptsz",
                                          "__cudaLaunchKernel",
                                          "__cudaLaunchKernel_ptsz",
                                          "cudaMallocAsync",
@@ -229,8 +237,15 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    const DlsymFunction dlsym_without_nonnull_attribute = reinterpret_cast<DlsymFunction>(&dlsym);
-    if (dlsym_without_nonnull_attribute(RTLD_DEFAULT, nullptr) != nullptr) {
+    // Resolve the Glimmer boundary dynamically: calling the libc-declared
+    // dlsym with a null name violates its nonnull contract even after a cast.
+    void* dlsym_symbol = dlsym(RTLD_DEFAULT, "dlsym");
+    if (!is_from_interceptor(dlsym_symbol)) {
+        std::cerr << "dlsym did not resolve the Glimmer boundary\n";
+        return EXIT_FAILURE;
+    }
+    const auto interceptor_dlsym = reinterpret_cast<DlsymFunction>(dlsym_symbol);
+    if (interceptor_dlsym(RTLD_DEFAULT, nullptr) != nullptr) {
         std::cerr << "dlsym did not reject a null symbol name\n";
         return EXIT_FAILURE;
     }

@@ -8,12 +8,16 @@ Glimmer code; the interceptor is supplied by the caller through LD_PRELOAD.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import csv
+import json
+import math
 import os
 import pathlib
-import statistics
 import sys
 import time
+
+from measurements import MEASUREMENT_VERSION, summarize_samples
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,23 +31,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--work-units", type=int, default=1)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--iterations", type=int, default=10)
+    parser.add_argument("--duration-seconds", type=float, default=0.0,
+                        help="run until a wall-clock deadline instead of an iteration count")
     parser.add_argument("--learning-rate", type=float, default=1.0e-3)
+    parser.add_argument(
+        "--latency-target-ms",
+        type=float,
+        default=0.0,
+        help="optional per-iteration latency target; zero disables SLO accounting",
+    )
     parser.add_argument("--output", type=pathlib.Path)
     parser.add_argument("--ready-file", type=pathlib.Path)
     parser.add_argument("--start-file", type=pathlib.Path)
     parser.add_argument("--status-file", type=pathlib.Path)
+    parser.add_argument("--expected-memory-total-bytes", type=int,
+                        help="verify the CUDA memory view before warmup and measurement")
+    parser.add_argument("--profile-cuda", action="store_true",
+                        help="diagnostic only: capture the warmed loop with a CUDA profiler")
     return parser.parse_args()
-
-
-def percentile(values: list[float], percentage: float) -> float:
-    ordered = sorted(values)
-    if not ordered:
-        return 0.0
-    position = (len(ordered) - 1) * percentage / 100.0
-    lower = int(position)
-    upper = min(lower + 1, len(ordered) - 1)
-    fraction = position - lower
-    return ordered[lower] + fraction * (ordered[upper] - ordered[lower])
 
 
 def validate_positive(arguments: argparse.Namespace) -> None:
@@ -55,6 +60,31 @@ def validate_positive(arguments: argparse.Namespace) -> None:
         raise ValueError("--warmup must not be negative")
     if arguments.learning_rate <= 0.0:
         raise ValueError("--learning-rate must be positive")
+    if not math.isfinite(arguments.latency_target_ms) or arguments.latency_target_ms < 0.0:
+        raise ValueError("--latency-target-ms must be a finite non-negative value")
+    if not math.isfinite(arguments.duration_seconds) or not 0 <= arguments.duration_seconds <= 3600:
+        raise ValueError("--duration-seconds must be finite and in [0, 3600]")
+    if arguments.expected_memory_total_bytes is not None and arguments.expected_memory_total_bytes <= 0:
+        raise ValueError("--expected-memory-total-bytes must be positive")
+
+
+def validate_memory_view(device_type: str, visible_total: int, expected_total: int) -> None:
+    if device_type != "cuda" or visible_total != expected_total:
+        raise ValueError(f"unexpected CUDA memory view: expected={expected_total} actual={visible_total}")
+
+
+@contextmanager
+def cuda_profile_range(torch, device_type: str, enabled: bool):
+    if not enabled:
+        yield
+        return
+    if device_type != "cuda":
+        raise ValueError("--profile-cuda requires a CUDA device")
+    torch.cuda.profiler.start()
+    try:
+        yield
+    finally:
+        torch.cuda.profiler.stop()
 
 
 def import_torch():
@@ -116,12 +146,27 @@ def write_metadata(output: pathlib.Path, fields: dict[str, object]) -> None:
     temporary.replace(output)
 
 
-def wait_for_start(start_file: pathlib.Path, timeout_seconds: float = 120.0) -> None:
+def wait_for_start(start_file: pathlib.Path, duration_seconds: float = 0.0,
+                   timeout_seconds: float = 120.0) -> int:
     deadline = time.monotonic() + timeout_seconds
     while not start_file.exists():
         if time.monotonic() >= deadline:
             raise TimeoutError(f"start barrier was not created: {start_file}")
         time.sleep(0.001)
+    if duration_seconds == 0:
+        return 0
+    window = json.loads(start_file.read_text())
+    start_ns, end_ns = int(window["start_ns"]), int(window["end_ns"])
+    if end_ns - start_ns != int(duration_seconds * 1_000_000_000):
+        raise ValueError("shared measurement duration does not match the workload")
+    while True:
+        remaining_ns = start_ns - time.monotonic_ns()
+        if remaining_ns <= 0:
+            break
+        time.sleep(min(remaining_ns / 1_000_000_000, 0.001))
+    if time.monotonic_ns() >= end_ns:
+        raise TimeoutError("shared measurement window expired before workload start")
+    return end_ns
 
 
 def main() -> int:
@@ -139,6 +184,7 @@ def main() -> int:
         return 2
 
     device = torch.device(arguments.device)
+    visible_memory_total = None
     if device.type == "cuda":
         if not torch.cuda.is_available():
             print("pytorch_smoke error=cuda_unavailable", file=sys.stderr)
@@ -148,6 +194,17 @@ def main() -> int:
     elif device.type != "cpu":
         print(f"pytorch_smoke error=unsupported_device device={device}", file=sys.stderr)
         return 2
+    if arguments.profile_cuda and (device.type != "cuda" or arguments.start_file is not None):
+        print("pytorch_smoke error=profile_requires_solo_cuda", file=sys.stderr)
+        return 2
+
+    if arguments.expected_memory_total_bytes is not None:
+        try:
+            visible_memory_total = int(torch.cuda.mem_get_info(device)[1]) if device.type == "cuda" else 0
+            validate_memory_view(device.type, visible_memory_total, arguments.expected_memory_total_bytes)
+        except (ValueError, RuntimeError) as error:
+            print(f"pytorch_smoke error=memory_view_failed detail={error}", file=sys.stderr)
+            return 1
 
     dtype = getattr(torch, arguments.dtype)
     intermediate_size = arguments.intermediate_size or arguments.hidden_size * 4
@@ -189,6 +246,7 @@ def main() -> int:
     # runner. A monotonic clock prevents wall-clock corrections from making a
     # valid interval appear to run backwards.
     ready_ns = time.monotonic_ns()
+    measurement_deadline_ns = 0
     if arguments.ready_file is not None:
         try:
             write_metadata(
@@ -203,54 +261,67 @@ def main() -> int:
                     "ready_ns": ready_ns,
                 },
             )
-            wait_for_start(arguments.start_file)
-        except (OSError, TimeoutError) as error:
+            measurement_deadline_ns = wait_for_start(arguments.start_file, arguments.duration_seconds)
+        except (OSError, TimeoutError, ValueError, KeyError) as error:
             print(f"pytorch_smoke error=barrier_failed detail={error}", file=sys.stderr)
             return 1
     if device.type == "cuda":
         torch.cuda.synchronize(device)
-    start_ns = time.monotonic_ns()
+    with cuda_profile_range(torch, device.type, arguments.profile_cuda):
+        start_ns = time.monotonic_ns()
+        if arguments.duration_seconds and not measurement_deadline_ns:
+            measurement_deadline_ns = start_ns + int(arguments.duration_seconds * 1_000_000_000)
 
-    start_event = torch.cuda.Event(enable_timing=True) if device.type == "cuda" else None
-    end_event = torch.cuda.Event(enable_timing=True) if device.type == "cuda" else None
-    rows: list[dict[str, object]] = []
-    elapsed_values: list[float] = []
-    last_result = None
-    for iteration in range(1, arguments.iterations + 1):
-        if start_event is not None:
-            start_event.record()
-        else:
-            cpu_start = time.perf_counter()
-        last_result = run_step(
-            torch, model, inputs, targets, optimizer, arguments.role, arguments.work_units
-        )
-        if end_event is not None:
-            end_event.record()
-            end_event.synchronize()
-            elapsed_ms = float(start_event.elapsed_time(end_event))
-        else:
-            elapsed_ms = (time.perf_counter() - cpu_start) * 1000.0
-        elapsed_values.append(elapsed_ms)
-        allocated_bytes = (
-            int(torch.cuda.memory_allocated(device)) if device.type == "cuda" else 0
-        )
-        peak_bytes = (
-            int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
-        )
-        rows.append(
-            {
-                "role": arguments.role,
-                "device": str(device),
-                "iteration": iteration,
-                "elapsed_ms": f"{elapsed_ms:.3f}",
-                "memory_allocated_bytes": allocated_bytes,
-                "peak_memory_allocated_bytes": peak_bytes,
-            }
-        )
+        start_event = torch.cuda.Event(enable_timing=True) if device.type == "cuda" else None
+        end_event = torch.cuda.Event(enable_timing=True) if device.type == "cuda" else None
+        rows: list[dict[str, object]] = []
+        last_result = None
+        iteration = 0
+        while (time.monotonic_ns() < measurement_deadline_ns if measurement_deadline_ns
+               else iteration < arguments.iterations):
+            iteration += 1
+            iteration_start_ns = time.monotonic_ns()
+            if start_event is not None:
+                start_event.record()
+            last_result = run_step(
+                torch, model, inputs, targets, optimizer, arguments.role, arguments.work_units
+            )
+            if end_event is not None:
+                end_event.record()
+                end_event.synchronize()
+            iteration_end_ns = time.monotonic_ns()
+            elapsed_ms = (iteration_end_ns - iteration_start_ns) / 1_000_000
+            cuda_event_ms = float(start_event.elapsed_time(end_event)) if end_event is not None else ""
+            allocated_bytes = (
+                int(torch.cuda.memory_allocated(device)) if device.type == "cuda" else 0
+            )
+            peak_bytes = (
+                int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
+            )
+            rows.append(
+                {
+                    "role": arguments.role,
+                    "device": str(device),
+                    "iteration": iteration,
+                    "measurement_version": MEASUREMENT_VERSION,
+                    "iteration_start_ns": iteration_start_ns,
+                    "iteration_end_ns": iteration_end_ns,
+                    "elapsed_ms": f"{elapsed_ms:.9f}",
+                    "cuda_event_ms": cuda_event_ms,
+                    "latency_target_ms": f"{arguments.latency_target_ms:.9f}",
+                    "latency_target_met": (int(elapsed_ms <= arguments.latency_target_ms)
+                                           if arguments.latency_target_ms else ""),
+                    "memory_allocated_bytes": allocated_bytes,
+                    "peak_memory_allocated_bytes": peak_bytes,
+                }
+            )
 
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    end_ns = time.monotonic_ns()
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        end_ns = time.monotonic_ns()
+    if not rows:
+        print("pytorch_smoke error=no_measured_steps", file=sys.stderr)
+        return 1
     if arguments.role == "inference":
         validation = bool(torch.isfinite(last_result).all().item())
     else:
@@ -258,6 +329,12 @@ def main() -> int:
     if not validation:
         print("pytorch_smoke error=non_finite_result", file=sys.stderr)
         return 1
+
+    summary = summarize_samples(rows, start_ns, end_ns, arguments.latency_target_ms)
+    mean_ms, p50_ms, p95_ms, p99_ms = (summary[key] for key in ("mean_ms", "p50_ms", "p95_ms", "p99_ms"))
+    throughput = summary["steps_per_second"]
+    target_miss_count = summary["latency_target_miss_count"]
+    target_miss_ratio = summary["latency_target_miss_ratio"]
 
     if arguments.output is not None:
         write_measurements(arguments.output, rows)
@@ -275,27 +352,41 @@ def main() -> int:
                     "ready_ns": ready_ns,
                     "start_ns": start_ns,
                     "end_ns": end_ns,
-                    "iterations": arguments.iterations,
+                    "iterations": len(rows),
+                    "measurement_version": MEASUREMENT_VERSION,
+                    "measurement_deadline_ns": measurement_deadline_ns,
+                    "torch_version": torch.__version__,
+                    "cuda_version": torch.version.cuda,
                     "validation": int(validation),
+                    "visible_memory_total_bytes": visible_memory_total,
+                    "cuda_profile": int(arguments.profile_cuda),
+                    "mean_ms": f"{mean_ms:.3f}",
+                    "p50_ms": f"{p50_ms:.3f}",
+                    "p95_ms": f"{p95_ms:.3f}",
+                    "p99_ms": f"{p99_ms:.3f}",
+                    "steps_per_second": f"{throughput:.3f}",
+                    "latency_target_ms": f"{arguments.latency_target_ms:.9f}",
+                    "latency_target_miss_count": target_miss_count,
+                    "latency_target_miss_ratio": f"{target_miss_ratio:.6f}",
                 },
             )
         except OSError as error:
             print(f"pytorch_smoke error=status_write_failed detail={error}", file=sys.stderr)
             return 1
 
-    mean_ms = statistics.fmean(elapsed_values)
-    throughput = 1000.0 / mean_ms if mean_ms > 0.0 else 0.0
     peak_bytes = rows[-1]["peak_memory_allocated_bytes"]
     print(
         "pytorch_smoke "
         f"role={arguments.role} status=ok validation=1 device={device} "
         f"device_name={device_name!r} torch={torch.__version__} "
-        f"cuda={torch.version.cuda!r} iterations={arguments.iterations} "
+        f"cuda={torch.version.cuda!r} iterations={len(rows)} measurement_version={MEASUREMENT_VERSION} "
+        f"cuda_profile={int(arguments.profile_cuda)} "
         f"work_units={arguments.work_units} mean_ms={mean_ms:.3f} "
-        f"p50_ms={percentile(elapsed_values, 50.0):.3f} "
-        f"p95_ms={percentile(elapsed_values, 95.0):.3f} "
-        f"p99_ms={percentile(elapsed_values, 99.0):.3f} "
-        f"steps_per_second={throughput:.3f} peak_memory_allocated_bytes={peak_bytes}",
+        f"p50_ms={p50_ms:.3f} p95_ms={p95_ms:.3f} p99_ms={p99_ms:.3f} "
+        f"steps_per_second={throughput:.3f} peak_memory_allocated_bytes={peak_bytes} "
+        f"latency_target_ms={arguments.latency_target_ms:.9f} "
+        f"latency_target_miss_count={target_miss_count} "
+        f"latency_target_miss_ratio={target_miss_ratio:.6f}",
     )
     return 0
 

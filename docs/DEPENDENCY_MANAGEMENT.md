@@ -51,6 +51,19 @@ example when explicitly requested by the user. It reports the framework and
 CUDA versions it exercises. Compatibility results are scoped to that
 environment and must not be presented as universal framework support.
 
+## Optional profiling tools
+
+The optional warmed-timeline example uses an existing NVIDIA Nsight Systems
+installation as a development tool. It provides CUDA activity timestamps that
+host-only timers cannot supply. The helper records `nsys --version` and uses
+the documented CLI plus Python's standard-library SQLite reader. Initial
+validation used Nsight Systems 2025.6.3; exports from other versions must pass
+schema checks. Obtain it from [NVIDIA](https://developer.nvidia.com/nsight-systems)
+under NVIDIA's applicable proprietary license; no binaries are redistributed.
+It adds no CMake/runtime dependency, but collection requires a supported
+host/Driver and introduces profiling overhead. Standard-library fixture tests
+and explicit real-GPU captures verify the integration.
+
 ## Introducing a dependency
 
 Before adding one, document:

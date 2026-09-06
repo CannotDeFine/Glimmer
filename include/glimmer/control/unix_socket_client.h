@@ -30,6 +30,8 @@ class UnixSocketControlClient final {
     // failure, or response exceeding the protocol bound. Failed connections
     // are discarded without retrying the request because protocol operations
     // may have side effects.
+    // The size bound includes the newline. Non-empty EOF-framed responses
+    // remain supported; read-ahead never survives a connection reset.
     // When timing is non-null, it receives the complete request duration,
     // including a connection setup when the thread has no reusable connection.
     [[nodiscard]] std::optional<std::string> request(

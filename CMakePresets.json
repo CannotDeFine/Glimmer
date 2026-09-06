@@ -71,6 +71,16 @@
         "GLIMMER_ENABLE_CUDA_GPU_TESTS": "ON",
         "GLIMMER_BUILD_CUDA_WORKLOAD": "ON"
       }
+    },
+    {
+      "name": "cuda-perf",
+      "displayName": "Optimized CUDA build with profiling symbols",
+      "inherits": "cuda-gpu",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "GLIMMER_ENABLE_SANITIZERS": "OFF",
+        "GLIMMER_ENABLE_CLANG_TIDY": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -101,6 +111,10 @@
     {
       "name": "cuda-gpu",
       "configurePreset": "cuda-gpu"
+    },
+    {
+      "name": "cuda-perf",
+      "configurePreset": "cuda-perf"
     }
   ],
   "testPresets": [
@@ -127,6 +141,10 @@
     {
       "name": "cuda-gpu",
       "configurePreset": "cuda-gpu"
+    },
+    {
+      "name": "cuda-perf",
+      "configurePreset": "cuda-perf"
     }
   ]
 }

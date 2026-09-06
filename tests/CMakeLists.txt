@@ -1,3 +1,19 @@
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME glimmer_pytorch_measurements_test
+        COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/examples/pytorch_measurements_test.py
+    )
+    add_test(NAME glimmer_pytorch_overhead_baseline_test
+        COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/examples/pytorch_overhead_baseline_test.py
+    )
+    add_test(NAME glimmer_pytorch_launch_profile_test
+        COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/examples/pytorch_launch_profile_test.py
+    )
+endif()
+
 add_executable(glimmer_core_quota_ledger_test core/quota_ledger_test.cc)
 
 target_link_libraries(glimmer_core_quota_ledger_test
@@ -19,6 +35,17 @@ target_link_libraries(glimmer_core_scheduler_test
 glimmer_enable_clang_tidy(glimmer_core_scheduler_test)
 
 add_test(NAME glimmer_core_scheduler_test COMMAND glimmer_core_scheduler_test)
+
+add_executable(glimmer_core_adaptive_slo_test core/adaptive_slo_test.cc)
+
+target_link_libraries(glimmer_core_adaptive_slo_test
+    PRIVATE
+        Glimmer::core
+)
+
+glimmer_enable_clang_tidy(glimmer_core_adaptive_slo_test)
+
+add_test(NAME glimmer_core_adaptive_slo_test COMMAND glimmer_core_adaptive_slo_test)
 
 add_executable(glimmer_backend_simulated_test backend/simulated_backend_test.cc)
 
@@ -107,6 +134,16 @@ glimmer_enable_clang_tidy(glimmer_control_task_admission_test)
 add_test(NAME glimmer_control_task_admission_test
     COMMAND glimmer_control_task_admission_test)
 
+add_executable(glimmer_control_task_admission_concurrency_test
+    control/task_admission_concurrency_test.cc
+)
+target_link_libraries(glimmer_control_task_admission_concurrency_test PRIVATE Glimmer::control)
+glimmer_enable_clang_tidy(glimmer_control_task_admission_concurrency_test)
+add_test(NAME glimmer_control_task_admission_concurrency_test
+    COMMAND glimmer_control_task_admission_concurrency_test
+)
+set_tests_properties(glimmer_control_task_admission_concurrency_test PROPERTIES TIMEOUT 30)
+
 add_executable(glimmer_control_launch_gate_test control/launch_gate_test.cc)
 
 target_link_libraries(glimmer_control_launch_gate_test
@@ -163,6 +200,23 @@ glimmer_enable_clang_tidy(glimmer_control_unix_socket_server_test)
 
 add_test(NAME glimmer_control_unix_socket_server_test
     COMMAND glimmer_control_unix_socket_server_test)
+set_tests_properties(glimmer_control_unix_socket_server_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 15)
+
+add_executable(glimmer_control_socket_line_reader_test control/socket_line_reader_test.cc)
+target_include_directories(glimmer_control_socket_line_reader_test
+    PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
+target_link_libraries(glimmer_control_socket_line_reader_test PRIVATE Glimmer::control)
+glimmer_enable_clang_tidy(glimmer_control_socket_line_reader_test)
+add_test(NAME glimmer_control_socket_line_reader_test
+    COMMAND glimmer_control_socket_line_reader_test)
+set_tests_properties(glimmer_control_socket_line_reader_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 15)
+
+add_executable(glimmer_control_unix_socket_client_test control/unix_socket_client_test.cc)
+target_link_libraries(glimmer_control_unix_socket_client_test PRIVATE Glimmer::control)
+glimmer_enable_clang_tidy(glimmer_control_unix_socket_client_test)
+add_test(NAME glimmer_control_unix_socket_client_test
+    COMMAND glimmer_control_unix_socket_client_test)
+set_tests_properties(glimmer_control_unix_socket_client_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 15)
 
 add_executable(glimmer_control_service_process_test control/service_process_test.cc)
 

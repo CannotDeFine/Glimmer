@@ -16,6 +16,8 @@ namespace glimmer::control {
 
 struct LaunchGateOptions {
     std::size_t max_concurrent_launches = 1;
+    std::size_t priority_reserved_slots = 0;
+    std::uint32_t priority_reservation_threshold = 1;
     core::SchedulingPolicy scheduling_policy = core::SchedulingPolicy::kWeightedRoundRobin;
     std::string tenant_id = "default";
     std::uint32_t tenant_weight = 1;

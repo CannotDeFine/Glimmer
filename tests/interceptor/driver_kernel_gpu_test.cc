@@ -81,6 +81,32 @@ int main() {
               "cuLaunchKernel");
     workload_succeeded = check(cuCtxSynchronize(), "cuCtxSynchronize") && workload_succeeded;
 
+    CUlaunchAttribute attribute{};
+    attribute.id = CU_LAUNCH_ATTRIBUTE_IGNORE;
+    CUlaunchConfig config{};
+    config.gridDimX = config.gridDimY = config.gridDimZ = 1;
+    config.blockDimX = config.blockDimY = config.blockDimZ = 1;
+    config.attrs = &attribute;
+    config.numAttrs = 1;
+    using ExtendedLaunch = CUresult (*)(const CUlaunchConfig*, CUfunction, void**, void**);
+    for (const auto flags :
+         {CU_GET_PROC_ADDRESS_DEFAULT, CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM}) {
+        void* address = nullptr;
+        workload_succeeded =
+            check(cuGetProcAddress("cuLaunchKernelEx", &address, 11060, flags, nullptr),
+                  "get extended launch") &&
+            workload_succeeded;
+        if (address != nullptr) {
+            const auto launch = reinterpret_cast<ExtendedLaunch>(address);
+            workload_succeeded =
+                check(cuMemsetD32(output, 0, 1), "clear extended output") &&
+                check(launch(&config, function, kernel_parameters, nullptr), "extended launch") &&
+                check(cuCtxSynchronize(), "extended synchronize") && workload_succeeded;
+        } else {
+            workload_succeeded = false;
+        }
+    }
+
     std::uint32_t result = 0;
     workload_succeeded =
         check(cuMemcpyDtoH_v2(&result, output, sizeof(result)), "cuMemcpyDtoH_v2") &&

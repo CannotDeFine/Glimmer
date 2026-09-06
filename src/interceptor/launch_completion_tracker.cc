@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <unordered_set>
 
 namespace glimmer::interceptor {
 namespace {
@@ -192,7 +191,11 @@ void LaunchCompletionTracker::monitor() noexcept {
             continue;
         }
 
-        bool removed = false;
+        // Keep the event pending until cleanup finishes. Otherwise close_batch()
+        // can publish success while this thread still owns the terminal result.
+        const bool event_destroyed = driver_.event_destroy(candidate.event) == CUDA_SUCCESS;
+        bool should_complete = false;
+        bool should_fail = false;
         {
             std::scoped_lock lock(mutex_);
             for (auto iterator = pending_.begin(); iterator != pending_.end(); ++iterator) {
@@ -203,19 +206,8 @@ void LaunchCompletionTracker::monitor() noexcept {
                 const std::size_t index = static_cast<std::size_t>(iterator - pending_.begin());
                 pending_.erase(iterator);
                 next_index_ = pending_.empty() ? 0 : index % pending_.size();
-                removed = true;
                 break;
             }
-        }
-        if (!removed) {
-            continue;
-        }
-
-        const bool event_destroyed = driver_.event_destroy(candidate.event) == CUDA_SUCCESS;
-        bool should_complete = false;
-        bool should_fail = false;
-        {
-            std::scoped_lock lock(mutex_);
             const auto batch_iterator = batches_.find(candidate.task_id);
             if (batch_iterator != batches_.end()) {
                 if (!event_destroyed || query_result != CUDA_SUCCESS || candidate.lease_lost) {
@@ -281,22 +273,18 @@ void LaunchCompletionTracker::stop() noexcept {
     }
 
     std::vector<PendingLaunch> pending;
-    std::unordered_set<core::TaskId> task_ids;
+    std::unordered_map<core::TaskId, BatchState> batches;
     {
         std::scoped_lock lock(mutex_);
         pending.swap(pending_);
-        for (const auto& [task_id, state] : batches_) {
-            static_cast<void>(state);
-            task_ids.insert(task_id);
-        }
-        batches_.clear();
+        batches.swap(batches_);
         next_index_ = 0;
     }
     for (const PendingLaunch& launch : pending) {
         static_cast<void>(driver_.event_destroy(launch.event));
-        task_ids.insert(launch.task_id);
     }
-    for (const core::TaskId task_id : task_ids) {
+    for (const auto& [task_id, state] : batches) {
+        static_cast<void>(state);
         static_cast<void>(gate_.fail(task_id));
     }
 }

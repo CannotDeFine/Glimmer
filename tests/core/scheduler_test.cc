@@ -252,6 +252,98 @@ void test_priority_policy_order_and_tie_breaking() {
            "remaining specific priority task should complete cleanly");
 }
 
+void test_priority_latency_task_not_starved_by_training_backlog() {
+    Scheduler scheduler(256, SchedulerOptions{.max_running_tasks = 1,
+                                              .scheduling_policy = SchedulingPolicy::kPriority});
+    std::vector<TaskId> training_tasks;
+    training_tasks.reserve(32);
+    for (int index = 0; index < 32; ++index) {
+        const auto result = scheduler.submit(TaskSpec{.tenant_id = "training",
+                                                      .memory_bytes = 1,
+                                                      .weight = 1,
+                                                      .work_units = 1,
+                                                      .priority = 1});
+        expect(result.accepted(), "training backlog task should be accepted");
+        training_tasks.push_back(result.task_id);
+    }
+    const auto inference_result = scheduler.submit(TaskSpec{.tenant_id = "inference",
+                                                            .memory_bytes = 1,
+                                                            .weight = 1,
+                                                            .work_units = 1,
+                                                            .priority = 100});
+    expect(inference_result.accepted(), "latency-sensitive inference task should be accepted");
+    const TaskId inference_task = inference_result.task_id;
+
+    const auto inference_lease = scheduler.dispatch_next();
+    expect(inference_lease.has_value() && inference_lease->task_id == inference_task,
+           "priority scheduling must dispatch inference before a training backlog");
+    expect(scheduler.complete(inference_task), "inference task should complete cleanly");
+
+    for (const TaskId training_task : training_tasks) {
+        const auto training_lease = scheduler.dispatch_next();
+        expect(training_lease.has_value() && training_lease->task_id == training_task,
+               "training backlog should remain executable after inference admission");
+        expect(scheduler.complete(training_task), "training task should complete cleanly");
+    }
+    const auto stats = scheduler.stats();
+    expect(stats.completed_task_count == training_tasks.size() + 1,
+           "priority starvation test should complete every task");
+}
+
+void test_priority_reserved_slot_protects_latency_class() {
+    Scheduler scheduler(100, SchedulerOptions{.max_running_tasks = 2,
+                                              .priority_reserved_slots = 1,
+                                              .priority_reservation_threshold = 100,
+                                              .scheduling_policy = SchedulingPolicy::kPriority});
+    const auto first_training =
+        scheduler.submit(TaskSpec{.tenant_id = "training", .memory_bytes = 1, .priority = 1});
+    const auto second_training =
+        scheduler.submit(TaskSpec{.tenant_id = "training", .memory_bytes = 1, .priority = 1});
+    expect(first_training.accepted() && second_training.accepted(),
+           "reserved-slot training tasks should be accepted");
+
+    const auto first_lease = scheduler.dispatch_next();
+    expect(first_lease.has_value() && first_lease->task_id == first_training.task_id,
+           "training should use the unreserved slot before inference arrives");
+    expect(!scheduler.dispatch_next(), "lower-priority work must not borrow the reserved slot");
+    expect(!scheduler.dispatch_task(second_training.task_id),
+           "specific low-priority dispatch must honor the reserved slot");
+
+    const auto inference =
+        scheduler.submit(TaskSpec{.tenant_id = "inference", .memory_bytes = 1, .priority = 100});
+    expect(inference.accepted(), "reserved-slot inference task should be accepted");
+    const auto inference_lease = scheduler.dispatch_next();
+    expect(inference_lease.has_value() && inference_lease->task_id == inference.task_id,
+           "the reserved slot should admit high-priority inference");
+    const auto reservation_stats = scheduler.stats();
+    expect(reservation_stats.priority_reservation_active &&
+               reservation_stats.priority_reserved_slots == 1 &&
+               reservation_stats.priority_reservation_threshold == 100,
+           "scheduler stats should expose the configured priority reservation");
+    expect(scheduler.set_priority_reserved_slots(99),
+           "priority scheduler should accept a runtime reservation update");
+    expect(scheduler.stats().priority_reserved_slots == 2,
+           "runtime reservation updates should clamp to running capacity");
+    expect(scheduler.set_priority_reserved_slots(1),
+           "priority scheduler should restore a smaller runtime reservation");
+
+    expect(scheduler.complete(first_training.task_id), "first training task should complete");
+    const auto replacement_training = scheduler.dispatch_task(second_training.task_id);
+    expect(replacement_training.has_value(),
+           "inference in the reserved slot must not block the free unreserved slot");
+    if (replacement_training.has_value()) {
+        expect(scheduler.complete(second_training.task_id), "replacement training should complete");
+    }
+    expect(scheduler.complete(inference.task_id), "inference task should complete");
+    expect(!scheduler.dispatch_next(), "all reserved-slot test tasks should have drained");
+}
+
+void test_dynamic_reservation_rejects_non_priority_policy() {
+    Scheduler scheduler(100, SchedulerOptions{.max_running_tasks = 2});
+    expect(!scheduler.set_priority_reserved_slots(1),
+           "non-priority schedulers must reject adaptive reservation updates");
+}
+
 void test_specific_dispatch_preserves_policy_order() {
     Scheduler scheduler(100);
     const TaskId first = submit(scheduler, "tenant-a", 1);
@@ -400,6 +492,9 @@ int main() {
     test_specific_dispatch_preserves_policy_order();
     test_deficit_round_robin_and_latency_stats();
     test_priority_policy_order_and_tie_breaking();
+    test_priority_latency_task_not_starved_by_training_backlog();
+    test_priority_reserved_slot_protects_latency_class();
+    test_dynamic_reservation_rejects_non_priority_policy();
     test_weighted_round_robin_order();
     test_cancellation_and_failure_release_quota();
     test_input_validation_and_tenant_weight_consistency();

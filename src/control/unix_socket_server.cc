@@ -1,6 +1,6 @@
 #include "glimmer/control/unix_socket_server.h"
 
-#include "glimmer/control/task_protocol.h"
+#include "internal/socket_line_reader.h"
 
 #include <charconv>
 #include <cerrno>
@@ -276,9 +276,16 @@ bool UnixSocketControlServer::handle_client(int client_fd) noexcept {
         return true;
     }
     bool handled_request = false;
+    internal::SocketLineReader reader(client_fd);
     while (!stopping_.load(std::memory_order_acquire)) {
         std::string request;
-        if (!read_line(client_fd, &request)) {
+        const auto status = reader.read_line(request, config_.io_timeout_ms, &stopping_);
+        if (status == internal::SocketLineStatus::kIdle) {
+            // An authenticated connection may be idle during long CUDA work.
+            continue;
+        }
+        if (status != internal::SocketLineStatus::kLine &&
+            status != internal::SocketLineStatus::kTooLong) {
             break;
         }
         const auto response = endpoint_.handle(request, peer);
@@ -287,6 +294,11 @@ bool UnixSocketControlServer::handle_client(int client_fd) noexcept {
         }
         handled_request = true;
         served_request_count_.fetch_add(1, std::memory_order_release);
+        if (status == internal::SocketLineStatus::kTooLong) {
+            // Report the codec's rejection once, then close. A suffix of an
+            // oversized line must never be interpreted as a new operation.
+            break;
+        }
     }
     return handled_request;
 }
@@ -314,53 +326,6 @@ bool UnixSocketControlServer::authenticate_client(int client_fd,
     // service will reject the zero start-time identity when it handles CLAIM.
     static_cast<void>(read_process_start_time(peer->pid, &peer->start_time_ticks));
     return true;
-}
-
-bool UnixSocketControlServer::read_line(int client_fd, std::string* line) const noexcept {
-    if (line == nullptr) {
-        return false;
-    }
-    try {
-        line->clear();
-        line->reserve(kTaskProtocolMaxLineBytes + 1);
-        while (line->size() <= kTaskProtocolMaxLineBytes) {
-            const PollResult poll_result =
-                wait_for_io(client_fd, PollEvent::kRead, config_.io_timeout_ms);
-            if (poll_result == PollResult::kTimedOut) {
-                if (!line->empty()) {
-                    // Do not allow a partially written line to hold a worker
-                    // indefinitely. An idle, already-authenticated client is
-                    // different: it may be between long-running CUDA calls.
-                    return false;
-                }
-                // A persistent client may be idle while its CUDA work is
-                // running. The timeout bounds each poll, not the lifetime of
-                // an authenticated connection.
-                continue;
-            }
-            if (poll_result == PollResult::kError || stopping_.load(std::memory_order_acquire)) {
-                return false;
-            }
-            char value = '\0';
-            const ssize_t received = ::recv(client_fd, &value, 1, 0);
-            if (received == 0) {
-                return !line->empty();
-            }
-            if (received < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
-                return false;
-            }
-            line->push_back(value);
-            if (value == '\n') {
-                return true;
-            }
-        }
-        return true;
-    } catch (...) {
-        return false;
-    }
 }
 
 bool UnixSocketControlServer::write_response(int client_fd,

@@ -13,6 +13,15 @@
 #ifdef cuLaunchKernel
 #undef cuLaunchKernel
 #endif
+#ifdef cuGraphLaunch
+#undef cuGraphLaunch
+#endif
+#ifdef cuLaunchKernelEx
+#undef cuLaunchKernelEx
+#endif
+#ifdef cudaLaunchKernelExC
+#undef cudaLaunchKernelExC
+#endif
 #ifdef cuCtxDestroy
 #undef cuCtxDestroy
 #endif
@@ -67,6 +76,9 @@
 #ifdef cudaLaunchKernel
 #undef cudaLaunchKernel
 #endif
+#ifdef cudaGraphLaunch
+#undef cudaGraphLaunch
+#endif
 
 extern "C" CUresult CUDAAPI cuMemAlloc_v2(CUdeviceptr* device_pointer, std::size_t memory_bytes);
 extern "C" CUresult CUDAAPI cuInit(unsigned int flags);
@@ -82,6 +94,8 @@ extern "C" CUresult CUDAAPI cuLaunchKernel_ptsz(CUfunction function, unsigned in
                                                 unsigned int block_dim_z,
                                                 unsigned int shared_memory_bytes, CUstream stream,
                                                 void** kernel_parameters, void** extra);
+extern "C" CUresult CUDAAPI cuGraphLaunch(CUgraphExec graph_exec, CUstream stream);
+extern "C" CUresult CUDAAPI cuGraphLaunch_ptsz(CUgraphExec graph_exec, CUstream stream);
 extern "C" CUresult CUDAAPI cuMemAllocManaged(CUdeviceptr* device_pointer, std::size_t memory_bytes,
                                               unsigned int flags);
 extern "C" CUresult CUDAAPI cuMemAllocPitch_v2(CUdeviceptr* device_pointer, std::size_t* pitch,
@@ -257,6 +271,9 @@ extern "C" cudaError_t CUDARTAPI cudaLaunchKernel_ptsz(const void* function, dim
                                                        dim3 block_dim, void** arguments,
                                                        std::size_t shared_memory_bytes,
                                                        cudaStream_t stream);
+extern "C" cudaError_t CUDARTAPI cudaGraphLaunch(cudaGraphExec_t graph_exec, cudaStream_t stream);
+extern "C" cudaError_t CUDARTAPI cudaGraphLaunch_ptsz(cudaGraphExec_t graph_exec,
+                                                      cudaStream_t stream);
 // NOLINTBEGIN(bugprone-reserved-identifier, readability-identifier-naming): preserve CUDA compiler
 // ABI names.
 extern "C" cudaError_t CUDARTAPI __cudaLaunchKernel(cudaKernel_t kernel, dim3 grid_dim,
@@ -387,6 +404,14 @@ extern "C" nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemo
 
 namespace glimmer::interceptor {
 
+extern "C" CUresult CUDAAPI cuLaunchKernelEx(const CUlaunchConfig*, CUfunction, void**, void**);
+extern "C" CUresult CUDAAPI cuLaunchKernelEx_ptsz(const CUlaunchConfig*, CUfunction, void**,
+                                                  void**);
+extern "C" cudaError_t CUDARTAPI cudaLaunchKernelExC(const cudaLaunchConfig_t*, const void*,
+                                                     void**);
+extern "C" cudaError_t CUDARTAPI cudaLaunchKernelExC_ptsz(const cudaLaunchConfig_t*, const void*,
+                                                          void**);
+
 namespace {
 
 struct InterceptorSymbol {
@@ -394,10 +419,14 @@ struct InterceptorSymbol {
     void* wrapper;
 };
 
-const std::array<InterceptorSymbol, 164> kInterceptorSymbols{{
+const auto kInterceptorSymbols = std::to_array<InterceptorSymbol>({
     {"cuInit", reinterpret_cast<void*>(&cuInit)},
     {"cuLaunchKernel", reinterpret_cast<void*>(&cuLaunchKernel)},
     {"cuLaunchKernel_ptsz", reinterpret_cast<void*>(&cuLaunchKernel_ptsz)},
+    {"cuLaunchKernelEx", reinterpret_cast<void*>(&cuLaunchKernelEx)},
+    {"cuLaunchKernelEx_ptsz", reinterpret_cast<void*>(&cuLaunchKernelEx_ptsz)},
+    {"cuGraphLaunch", reinterpret_cast<void*>(&cuGraphLaunch)},
+    {"cuGraphLaunch_ptsz", reinterpret_cast<void*>(&cuGraphLaunch_ptsz)},
     {"cuMemAlloc", reinterpret_cast<void*>(&cuMemAlloc_v2)},
     {"cuMemAlloc_v2", reinterpret_cast<void*>(&cuMemAlloc_v2)},
     {"cuMemAllocManaged", reinterpret_cast<void*>(&cuMemAllocManaged)},
@@ -504,6 +533,10 @@ const std::array<InterceptorSymbol, 164> kInterceptorSymbols{{
     {"cudaMalloc3D", reinterpret_cast<void*>(&cudaMalloc3D)},
     {"cudaLaunchKernel", reinterpret_cast<void*>(&cudaLaunchKernel)},
     {"cudaLaunchKernel_ptsz", reinterpret_cast<void*>(&cudaLaunchKernel_ptsz)},
+    {"cudaLaunchKernelExC", reinterpret_cast<void*>(&cudaLaunchKernelExC)},
+    {"cudaLaunchKernelExC_ptsz", reinterpret_cast<void*>(&cudaLaunchKernelExC_ptsz)},
+    {"cudaGraphLaunch", reinterpret_cast<void*>(&cudaGraphLaunch)},
+    {"cudaGraphLaunch_ptsz", reinterpret_cast<void*>(&cudaGraphLaunch_ptsz)},
     {"__cudaLaunchKernel", reinterpret_cast<void*>(&__cudaLaunchKernel)},
     {"__cudaLaunchKernel_ptsz", reinterpret_cast<void*>(&__cudaLaunchKernel_ptsz)},
     {"cudaMallocAsync", reinterpret_cast<void*>(&cudaMallocAsync)},
@@ -575,16 +608,24 @@ const std::array<InterceptorSymbol, 164> kInterceptorSymbols{{
     {"nvmlDeviceGetIndex", reinterpret_cast<void*>(&nvmlDeviceGetIndex)},
     {"nvmlDeviceGetMemoryInfo", reinterpret_cast<void*>(&nvmlDeviceGetMemoryInfo)},
     {"nvmlDeviceGetMemoryInfo_v2", reinterpret_cast<void*>(&nvmlDeviceGetMemoryInfo_v2)},
-}};
+});
 
 }  // namespace
 
-void* find_interceptor_symbol(const char* name) noexcept {
+void* find_interceptor_symbol(const char* name, bool per_thread_default_stream) noexcept {
     if (name == nullptr) {
         return nullptr;
     }
 
     const std::string_view requested_name{name};
+    if (per_thread_default_stream) {
+        for (const InterceptorSymbol& symbol : kInterceptorSymbols) {
+            if (symbol.name.size() == requested_name.size() + 5 &&
+                symbol.name.starts_with(requested_name) && symbol.name.ends_with("_ptsz")) {
+                return symbol.wrapper;
+            }
+        }
+    }
     for (const InterceptorSymbol& symbol : kInterceptorSymbols) {
         if (symbol.name == requested_name) {
             return symbol.wrapper;

@@ -1,7 +1,6 @@
 #include "glimmer/control/task_admission.h"
 
 #include <limits>
-#include <utility>
 
 namespace glimmer::control {
 namespace {
@@ -10,20 +9,34 @@ namespace {
     return peer.has_value() && peer->pid != 0 && peer->start_time_ticks != 0;
 }
 
+[[nodiscard]] std::uint64_t elapsed_microseconds(
+    std::chrono::steady_clock::time_point start,
+    std::chrono::steady_clock::time_point end) noexcept {
+    if (start == std::chrono::steady_clock::time_point{} || end <= start) {
+        return 0;
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    return elapsed.count() <= 0 ? 0 : static_cast<std::uint64_t>(elapsed.count());
+}
+
 }  // namespace
 
 TaskAdmissionService::TaskAdmissionService(core::Scheduler& scheduler,
                                            std::chrono::milliseconds lease_timeout,
                                            bool bind_leases_to_process,
                                            TaskDispatchObserver dispatch_observer,
-                                           void* dispatch_observer_context) noexcept
+                                           void* dispatch_observer_context,
+                                           TaskCompletionObserver completion_observer,
+                                           void* completion_observer_context) noexcept
     : scheduler_(scheduler),
       lease_timeout_(lease_timeout > std::chrono::milliseconds::zero()
                          ? lease_timeout
                          : std::chrono::milliseconds::zero()),
       bind_leases_to_process_(bind_leases_to_process),
       dispatch_observer_(dispatch_observer),
-      dispatch_observer_context_(dispatch_observer_context) {}
+      dispatch_observer_context_(dispatch_observer_context),
+      completion_observer_(completion_observer),
+      completion_observer_context_(completion_observer_context) {}
 
 core::SubmitResult TaskAdmissionService::submit(const TaskAdmissionRequest& request,
                                                 TaskResourceRegistrar registrar,
@@ -39,8 +52,9 @@ core::SubmitResult TaskAdmissionService::submit(const TaskAdmissionRequest& requ
     // A task must not become running between Scheduler::submit and completion
     // of resource registration. Serialize this transaction with dispatches.
     std::scoped_lock admission_lock(admission_mutex_);
-    const bool tracks_pending_lease =
-        bind_leases_to_process_ || lease_timeout_ != std::chrono::milliseconds::zero();
+    const bool tracks_pending_lease = bind_leases_to_process_ ||
+                                      lease_timeout_ != std::chrono::milliseconds::zero() ||
+                                      completion_observer_ != nullptr;
 
     const core::SubmitResult admission =
         scheduler_.submit(core::TaskSpec{.tenant_id = request.tenant_id,
@@ -56,14 +70,16 @@ core::SubmitResult TaskAdmissionService::submit(const TaskAdmissionRequest& requ
         if (tracks_pending_lease) {
             bool recorded = false;
             try {
+                const auto submitted_at = Clock::now();
                 const auto deadline = lease_timeout_ == std::chrono::milliseconds::zero()
                                           ? Clock::time_point::max()
-                                          : Clock::now() + lease_timeout_;
-                recorded =
-                    pending_leases_
-                        .emplace(admission.task_id,
-                                 LeaseRecord{.deadline = deadline, .reaping = false, .owner = peer})
-                        .second;
+                                          : submitted_at + lease_timeout_;
+                recorded = pending_leases_
+                               .emplace(admission.task_id, LeaseRecord{.deadline = deadline,
+                                                                       .submitted_at = submitted_at,
+                                                                       .reaping = false,
+                                                                       .owner = peer})
+                               .second;
             } catch (...) {
                 recorded = false;
             }
@@ -85,11 +101,8 @@ bool TaskAdmissionService::cancel(core::TaskId task_id) {
     std::scoped_lock admission_lock(admission_mutex_);
     const bool cancelled = scheduler_.cancel(task_id);
     if (cancelled) {
-        {
-            std::scoped_lock lock(lease_mutex_);
-            active_leases_.erase(task_id);
-            pending_leases_.erase(task_id);
-        }
+        active_leases_.erase(task_id);
+        pending_leases_.erase(task_id);
         notify_state_change();
     }
     return cancelled;
@@ -99,10 +112,7 @@ bool TaskAdmissionService::cancel_queued(core::TaskId task_id) {
     std::scoped_lock admission_lock(admission_mutex_);
     const bool cancelled = scheduler_.cancel_queued(task_id);
     if (cancelled) {
-        {
-            std::scoped_lock lock(lease_mutex_);
-            pending_leases_.erase(task_id);
-        }
+        pending_leases_.erase(task_id);
         notify_state_change();
     }
     return cancelled;
@@ -119,13 +129,13 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::claim_next(
     std::optional<core::TaskSnapshot> dispatched;
     {
         std::scoped_lock lock(admission_mutex_);
-        dispatched = scheduler_.dispatch_next();
+        dispatched = record_lease(scheduler_.dispatch_next(), peer);
     }
-    const auto result = record_lease(std::move(dispatched), peer);
-    if (result.has_value()) {
+    if (dispatched.has_value()) {
+        observe_dispatch(dispatched.value());
         notify_state_change();
     }
-    return result;
+    return dispatched;
 }
 
 std::optional<core::TaskSnapshot> TaskAdmissionService::claim(
@@ -133,9 +143,9 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::claim(
     if (task_id == 0 || (bind_leases_to_process_ && !valid_peer_identity(peer))) {
         return std::nullopt;
     }
+    std::unique_lock admission_lock(admission_mutex_);
     auto existing = scheduler_.find(task_id);
     if (existing.has_value() && existing->state == core::TaskState::kRunning) {
-        std::scoped_lock lock(lease_mutex_);
         const auto iterator = active_leases_.find(task_id);
         if (iterator != active_leases_.end() && owner_matches(iterator->second, peer)) {
             return existing;
@@ -148,13 +158,10 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::claim(
     if (!pending_owner_matches(task_id, peer)) {
         return std::nullopt;
     }
-    std::optional<core::TaskSnapshot> dispatched;
-    {
-        std::scoped_lock lock(admission_mutex_);
-        dispatched = scheduler_.dispatch_task(task_id);
-    }
-    const auto result = record_lease(std::move(dispatched), peer);
+    const auto result = record_lease(scheduler_.dispatch_task(task_id), peer);
+    admission_lock.unlock();
     if (result.has_value()) {
+        observe_dispatch(result.value());
         notify_state_change();
     }
     return result;
@@ -173,12 +180,12 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::wait_claim(
     while (true) {
         const std::uint64_t observed_generation = state_generation_;
         state_lock.unlock();
+        std::unique_lock admission_lock(admission_mutex_);
         auto existing = scheduler_.find(task_id);
         if (!existing.has_value()) {
             return std::nullopt;
         }
         if (existing->state == core::TaskState::kRunning) {
-            std::scoped_lock lease_lock(lease_mutex_);
             const auto lease_iterator = active_leases_.find(task_id);
             if ((!bind_leases_to_process_ && lease_timeout_ == std::chrono::milliseconds::zero()) ||
                 (lease_iterator != active_leases_.end() &&
@@ -194,13 +201,10 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::wait_claim(
             return std::nullopt;
         }
 
-        std::optional<core::TaskSnapshot> dispatched;
-        {
-            std::scoped_lock admission_lock(admission_mutex_);
-            dispatched = scheduler_.dispatch_task(task_id);
-        }
-        auto snapshot = record_lease(std::move(dispatched), peer);
+        auto snapshot = record_lease(scheduler_.dispatch_task(task_id), peer);
+        admission_lock.unlock();
         if (snapshot.has_value()) {
+            observe_dispatch(snapshot.value());
             notify_state_change();
             return snapshot;
         }
@@ -226,16 +230,15 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::wait_claim(
 
 std::optional<core::TaskSnapshot> TaskAdmissionService::record_lease(
     std::optional<core::TaskSnapshot> snapshot, std::optional<TaskPeerIdentity> peer) {
-    if (!snapshot.has_value() ||
-        (!bind_leases_to_process_ && lease_timeout_ == std::chrono::milliseconds::zero())) {
-        if (snapshot.has_value()) {
-            observe_dispatch(snapshot.value());
-        }
+    const bool tracks_leases = bind_leases_to_process_ ||
+                               lease_timeout_ != std::chrono::milliseconds::zero() ||
+                               completion_observer_ != nullptr;
+    if (!snapshot.has_value() || !tracks_leases) {
         return snapshot;
     }
     bool pending_owner_valid = true;
+    Clock::time_point submitted_at{};
     {
-        std::scoped_lock lock(lease_mutex_);
         const auto pending_iterator = pending_leases_.find(snapshot->task_id);
         if (bind_leases_to_process_ &&
             (pending_iterator == pending_leases_.end() || pending_iterator->second.reaping ||
@@ -245,6 +248,7 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::record_lease(
                 pending_leases_.erase(pending_iterator);
             }
         } else if (pending_iterator != pending_leases_.end()) {
+            submitted_at = pending_iterator->second.submitted_at;
             pending_leases_.erase(pending_iterator);
         }
     }
@@ -255,15 +259,29 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::record_lease(
     }
     bool lease_recorded = false;
     try {
-        std::scoped_lock lock(lease_mutex_);
+        if (!bind_leases_to_process_ &&
+            active_leases_.find(snapshot->task_id) != active_leases_.end()) {
+            // A repeated external-dispatch notification is idempotent. Do
+            // not fail an already-running task because its observation was
+            // delivered twice.
+            return snapshot;
+        }
+        const auto started_at = Clock::now();
         const auto deadline = lease_timeout_ == std::chrono::milliseconds::zero()
                                   ? Clock::time_point::max()
-                                  : Clock::now() + lease_timeout_;
-        lease_recorded =
-            active_leases_
-                .emplace(snapshot->task_id,
-                         LeaseRecord{.deadline = deadline, .reaping = false, .owner = peer})
-                .second;
+                                  : started_at + lease_timeout_;
+        const auto [iterator, inserted] =
+            active_leases_.emplace(snapshot->task_id, LeaseRecord{.deadline = deadline,
+                                                                  .submitted_at = submitted_at,
+                                                                  .started_at = started_at,
+                                                                  .reaping = false,
+                                                                  .owner = peer});
+        static_cast<void>(iterator);
+        if (!inserted && !bind_leases_to_process_) {
+            // Preserve idempotence if an external dispatch was already recorded.
+            return snapshot;
+        }
+        lease_recorded = inserted;
     } catch (...) {
         lease_recorded = false;
     }
@@ -272,7 +290,6 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::record_lease(
         notify_state_change();
         return std::nullopt;
     }
-    observe_dispatch(snapshot.value());
     return snapshot;
 }
 
@@ -281,7 +298,6 @@ bool TaskAdmissionService::pending_owner_matches(
     if (!bind_leases_to_process_) {
         return true;
     }
-    std::scoped_lock lock(lease_mutex_);
     const auto iterator = pending_leases_.find(task_id);
     return iterator != pending_leases_.end() && !iterator->second.reaping &&
            owner_matches(iterator->second, peer);
@@ -308,7 +324,32 @@ void TaskAdmissionService::observe_dispatch(const core::TaskSnapshot& snapshot) 
     }
 }
 
+void TaskAdmissionService::observe_completion(const core::TaskSnapshot& snapshot,
+                                              core::TaskState terminal_state,
+                                              const std::optional<LeaseRecord>& lease) noexcept {
+    if (completion_observer_ == nullptr) {
+        return;
+    }
+    try {
+        const auto now = Clock::now();
+        const TaskCompletionObservation observation{
+            .task = snapshot,
+            .terminal_state = terminal_state,
+            .queue_wait_microseconds =
+                lease.has_value() ? elapsed_microseconds(lease->submitted_at, lease->started_at)
+                                  : 0,
+            .service_time_microseconds =
+                lease.has_value() ? elapsed_microseconds(lease->started_at, now) : 0};
+        completion_observer_(completion_observer_context_, observation);
+    } catch (...) {
+        // Observability is strictly best effort. A callback or allocation
+        // failure must never change a terminal scheduler transition.
+        return;
+    }
+}
+
 bool TaskAdmissionService::heartbeat(core::TaskId task_id, std::optional<TaskPeerIdentity> peer) {
+    std::scoped_lock admission_lock(admission_mutex_);
     const auto snapshot = scheduler_.find(task_id);
     if (!snapshot.has_value() || snapshot->state != core::TaskState::kRunning) {
         return false;
@@ -316,7 +357,6 @@ bool TaskAdmissionService::heartbeat(core::TaskId task_id, std::optional<TaskPee
     if (!bind_leases_to_process_ && lease_timeout_ == std::chrono::milliseconds::zero()) {
         return true;
     }
-    std::scoped_lock lock(lease_mutex_);
     const auto lease_iterator = active_leases_.find(task_id);
     if (lease_iterator == active_leases_.end() || lease_iterator->second.reaping ||
         !owner_matches(lease_iterator->second, peer)) {
@@ -329,19 +369,28 @@ bool TaskAdmissionService::heartbeat(core::TaskId task_id, std::optional<TaskPee
 }
 
 bool TaskAdmissionService::complete(core::TaskId task_id, std::optional<TaskPeerIdentity> peer) {
+    std::unique_lock admission_lock(admission_mutex_);
     {
-        std::scoped_lock lock(lease_mutex_);
         const auto lease_iterator = active_leases_.find(task_id);
         if (bind_leases_to_process_ && (lease_iterator == active_leases_.end() ||
                                         !owner_matches(lease_iterator->second, peer))) {
             return false;
         }
     }
+    const auto before = completion_observer_ == nullptr ? std::nullopt : scheduler_.find(task_id);
     const bool completed = scheduler_.complete(task_id);
     if (completed) {
+        std::optional<LeaseRecord> lease;
         {
-            std::scoped_lock lock(lease_mutex_);
-            active_leases_.erase(task_id);
+            const auto iterator = active_leases_.find(task_id);
+            if (iterator != active_leases_.end()) {
+                lease = iterator->second;
+                active_leases_.erase(iterator);
+            }
+        }
+        admission_lock.unlock();
+        if (before.has_value()) {
+            observe_completion(before.value(), core::TaskState::kCompleted, lease);
         }
         notify_state_change();
     }
@@ -349,19 +398,28 @@ bool TaskAdmissionService::complete(core::TaskId task_id, std::optional<TaskPeer
 }
 
 bool TaskAdmissionService::fail(core::TaskId task_id, std::optional<TaskPeerIdentity> peer) {
+    std::unique_lock admission_lock(admission_mutex_);
     {
-        std::scoped_lock lock(lease_mutex_);
         const auto lease_iterator = active_leases_.find(task_id);
         if (bind_leases_to_process_ && (lease_iterator == active_leases_.end() ||
                                         !owner_matches(lease_iterator->second, peer))) {
             return false;
         }
     }
+    const auto before = completion_observer_ == nullptr ? std::nullopt : scheduler_.find(task_id);
     const bool failed = scheduler_.fail(task_id);
     if (failed) {
+        std::optional<LeaseRecord> lease;
         {
-            std::scoped_lock lock(lease_mutex_);
-            active_leases_.erase(task_id);
+            const auto iterator = active_leases_.find(task_id);
+            if (iterator != active_leases_.end()) {
+                lease = iterator->second;
+                active_leases_.erase(iterator);
+            }
+        }
+        admission_lock.unlock();
+        if (before.has_value()) {
+            observe_completion(before.value(), core::TaskState::kFailed, lease);
         }
         notify_state_change();
     }
@@ -381,10 +439,10 @@ bool TaskAdmissionService::reap_expired() {
     if (lease_timeout_ == std::chrono::milliseconds::zero()) {
         return false;
     }
+    std::unique_lock admission_lock(admission_mutex_);
     std::optional<core::TaskId> expired_pending_task;
     std::optional<core::TaskId> expired_running_task;
     {
-        std::scoped_lock lock(lease_mutex_);
         const auto now = Clock::now();
         for (auto& [task_id, lease] : pending_leases_) {
             if (!lease.reaping && now >= lease.deadline) {
@@ -411,7 +469,6 @@ bool TaskAdmissionService::reap_expired() {
         const bool cancelled = scheduler_.cancel_queued(expired_pending_task.value());
         bool removed = false;
         {
-            std::scoped_lock lock(lease_mutex_);
             const auto iterator = pending_leases_.find(expired_pending_task.value());
             if (iterator == pending_leases_.end()) {
                 return cancelled;
@@ -425,6 +482,7 @@ bool TaskAdmissionService::reap_expired() {
             }
         }
         if (removed) {
+            admission_lock.unlock();
             notify_state_change();
             return cancelled;
         }
@@ -433,16 +491,20 @@ bool TaskAdmissionService::reap_expired() {
     if (!expired_running_task.has_value()) {
         return false;
     }
+    const auto before = completion_observer_ == nullptr
+                            ? std::nullopt
+                            : scheduler_.find(expired_running_task.value());
     const bool failed = scheduler_.fail(expired_running_task.value());
     const auto snapshot = scheduler_.find(expired_running_task.value());
     bool lease_removed = false;
+    std::optional<LeaseRecord> lease;
     {
-        std::scoped_lock lock(lease_mutex_);
         const auto lease_iterator = active_leases_.find(expired_running_task.value());
         if (lease_iterator == active_leases_.end()) {
             return failed;
         }
         if (failed || !snapshot.has_value() || snapshot->state != core::TaskState::kRunning) {
+            lease = lease_iterator->second;
             active_leases_.erase(lease_iterator);
             lease_removed = true;
         } else {
@@ -454,6 +516,10 @@ bool TaskAdmissionService::reap_expired() {
         }
     }
     if (lease_removed) {
+        admission_lock.unlock();
+        if (failed && before.has_value()) {
+            observe_completion(before.value(), core::TaskState::kFailed, lease);
+        }
         notify_state_change();
     }
     return failed;
@@ -479,6 +545,62 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::find(core::TaskId task_i
 
 core::SchedulerStats TaskAdmissionService::stats() const {
     return scheduler_.stats();
+}
+
+void TaskAdmissionService::observe_external_dispatch(core::TaskId task_id) noexcept {
+    if (task_id == 0 || (dispatch_observer_ == nullptr && completion_observer_ == nullptr)) {
+        return;
+    }
+    std::unique_lock admission_lock(admission_mutex_);
+    if (active_leases_.contains(task_id)) {
+        return;
+    }
+    const auto snapshot = scheduler_.find(task_id);
+    if (!snapshot.has_value() || snapshot->state != core::TaskState::kRunning) {
+        return;
+    }
+
+    std::optional<TaskPeerIdentity> peer;
+    if (bind_leases_to_process_) {
+        const auto iterator = pending_leases_.find(task_id);
+        if (iterator == pending_leases_.end() || iterator->second.reaping) {
+            return;
+        }
+        peer = iterator->second.owner;
+    }
+    const auto recorded = record_lease(snapshot, peer);
+    admission_lock.unlock();
+    if (recorded.has_value()) {
+        observe_dispatch(recorded.value());
+        notify_state_change();
+    }
+}
+
+void TaskAdmissionService::observe_external_completion(core::TaskId task_id,
+                                                       core::TaskState terminal_state) noexcept {
+    if (task_id == 0 || completion_observer_ == nullptr ||
+        (terminal_state != core::TaskState::kCompleted &&
+         terminal_state != core::TaskState::kFailed &&
+         terminal_state != core::TaskState::kCancelled)) {
+        return;
+    }
+    std::unique_lock admission_lock(admission_mutex_);
+    const auto snapshot = scheduler_.find(task_id);
+    if (!snapshot.has_value() || snapshot->state != terminal_state) {
+        return;
+    }
+    std::optional<LeaseRecord> lease;
+    {
+        const auto iterator = active_leases_.find(task_id);
+        if (iterator == active_leases_.end()) {
+            return;
+        }
+        lease = iterator->second;
+        active_leases_.erase(iterator);
+    }
+    admission_lock.unlock();
+    observe_completion(snapshot.value(), terminal_state, lease);
+    notify_state_change();
 }
 
 }  // namespace glimmer::control

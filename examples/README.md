@@ -51,5 +51,7 @@ PyTorch smoke workload compares native, observe, and enforce modes and reports
 latency distributions, throughput, memory peak, and framework/CUDA versions.
 Its synchronized co-location runner starts real inference and training
 processes together and verifies the physical GPU UUID and positive execution
-overlap before reporting a priority result.
+overlap before reporting a priority result. It can also record an explicit
+inference latency target and the control service's queue-wait/service-time
+metrics for repeatable experiments.
 See [`framework_workloads/pytorch_smoke/README.md`](framework_workloads/pytorch_smoke/README.md).

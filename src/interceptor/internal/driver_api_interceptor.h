@@ -25,6 +25,7 @@ void fail_launch_slot(glimmer::core::TaskId task_id) noexcept;
 [[nodiscard]] bool track_launch_completion(glimmer::core::TaskId task_id, CUstream stream) noexcept;
 [[nodiscard]] bool finish_launch_batch_call(glimmer::core::TaskId task_id) noexcept;
 void report_kernel_launch_observed(const KernelLaunchObservation& observation) noexcept;
+void report_graph_launch_observed(const char* api_name, const void* stream) noexcept;
 void report_memory_info_observed(const char* api_name, std::int32_t device,
                                  std::uint64_t total_bytes, std::uint64_t free_bytes,
                                  std::uint64_t physical_total_bytes,
@@ -42,6 +43,11 @@ void report_launch_timing_observed(glimmer::core::TaskId task_id,
                                                unsigned int shared_memory_bytes, CUstream stream,
                                                void** kernel_parameters, void** extra,
                                                bool per_thread_default_stream);
+[[nodiscard]] CUresult intercept_graph_launch(CUgraphExec graph_exec, CUstream stream,
+                                              bool per_thread_default_stream);
+[[nodiscard]] CUresult intercept_launch_kernel_ex(const CUlaunchConfig* config, CUfunction function,
+                                                  void** kernel_parameters, void** extra,
+                                                  bool per_thread_default_stream);
 [[nodiscard]] CUresult intercept_mem_alloc(CUdeviceptr* device_pointer, std::size_t memory_bytes);
 [[nodiscard]] CUresult intercept_mem_alloc_managed(CUdeviceptr* device_pointer,
                                                    std::size_t memory_bytes, unsigned int flags);

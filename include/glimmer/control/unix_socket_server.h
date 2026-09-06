@@ -63,7 +63,6 @@ class UnixSocketControlServer final {
    private:
     [[nodiscard]] bool handle_client(int client_fd) noexcept;
     [[nodiscard]] bool authenticate_client(int client_fd, TaskPeerIdentity* peer) const noexcept;
-    [[nodiscard]] bool read_line(int client_fd, std::string* line) const noexcept;
     [[nodiscard]] bool write_response(int client_fd, const std::string& response) const noexcept;
     void register_client(int client_fd) noexcept;
     void unregister_client(int client_fd) noexcept;

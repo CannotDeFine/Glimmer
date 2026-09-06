@@ -52,6 +52,7 @@ section() {
 
 run_preset() {
     local preset="$1"
+    shift
 
     section "${preset}: configure"
     cmake --preset "${preset}"
@@ -65,7 +66,7 @@ run_preset() {
             "${COLOR_YELLOW}" "${preset}" "${COLOR_RESET}" >&2
     fi
     section "${preset}: tests"
-    ctest --preset "${preset}" --output-on-failure
+    ctest --preset "${preset}" --output-on-failure "$@"
 }
 
 section "repository: whitespace check"
@@ -98,6 +99,15 @@ if command -v nvcc >/dev/null 2>&1 && command -v clang-tidy >/dev/null 2>&1; the
     run_preset cuda-lint
 else
     printf '%sWARNING: CUDA Toolkit or clang-tidy is unavailable; skipping cuda-lint preset.%s\n' \
+        "${COLOR_YELLOW}" "${COLOR_RESET}" >&2
+fi
+
+if command -v nvcc >/dev/null 2>&1; then
+    # GPU integration tests follow the *_gpu_test naming convention. Keep
+    # optimized no-GPU regressions in the normal gate without requiring a GPU.
+    run_preset cuda-perf -E '_gpu_test$'
+else
+    printf '%sWARNING: CUDA Toolkit is unavailable; skipping optimized CUDA checks.%s\n' \
         "${COLOR_YELLOW}" "${COLOR_RESET}" >&2
 fi
 

@@ -34,6 +34,30 @@ failure because requests may have side effects. A future daemon may add
 service supervision, authorization policy, rate limiting, backpressure, and
 recovery without changing the wire format.
 
+### Bounded buffered reads
+
+Both adapters share private connection-local framing under
+`src/control/internal/`. A receive reads a bounded chunk, scans for a newline
+in memory, and retains any remaining bytes for the next request or response.
+Each reader retains at most 257 bytes of read-ahead; each output is bounded to
+the 256-byte protocol limit plus one byte used to detect an oversized line.
+The newline counts toward that limit. The buffer belongs to the connection's
+worker thread, not to the scheduler or a process-global receive queue.
+
+Changing the client's socket path, timeout, or process identity resets both
+the descriptor and read-ahead. A failed request is still never retried. A
+non-empty, bounded EOF-terminated line remains accepted for codec
+compatibility; an empty EOF closes the stream. Partial-line timeouts fail the
+connection, while an authenticated idle server connection may wait through
+multiple I/O timeouts. Shutdown interrupts idle readers and prevents buffered
+requests from starting another read after shutdown is observed.
+
+The service returns one protocol error for an oversized request, then closes
+the connection. It must not reinterpret that request's tail as another
+operation. The client rejects oversized responses, including the previous
+off-by-one case of 256 content bytes followed by a newline. These are framing
+corrections, not new operations, scheduler policy, or automatic RPC retries.
+
 ## Consequences
 
 Local clients get a narrow, authenticated control channel with no new runtime

@@ -53,6 +53,8 @@ struct LaunchCompletionObservation {
 void report_diagnostic(const char* message) noexcept;
 void report_kernel_launch_diagnostic(const KernelLaunchObservation& observation,
                                      std::uint64_t launch_count) noexcept;
+void report_graph_launch_diagnostic(const char* api_name, const void* stream,
+                                    std::uint64_t launch_count) noexcept;
 void report_memory_info_diagnostic(const MemoryInfoObservation& observation) noexcept;
 void report_launch_timing_diagnostic(const LaunchTimingObservation& observation) noexcept;
 void report_launch_completion_diagnostic(const LaunchCompletionObservation& observation) noexcept;

@@ -149,12 +149,12 @@ common_args=(
 if ((trace)); then
     trace_environment=(GLIMMER_TRACE_KERNEL_LAUNCHES=1)
 else
-    trace_environment=(-u GLIMMER_TRACE_KERNEL_LAUNCHES)
+    trace_environment=()
 fi
 if ((trace_timings)); then
     timing_environment=(GLIMMER_TRACE_LAUNCH_TIMINGS=1)
 else
-    timing_environment=(-u GLIMMER_TRACE_LAUNCH_TIMINGS)
+    timing_environment=()
 fi
 
 clean_environment=(
@@ -176,7 +176,7 @@ clean_environment=(
 
 case "$mode" in
     native)
-        env "${clean_environment[@]}" "${timing_environment[@]}" -u LD_PRELOAD \
+        env "${clean_environment[@]}" -u LD_PRELOAD "${timing_environment[@]}" \
             "$python_executable" "${common_args[@]}"
         ;;
     observe)

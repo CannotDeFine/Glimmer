@@ -93,6 +93,21 @@ cmake --build --preset cuda-gpu
 ctest --preset cuda-gpu --output-on-failure
 ```
 
+For performance experiments, use the separate optimized build with profiling
+symbols; `cuda-gpu` remains a Debug configuration:
+
+```sh
+cmake --preset cuda-perf
+cmake --build --preset cuda-perf -j2
+ctest --preset cuda-perf --output-on-failure
+```
+
+Pass `--build-dir build/cuda-perf` to example runners. The PyTorch example
+also provides an [uncontended overhead baseline](examples/framework_workloads/pytorch_smoke/README.md#optimized-uncontended-overhead-baseline).
+Completing a benchmark is not evidence of a scheduling benefit.
+`scripts/check.sh` includes the optimized no-GPU regressions when `nvcc` is
+available; the full GPU suite above remains opt-in.
+
 The GPU preset includes an embedded Driver-PTX workload, a Runtime kernel
 compiled with `nvcc`, the synchronous `glimmer_cuda_workload` baseline, and a
 Runtime workload matrix covering async/pool, managed, pitched, and
@@ -112,7 +127,9 @@ transparent priority scheduling, see
 For an optional real-framework smoke test using public PyTorch CUDA APIs, see
 [`examples/framework_workloads/pytorch_smoke/README.md`](examples/framework_workloads/pytorch_smoke/README.md).
 It remains outside the CMake build because PyTorch is supplied by the host
-environment.
+environment. The co-location runner can record an inference latency target,
+target misses, and control-service queue/service metrics for repeatable
+priority experiments.
 
 Run the real Runtime workload matrix with the interceptor:
 
@@ -146,7 +163,7 @@ is an opt-in diagnostic stream, not a stable metrics export.
 
 ### Transparent launch scheduling
 
-The preload library can also admit covered CUDA kernel launches through a
+The preload library can also admit covered CUDA kernel and graph launches through a
 launch gate. In enforce mode, a launch call waits for an
 available slot, forwards the original CUDA call, and records a non-timing
 event on the same stream. The slot is released when that event completes. A
@@ -170,8 +187,9 @@ transparent launch when the `priority` policy is selected; larger values run
 first and the default is `0`.
 `GLIMMER_SCHEDULER_TENANT_ID` and `GLIMMER_SCHEDULER_WEIGHT` identify and
 weight the queue; the tenant falls back to
-`GLIMMER_QUOTA_TENANT_ID`. This path does not preempt running kernels or capture
-CUDA graph launches. To coordinate multiple
+`GLIMMER_QUOTA_TENANT_ID`. This path does not preempt running kernels or inspect
+graph nodes. Graph launches are admitted and tracked as one task on their
+supplied stream. To coordinate multiple
 processes, set `GLIMMER_SCHEDULER_CONTROL_SOCKET` to a running remote control
 service socket. The gate then submits a task-specific lease before each
 covered launch, renews long-running leases while their events are pending, and
@@ -187,6 +205,10 @@ or fairness decisions by up to the batch size; keep latency-sensitive inference
 at `1`. A batch closes on its final successfully tracked launch, and any launch
 or event failure fails the whole batch. Transport or lease failures fail the
 launch closed; leaving the variable unset preserves the process-local default.
+`GLIMMER_SCHEDULER_PRIORITY_RESERVED_SLOTS` reserves launch slots for
+priorities at or above `GLIMMER_SCHEDULER_PRIORITY_THRESHOLD` (default `1`).
+The reservation applies only to the `priority` policy and is disabled when the
+slot count is `0`; lower-priority launches cannot borrow reserved capacity.
 
 ### Task-scoped memory isolation
 
@@ -319,6 +341,52 @@ queued task first; and `priority` dispatches the largest priority first while
 preserving submission order for ties. Priority is strict and can starve lower
 priority work under sustained load. Policies control task-boundary submission
 order and do not preempt a kernel that is already running.
+
+For latency-sensitive co-location, reserve capacity explicitly:
+
+```sh
+./build/debug/bin/glimmer_control_service \
+    --socket /tmp/glimmer-control-priority.sock \
+    --quota-bytes 8388608 \
+    --execution-mode remote \
+    --max-concurrent-tasks 2 \
+    --scheduler-policy priority \
+    --priority-reserved-slots 1 \
+    --priority-threshold 100
+```
+
+`--priority-reserved-slots N` keeps N running slots available for tasks whose
+priority is at least `--priority-threshold`. Lower-priority tasks use only the
+remaining slots, even when the reserved capacity is idle. This setting is
+disabled by default and is a best-effort latency-isolation mechanism; it does
+not preempt a kernel that is already running.
+
+For workloads whose latency changes over time, the service can adapt that
+reservation from measured high-priority queue wait:
+
+```sh
+./build/debug/bin/glimmer_control_service \
+    --socket /tmp/glimmer-control-adaptive.sock \
+    --quota-bytes 8388608 \
+    --execution-mode remote \
+    --max-concurrent-tasks 2 \
+    --scheduler-policy priority \
+    --priority-threshold 100 \
+    --adaptive-slo-target-queue-us 500 \
+    --adaptive-slo-window 32 \
+    --adaptive-slo-max-reserved-slots 1 \
+    --trace-scheduler
+```
+
+`--adaptive-slo-target-queue-us N` enables feedback. After each observation
+window, at least 25 percent of high-priority tasks exceeding the target adds
+one reserved slot; a lower violation ratio removes one slot. The configured initial
+reservation is retained until the first complete window, and capacity is
+clamped by `--adaptive-slo-max-reserved-slots`. Set the target to `0` to leave
+the static scheduler unchanged. Adaptive feedback is a bounded task-boundary
+controller, not a hard real-time guarantee: running CUDA kernels are never
+preempted, and remote workers must still report `COMPLETE` or `FAIL`. Without
+new high-priority completions, the reservation does not decay on its own.
 
 `--bind-leases-to-process` binds submission, task-specific claim,
 `HEARTBEAT`, `COMPLETE`, and `FAIL` to an authenticated Linux Unix-socket peer

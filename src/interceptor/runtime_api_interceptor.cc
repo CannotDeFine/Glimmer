@@ -5,6 +5,7 @@
 
 #include "glimmer/control/launch_gate.h"
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <dlfcn.h>
@@ -15,6 +16,12 @@
 #endif
 #ifdef cudaLaunchKernel
 #undef cudaLaunchKernel
+#endif
+#ifdef cudaGraphLaunch
+#undef cudaGraphLaunch
+#endif
+#ifdef cudaLaunchKernelExC
+#undef cudaLaunchKernelExC
 #endif
 
 namespace {
@@ -56,6 +63,7 @@ using glimmer::interceptor::RuntimeGraphicsResourceSetMapFlagsFunction;
 using glimmer::interceptor::RuntimeGraphicsSubResourceGetMappedArrayFunction;
 using glimmer::interceptor::RuntimeGraphicsUnmapResourcesFunction;
 using glimmer::interceptor::RuntimeGraphicsUnregisterResourceFunction;
+using glimmer::interceptor::RuntimeGraphLaunchFunction;
 using glimmer::interceptor::RuntimeImportExternalMemoryFunction;
 using glimmer::interceptor::RuntimeIpcCloseMemHandleFunction;
 using glimmer::interceptor::RuntimeIpcGetMemHandleFunction;
@@ -77,6 +85,8 @@ using RuntimeInternalLaunchKernelFunction = cudaError_t (*)(cudaKernel_t kernel,
                                                             dim3 block_dim, void** arguments,
                                                             std::size_t shared_memory_bytes,
                                                             cudaStream_t stream);
+using RuntimeLaunchKernelExFunction = cudaError_t (*)(const cudaLaunchConfig_t* config,
+                                                      const void* function, void** arguments);
 using glimmer::interceptor::RuntimeMemGetDefaultMemPoolFunction;
 using glimmer::interceptor::RuntimeMemGetInfoFunction;
 using glimmer::interceptor::RuntimeMemGetMemPoolFunction;
@@ -107,7 +117,8 @@ template <typename Invoke>
 [[nodiscard]] cudaError_t intercept_runtime_kernel_launch(const char* api_name, bool is_reentrant,
                                                           dim3 grid_dim, dim3 block_dim,
                                                           std::size_t shared_memory_bytes,
-                                                          cudaStream_t stream, Invoke&& invoke) {
+                                                          cudaStream_t stream, Invoke&& invoke,
+                                                          bool per_thread_default_stream = false) {
     if (is_reentrant) {
         return invoke();
     }
@@ -142,7 +153,9 @@ template <typename Invoke>
                                                 ? std::chrono::steady_clock::now()
                                                 : std::chrono::steady_clock::time_point{};
         event_tracking_succeeded = glimmer::interceptor::track_launch_completion(
-            launch_task.value(), reinterpret_cast<CUstream>(stream));
+            launch_task.value(), per_thread_default_stream && stream == nullptr
+                                     ? CU_STREAM_PER_THREAD
+                                     : reinterpret_cast<CUstream>(stream));
         if (trace_launch_timings) {
             event_tracking_nanoseconds =
                 elapsed_nanoseconds(event_tracking_started, std::chrono::steady_clock::now());
@@ -448,6 +461,26 @@ resolve_runtime_graph_add_mem_alloc_node() noexcept {
     return function;
 }
 
+[[nodiscard]] RuntimeGraphLaunchFunction resolve_runtime_graph_launch() noexcept {
+    static RuntimeGraphLaunchFunction function = []() noexcept {
+        const DlsymFunction real_dlsym = glimmer::interceptor::resolve_real_dlsym();
+        return real_dlsym == nullptr ? nullptr
+                                     : reinterpret_cast<RuntimeGraphLaunchFunction>(
+                                           real_dlsym(RTLD_NEXT, "cudaGraphLaunch"));
+    }();
+    return function;
+}
+
+[[nodiscard]] RuntimeGraphLaunchFunction resolve_runtime_graph_launch_ptsz() noexcept {
+    static RuntimeGraphLaunchFunction function = []() noexcept {
+        const DlsymFunction real_dlsym = glimmer::interceptor::resolve_real_dlsym();
+        return real_dlsym == nullptr ? nullptr
+                                     : reinterpret_cast<RuntimeGraphLaunchFunction>(
+                                           real_dlsym(RTLD_NEXT, "cudaGraphLaunch_ptsz"));
+    }();
+    return function;
+}
+
 [[nodiscard]] RuntimeGetDeviceFunction resolve_runtime_get_device() noexcept {
     static RuntimeGetDeviceFunction function = []() noexcept {
         const DlsymFunction real_dlsym = glimmer::interceptor::resolve_real_dlsym();
@@ -476,6 +509,45 @@ resolve_runtime_graph_add_mem_alloc_node() noexcept {
                                            real_dlsym(RTLD_NEXT, "cudaLaunchKernel"));
     }();
     return function;
+}
+
+[[nodiscard]] RuntimeLaunchKernelExFunction resolve_runtime_launch_kernel_ex(
+    bool per_thread_default_stream) noexcept {
+    static const auto functions = [] {
+        const DlsymFunction real_dlsym = glimmer::interceptor::resolve_real_dlsym();
+        return std::array<RuntimeLaunchKernelExFunction, 2>{
+            real_dlsym == nullptr ? nullptr
+                                  : reinterpret_cast<RuntimeLaunchKernelExFunction>(
+                                        real_dlsym(RTLD_NEXT, "cudaLaunchKernelExC")),
+            real_dlsym == nullptr ? nullptr
+                                  : reinterpret_cast<RuntimeLaunchKernelExFunction>(
+                                        real_dlsym(RTLD_NEXT, "cudaLaunchKernelExC_ptsz"))};
+    }();
+    return functions[per_thread_default_stream ? 1 : 0];
+}
+
+[[nodiscard]] cudaError_t intercept_runtime_kernel_launch_ex(const cudaLaunchConfig_t* config,
+                                                             const void* function, void** arguments,
+                                                             bool per_thread_default_stream) {
+    const bool is_reentrant = glimmer::interceptor::is_inside_runtime_call() ||
+                              glimmer::interceptor::is_inside_driver_call();
+    RuntimeCallScope scope;
+    try {
+        if (config == nullptr) {
+            return cudaErrorInvalidValue;
+        }
+        const auto real_launch = resolve_runtime_launch_kernel_ex(per_thread_default_stream);
+        if (real_launch == nullptr) {
+            return cudaErrorNotSupported;
+        }
+        return intercept_runtime_kernel_launch(
+            per_thread_default_stream ? "cudaLaunchKernelExC_ptsz" : "cudaLaunchKernelExC",
+            is_reentrant, config->gridDim, config->blockDim, config->dynamicSmemBytes,
+            config->stream, [&] { return real_launch(config, function, arguments); },
+            per_thread_default_stream);
+    } catch (...) {
+        return cudaErrorUnknown;
+    }
 }
 
 [[nodiscard]] RuntimeLaunchKernelFunction resolve_runtime_launch_kernel_ptsz() noexcept {
@@ -1290,6 +1362,37 @@ extern "C" cudaError_t CUDARTAPI cudaGraphAddMemAllocNode(
     }
 }
 
+extern "C" cudaError_t CUDARTAPI cudaGraphLaunch(cudaGraphExec_t graph_exec, cudaStream_t stream) {
+    const bool is_reentrant = glimmer::interceptor::is_inside_runtime_call();
+    RuntimeCallScope scope;
+    try {
+        const RuntimeGraphLaunchFunction real_launch = resolve_runtime_graph_launch();
+        if (is_reentrant) {
+            return real_launch == nullptr ? cudaErrorNotSupported : real_launch(graph_exec, stream);
+        }
+        return glimmer::interceptor::intercept_runtime_graph_launch("cudaGraphLaunch", graph_exec,
+                                                                    stream, real_launch);
+    } catch (...) {
+        return cudaErrorUnknown;
+    }
+}
+
+extern "C" cudaError_t CUDARTAPI cudaGraphLaunch_ptsz(cudaGraphExec_t graph_exec,
+                                                      cudaStream_t stream) {
+    const bool is_reentrant = glimmer::interceptor::is_inside_runtime_call();
+    RuntimeCallScope scope;
+    try {
+        const RuntimeGraphLaunchFunction real_launch = resolve_runtime_graph_launch_ptsz();
+        if (is_reentrant) {
+            return real_launch == nullptr ? cudaErrorNotSupported : real_launch(graph_exec, stream);
+        }
+        return glimmer::interceptor::intercept_runtime_graph_launch(
+            "cudaGraphLaunch_ptsz", graph_exec, stream, real_launch, true);
+    } catch (...) {
+        return cudaErrorUnknown;
+    }
+}
+
 extern "C" cudaError_t CUDARTAPI cudaMemGetInfo(std::size_t* free_bytes, std::size_t* total_bytes) {
     if (free_bytes == nullptr || total_bytes == nullptr) {
         return cudaErrorInvalidValue;
@@ -1808,6 +1911,16 @@ extern "C" cudaError_t CUDARTAPI cudaLaunchKernel(const void* function, dim3 gri
     }
 }
 
+extern "C" cudaError_t CUDARTAPI cudaLaunchKernelExC(const cudaLaunchConfig_t* config,
+                                                     const void* function, void** arguments) {
+    return intercept_runtime_kernel_launch_ex(config, function, arguments, false);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaLaunchKernelExC_ptsz(const cudaLaunchConfig_t* config,
+                                                          const void* function, void** arguments) {
+    return intercept_runtime_kernel_launch_ex(config, function, arguments, true);
+}
+
 extern "C" cudaError_t CUDARTAPI cudaLaunchKernel_ptsz(const void* function, dim3 grid_dim,
                                                        dim3 block_dim, void** arguments,
                                                        std::size_t shared_memory_bytes,
@@ -1824,7 +1937,8 @@ extern "C" cudaError_t CUDARTAPI cudaLaunchKernel_ptsz(const void* function, dim
             [real_launch, function, grid_dim, block_dim, arguments, shared_memory_bytes, stream] {
                 return real_launch(function, grid_dim, block_dim, arguments, shared_memory_bytes,
                                    stream);
-            });
+            },
+            true);
     } catch (...) {
         return cudaErrorUnknown;
     }
@@ -1873,7 +1987,8 @@ extern "C" cudaError_t CUDARTAPI __cudaLaunchKernel_ptsz(cudaKernel_t kernel, di
             [real_launch, kernel, grid_dim, block_dim, arguments, shared_memory_bytes, stream] {
                 return real_launch(kernel, grid_dim, block_dim, arguments, shared_memory_bytes,
                                    stream);
-            });
+            },
+            true);
     } catch (...) {
         return cudaErrorUnknown;
     }

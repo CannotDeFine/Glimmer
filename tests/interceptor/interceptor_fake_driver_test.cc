@@ -41,6 +41,7 @@ using LaunchKernelFunction = CUresult (*)(CUfunction function, unsigned int grid
                                           unsigned int block_dim_z,
                                           unsigned int shared_memory_bytes, CUstream stream,
                                           void** kernel_parameters, void** extra);
+using GraphLaunchFunction = CUresult (*)(CUgraphExec graph_exec, CUstream stream);
 using AllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes);
 using AsyncAllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes,
                                         CUstream stream);
@@ -178,6 +179,7 @@ using RuntimeLaunchKernelFunction = cudaError_t (*)(const void* function, dim3 g
                                                     dim3 block_dim, void** arguments,
                                                     std::size_t shared_memory_bytes,
                                                     cudaStream_t stream);
+using RuntimeGraphLaunchFunction = cudaError_t (*)(cudaGraphExec_t graph_exec, cudaStream_t stream);
 using RuntimeInternalLaunchKernelFunction = cudaError_t (*)(cudaKernel_t kernel, dim3 grid_dim,
                                                             dim3 block_dim, void** arguments,
                                                             std::size_t shared_memory_bytes,
@@ -294,7 +296,7 @@ bool expect(bool condition, std::string_view message) {
     if (condition) {
         return true;
     }
-    std::cerr << message << '\n';
+    std::cerr << "test assertion failed: " << message << '\n';
     return false;
 }
 
@@ -668,6 +670,9 @@ int main() {
         resolve_default<LaunchKernelFunction>("cuLaunchKernel");
     const LaunchKernelFunction launch_kernel_ptsz =
         resolve_default<LaunchKernelFunction>("cuLaunchKernel_ptsz");
+    const GraphLaunchFunction graph_launch = resolve_default<GraphLaunchFunction>("cuGraphLaunch");
+    const GraphLaunchFunction graph_launch_ptsz =
+        resolve_default<GraphLaunchFunction>("cuGraphLaunch_ptsz");
     const AllocFunction allocate = resolve_default<AllocFunction>("cuMemAlloc_v2");
     const FreeFunction release = resolve_default<FreeFunction>("cuMemFree_v2");
     const AsyncAllocFunction async_allocate =
@@ -821,27 +826,28 @@ int main() {
         resolve_default<NvmlDeviceGetMemoryInfoV2Function>("nvmlDeviceGetMemoryInfo_v2");
     all_passed &= expect(
         init != nullptr && launch_kernel != nullptr && launch_kernel_ptsz != nullptr &&
-            allocate != nullptr && release != nullptr && async_allocate != nullptr &&
-            async_allocate_ptsz != nullptr && pool_async_allocate != nullptr &&
-            pool_async_allocate_ptsz != nullptr && vmm_create != nullptr &&
-            vmm_release != nullptr && address_reserve != nullptr && address_free != nullptr &&
-            map != nullptr && map_array_async != nullptr && unmap != nullptr &&
-            set_access != nullptr && get_address_range != nullptr && get_access != nullptr &&
-            export_handle != nullptr && import_handle != nullptr && ipc_get_handle != nullptr &&
-            ipc_open_handle != nullptr && ipc_open_handle_v2 != nullptr &&
-            ipc_close_handle != nullptr && get_granularity != nullptr &&
-            import_external_memory != nullptr && get_external_buffer != nullptr &&
-            get_external_mipmap != nullptr && destroy_external_memory != nullptr &&
-            array_create != nullptr && array_create_v2 != nullptr && array_3d_create != nullptr &&
-            array_destroy != nullptr && mipmapped_array_create != nullptr &&
-            mipmapped_array_destroy != nullptr && graphics_unregister_resource != nullptr &&
-            graphics_get_mapped_array != nullptr && graphics_get_mapped_mipmap != nullptr &&
-            graphics_get_mapped_pointer != nullptr && graphics_set_map_flags != nullptr &&
-            graphics_map_resources != nullptr && graphics_unmap_resources != nullptr &&
-            get_properties != nullptr && retain_handle != nullptr && pool_trim != nullptr &&
-            pool_set_attribute != nullptr && pool_get_attribute != nullptr &&
-            pool_set_access != nullptr && pool_get_access != nullptr && pool_create != nullptr &&
-            pool_destroy != nullptr && device_get_pool != nullptr && device_set_pool != nullptr &&
+            graph_launch != nullptr && graph_launch_ptsz != nullptr && allocate != nullptr &&
+            release != nullptr && async_allocate != nullptr && async_allocate_ptsz != nullptr &&
+            pool_async_allocate != nullptr && pool_async_allocate_ptsz != nullptr &&
+            vmm_create != nullptr && vmm_release != nullptr && address_reserve != nullptr &&
+            address_free != nullptr && map != nullptr && map_array_async != nullptr &&
+            unmap != nullptr && set_access != nullptr && get_address_range != nullptr &&
+            get_access != nullptr && export_handle != nullptr && import_handle != nullptr &&
+            ipc_get_handle != nullptr && ipc_open_handle != nullptr &&
+            ipc_open_handle_v2 != nullptr && ipc_close_handle != nullptr &&
+            get_granularity != nullptr && import_external_memory != nullptr &&
+            get_external_buffer != nullptr && get_external_mipmap != nullptr &&
+            destroy_external_memory != nullptr && array_create != nullptr &&
+            array_create_v2 != nullptr && array_3d_create != nullptr && array_destroy != nullptr &&
+            mipmapped_array_create != nullptr && mipmapped_array_destroy != nullptr &&
+            graphics_unregister_resource != nullptr && graphics_get_mapped_array != nullptr &&
+            graphics_get_mapped_mipmap != nullptr && graphics_get_mapped_pointer != nullptr &&
+            graphics_set_map_flags != nullptr && graphics_map_resources != nullptr &&
+            graphics_unmap_resources != nullptr && get_properties != nullptr &&
+            retain_handle != nullptr && pool_trim != nullptr && pool_set_attribute != nullptr &&
+            pool_get_attribute != nullptr && pool_set_access != nullptr &&
+            pool_get_access != nullptr && pool_create != nullptr && pool_destroy != nullptr &&
+            device_get_pool != nullptr && device_set_pool != nullptr &&
             device_get_default_pool != nullptr && get_default_pool != nullptr &&
             get_pool != nullptr && set_pool != nullptr && pool_export_handle != nullptr &&
             pool_import_handle != nullptr && pool_export_pointer != nullptr &&
@@ -868,6 +874,15 @@ int main() {
     all_passed &= expect(
         launch_kernel_ptsz(nullptr, 1, 1, 1, 1, 1, 1, 0, nullptr, nullptr, nullptr) == CUDA_SUCCESS,
         "fake cuLaunchKernel_ptsz forwarding failed");
+    all_passed &=
+        expect(graph_launch(reinterpret_cast<CUgraphExec>(0x76000000U), nullptr) == CUDA_SUCCESS,
+               "fake cuGraphLaunch forwarding failed");
+    all_passed &= expect(
+        graph_launch_ptsz(reinterpret_cast<CUgraphExec>(0x76000000U), nullptr) == CUDA_SUCCESS,
+        "fake cuGraphLaunch_ptsz forwarding failed");
+    all_passed &= expect(graph_launch(nullptr, nullptr) == CUDA_ERROR_INVALID_VALUE &&
+                             graph_launch_ptsz(nullptr, nullptr) == CUDA_ERROR_INVALID_VALUE,
+                         "null graph launch handles were not rejected");
 
     std::size_t total_bytes = 0;
     all_passed &= expect(allocate(nullptr, 1) == CUDA_ERROR_INVALID_VALUE,
@@ -1209,6 +1224,9 @@ int main() {
         all_passed &=
             expect(dlsym(cuda_handle, "cuMemCreate") == reinterpret_cast<void*>(vmm_create),
                    "explicit CUDA handle did not return the VMM wrapper");
+        all_passed &=
+            expect(dlsym(cuda_handle, "cuGraphLaunch") == reinterpret_cast<void*>(graph_launch),
+                   "explicit CUDA handle did not return the graph launch wrapper");
         all_passed &= expect(
             dlsym(cuda_handle, "cuMemAddressReserve") == reinterpret_cast<void*>(address_reserve),
             "explicit CUDA handle did not return the VMM address wrapper");
@@ -1243,6 +1261,10 @@ int main() {
         resolve_default<RuntimeLaunchKernelFunction>("cudaLaunchKernel");
     const RuntimeLaunchKernelFunction runtime_launch_kernel_ptsz =
         resolve_default<RuntimeLaunchKernelFunction>("cudaLaunchKernel_ptsz");
+    const RuntimeGraphLaunchFunction runtime_graph_launch =
+        resolve_default<RuntimeGraphLaunchFunction>("cudaGraphLaunch");
+    const RuntimeGraphLaunchFunction runtime_graph_launch_ptsz =
+        resolve_default<RuntimeGraphLaunchFunction>("cudaGraphLaunch_ptsz");
     // NOLINTBEGIN(bugprone-reserved-identifier, readability-identifier-naming): preserve CUDA
     // compiler ABI names.
     const RuntimeInternalLaunchKernelFunction runtime_internal_launch_kernel =
@@ -1367,17 +1389,17 @@ int main() {
             runtime_pitch_allocate != nullptr && runtime_3d_allocate != nullptr &&
             runtime_async_allocate != nullptr && runtime_launch_kernel != nullptr &&
             runtime_launch_kernel_ptsz != nullptr && runtime_internal_launch_kernel != nullptr &&
-            runtime_internal_launch_kernel_ptsz != nullptr &&
-            runtime_async_allocate_ptsz != nullptr && runtime_release != nullptr &&
-            runtime_pool_async_allocate != nullptr && runtime_pool_async_allocate_ptsz != nullptr &&
-            runtime_async_release != nullptr && runtime_async_release_ptsz != nullptr &&
-            runtime_ipc_get_handle != nullptr && runtime_ipc_open_handle != nullptr &&
-            runtime_ipc_close_handle != nullptr && runtime_device_synchronize != nullptr &&
-            runtime_import_external_memory != nullptr && runtime_get_external_buffer != nullptr &&
-            runtime_get_external_mipmap != nullptr && runtime_destroy_external_memory != nullptr &&
-            runtime_array_create != nullptr && runtime_array_3d_create != nullptr &&
-            runtime_mipmapped_array_create != nullptr && runtime_array_destroy != nullptr &&
-            runtime_mipmapped_array_destroy != nullptr &&
+            runtime_internal_launch_kernel_ptsz != nullptr && runtime_graph_launch != nullptr &&
+            runtime_graph_launch_ptsz != nullptr && runtime_async_allocate_ptsz != nullptr &&
+            runtime_release != nullptr && runtime_pool_async_allocate != nullptr &&
+            runtime_pool_async_allocate_ptsz != nullptr && runtime_async_release != nullptr &&
+            runtime_async_release_ptsz != nullptr && runtime_ipc_get_handle != nullptr &&
+            runtime_ipc_open_handle != nullptr && runtime_ipc_close_handle != nullptr &&
+            runtime_device_synchronize != nullptr && runtime_import_external_memory != nullptr &&
+            runtime_get_external_buffer != nullptr && runtime_get_external_mipmap != nullptr &&
+            runtime_destroy_external_memory != nullptr && runtime_array_create != nullptr &&
+            runtime_array_3d_create != nullptr && runtime_mipmapped_array_create != nullptr &&
+            runtime_array_destroy != nullptr && runtime_mipmapped_array_destroy != nullptr &&
             runtime_graphics_unregister_resource != nullptr &&
             runtime_graphics_set_map_flags != nullptr &&
             runtime_graphics_map_resources != nullptr &&
@@ -1414,6 +1436,10 @@ int main() {
         all_passed &= expect(dlsym(runtime_handle, "cudaLaunchKernel") ==
                                  reinterpret_cast<void*>(runtime_launch_kernel),
                              "explicit CUDA Runtime handle did not return the launch wrapper");
+        all_passed &=
+            expect(dlsym(runtime_handle, "cudaGraphLaunch") ==
+                       reinterpret_cast<void*>(runtime_graph_launch),
+                   "explicit CUDA Runtime handle did not return the graph launch wrapper");
         all_passed &=
             expect(dlsym(runtime_handle, "__cudaLaunchKernel_ptsz") ==
                        reinterpret_cast<void*>(runtime_internal_launch_kernel_ptsz),
@@ -1534,6 +1560,15 @@ int main() {
     all_passed &= expect(runtime_launch_kernel_ptsz(nullptr, dim3{1, 1, 1}, dim3{1, 1, 1}, nullptr,
                                                     0, nullptr) == cudaSuccess,
                          "Runtime cudaLaunchKernel_ptsz forwarding failed");
+    all_passed &= expect(runtime_graph_launch(reinterpret_cast<cudaGraphExec_t>(0x76000000U),
+                                              nullptr) == cudaSuccess,
+                         "Runtime cudaGraphLaunch forwarding failed");
+    all_passed &= expect(runtime_graph_launch_ptsz(reinterpret_cast<cudaGraphExec_t>(0x76000000U),
+                                                   nullptr) == cudaSuccess,
+                         "Runtime cudaGraphLaunch_ptsz forwarding failed");
+    all_passed &= expect(runtime_graph_launch(nullptr, nullptr) == cudaErrorInvalidValue &&
+                             runtime_graph_launch_ptsz(nullptr, nullptr) == cudaErrorInvalidValue,
+                         "null Runtime graph launch handles were not rejected");
     all_passed &= expect(runtime_internal_launch_kernel(nullptr, dim3{1, 1, 1}, dim3{1, 1, 1},
                                                         nullptr, 0, nullptr) == cudaSuccess,
                          "Runtime __cudaLaunchKernel forwarding failed");
@@ -1933,6 +1968,20 @@ int main() {
                                    CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM) == CUDA_SUCCESS &&
                    queried_symbol == reinterpret_cast<void*>(launch_kernel_ptsz),
                "cuGetProcAddress did not return the PTDS kernel-launch wrapper");
+    queried_symbol = nullptr;
+    all_passed &= expect(
+        legacy_get_proc != nullptr &&
+            legacy_get_proc("cuGraphLaunch", &queried_symbol, CUDA_VERSION, 0) == CUDA_SUCCESS &&
+            queried_symbol == reinterpret_cast<void*>(graph_launch),
+        "legacy cuGetProcAddress did not return the graph-launch wrapper");
+    queried_symbol = nullptr;
+    query_status = {};
+    all_passed &= expect(get_proc_v2 != nullptr &&
+                             get_proc_v2("cuGraphLaunch_ptsz", &queried_symbol, CUDA_VERSION, 0,
+                                         &query_status) == CUDA_SUCCESS &&
+                             queried_symbol == reinterpret_cast<void*>(graph_launch_ptsz) &&
+                             query_status == CU_GET_PROC_ADDRESS_SUCCESS,
+                         "v2 cuGetProcAddress did not return the PTDS graph-launch wrapper");
     queried_symbol = nullptr;
     query_status = {};
     all_passed &= expect(get_proc_v2 != nullptr &&

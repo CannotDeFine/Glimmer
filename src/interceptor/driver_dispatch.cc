@@ -181,6 +181,10 @@ DriverDispatch::DriverDispatch(DriverFunctionTable functions) noexcept
     : init_(functions.init),
       launch_kernel_(functions.launch_kernel),
       launch_kernel_ptsz_(functions.launch_kernel_ptsz),
+      launch_kernel_ex_(functions.launch_kernel_ex),
+      launch_kernel_ex_ptsz_(functions.launch_kernel_ex_ptsz),
+      graph_launch_(functions.graph_launch),
+      graph_launch_ptsz_(functions.graph_launch_ptsz),
       mem_alloc_(functions.mem_alloc),
       mem_alloc_managed_(functions.mem_alloc_managed),
       mem_alloc_pitch_(functions.mem_alloc_pitch),
@@ -289,6 +293,11 @@ bool DriverDispatch::initialize() {
     launch_kernel_ = reinterpret_cast<LaunchKernelFunction>(load_symbol("cuLaunchKernel"));
     launch_kernel_ptsz_ =
         reinterpret_cast<LaunchKernelFunction>(load_symbol("cuLaunchKernel_ptsz"));
+    graph_launch_ = reinterpret_cast<GraphLaunchFunction>(load_symbol("cuGraphLaunch"));
+    launch_kernel_ex_ = reinterpret_cast<LaunchKernelExFunction>(load_symbol("cuLaunchKernelEx"));
+    launch_kernel_ex_ptsz_ =
+        reinterpret_cast<LaunchKernelExFunction>(load_symbol("cuLaunchKernelEx_ptsz"));
+    graph_launch_ptsz_ = reinterpret_cast<GraphLaunchFunction>(load_symbol("cuGraphLaunch_ptsz"));
     mem_alloc_ = reinterpret_cast<MemAllocFunction>(load_symbol("cuMemAlloc_v2"));
     mem_alloc_managed_ =
         reinterpret_cast<MemAllocManagedFunction>(load_symbol("cuMemAllocManaged"));
@@ -508,6 +517,35 @@ CUresult DriverDispatch::launch_kernel_ptsz(CUfunction function, unsigned int gr
     return launch_kernel_ptsz_(function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x,
                                block_dim_y, block_dim_z, shared_memory_bytes, stream,
                                kernel_parameters, extra);
+}
+
+CUresult DriverDispatch::launch_kernel_ex(const CUlaunchConfig* config, CUfunction function,
+                                          void** kernel_parameters, void** extra,
+                                          bool per_thread_default_stream) const {
+    DriverCallScope scope;
+    const auto invoke = per_thread_default_stream ? launch_kernel_ex_ptsz_ : launch_kernel_ex_;
+    return invoke == nullptr ? CUDA_ERROR_NOT_SUPPORTED
+                             : invoke(config, function, kernel_parameters, extra);
+}
+
+bool DriverDispatch::has_launch_kernel_ex(bool per_thread_default_stream) const {
+    return (per_thread_default_stream ? launch_kernel_ex_ptsz_ : launch_kernel_ex_) != nullptr;
+}
+
+CUresult DriverDispatch::graph_launch(CUgraphExec graph_exec, CUstream stream) const {
+    DriverCallScope scope;
+    if (graph_launch_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return graph_launch_(graph_exec, stream);
+}
+
+CUresult DriverDispatch::graph_launch_ptsz(CUgraphExec graph_exec, CUstream stream) const {
+    DriverCallScope scope;
+    if (graph_launch_ptsz_ == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return graph_launch_ptsz_(graph_exec, stream);
 }
 
 CUresult DriverDispatch::mem_alloc_managed(CUdeviceptr* device_pointer, std::size_t memory_bytes,
@@ -1212,7 +1250,7 @@ CUresult DriverDispatch::get_proc_address(const char* symbol, void** function_po
                                           int cuda_version, cuuint64_t flags) const {
     if (g_is_inside_proc_address_dispatch) {
         if (library_handle_ != nullptr && symbol != nullptr && function_pointer != nullptr) {
-            *function_pointer = resolve_direct_symbol(symbol);
+            *function_pointer = resolve_direct_symbol(symbol, flags);
             return *function_pointer == nullptr ? CUDA_ERROR_NOT_FOUND : CUDA_SUCCESS;
         }
         return CUDA_ERROR_NOT_SUPPORTED;
@@ -1232,7 +1270,7 @@ CUresult DriverDispatch::get_proc_address_v2(const char* symbol, void** function
                                              CUdriverProcAddressQueryResult* symbol_status) const {
     if (g_is_inside_proc_address_dispatch) {
         if (library_handle_ != nullptr && symbol != nullptr && function_pointer != nullptr) {
-            *function_pointer = resolve_direct_symbol(symbol);
+            *function_pointer = resolve_direct_symbol(symbol, flags);
             if (symbol_status != nullptr) {
                 *symbol_status = *function_pointer == nullptr ? CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND
                                                               : CU_GET_PROC_ADDRESS_SUCCESS;
@@ -1269,6 +1307,14 @@ bool DriverDispatch::has_launch_kernel() const {
 
 bool DriverDispatch::has_launch_kernel_ptsz() const {
     return launch_kernel_ptsz_ != nullptr;
+}
+
+bool DriverDispatch::has_graph_launch() const {
+    return graph_launch_ != nullptr;
+}
+
+bool DriverDispatch::has_graph_launch_ptsz() const {
+    return graph_launch_ptsz_ != nullptr;
 }
 
 bool DriverDispatch::has_mem_alloc_managed() const {
@@ -1556,7 +1602,7 @@ bool DriverDispatch::has_stream_destroy() const {
     return stream_destroy_ != nullptr;
 }
 
-void* DriverDispatch::resolve_direct_symbol(const char* name) const {
+void* DriverDispatch::resolve_direct_symbol(const char* name, cuuint64_t flags) const {
     if (name == nullptr) {
         return nullptr;
     }
@@ -1566,17 +1612,55 @@ void* DriverDispatch::resolve_direct_symbol(const char* name) const {
     // recursion we are trying to break. Return the already-resolved Driver
     // entry points instead.
     const std::string_view symbol{name};
+    const bool ptds = (flags & CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM) != 0;
     if (symbol == "cuInit") {
         return reinterpret_cast<void*>(init_);
     }
     if (symbol == "cuLaunchKernel") {
-        return reinterpret_cast<void*>(launch_kernel_);
+        return reinterpret_cast<void*>(ptds ? launch_kernel_ptsz_ : launch_kernel_);
     }
     if (symbol == "cuLaunchKernel_ptsz") {
         return reinterpret_cast<void*>(launch_kernel_ptsz_);
     }
+    if (symbol == "cuGraphLaunch") {
+        return reinterpret_cast<void*>(ptds ? graph_launch_ptsz_ : graph_launch_);
+    }
+    if (symbol == "cuLaunchKernelEx") {
+        return reinterpret_cast<void*>(ptds ? launch_kernel_ex_ptsz_ : launch_kernel_ex_);
+    }
+    if (symbol == "cuLaunchKernelEx_ptsz") {
+        return reinterpret_cast<void*>(launch_kernel_ex_ptsz_);
+    }
+    if (symbol == "cuGraphLaunch_ptsz") {
+        return reinterpret_cast<void*>(graph_launch_ptsz_);
+    }
     if (symbol == "cuMemAlloc_v2" || symbol == "cuMemAlloc") {
         return reinterpret_cast<void*>(mem_alloc_);
+    }
+    if (symbol == "cuMemAllocManaged") {
+        return reinterpret_cast<void*>(mem_alloc_managed_);
+    }
+    if (symbol == "cuMemAllocPitch" || symbol == "cuMemAllocPitch_v2") {
+        return reinterpret_cast<void*>(mem_alloc_pitch_);
+    }
+    if (symbol == "cuMemAllocAsync") {
+        return reinterpret_cast<void*>(ptds ? mem_alloc_async_ptsz_ : mem_alloc_async_);
+    }
+    if (symbol == "cuMemAllocAsync_ptsz") {
+        return reinterpret_cast<void*>(mem_alloc_async_ptsz_);
+    }
+    if (symbol == "cuMemAllocFromPoolAsync") {
+        return reinterpret_cast<void*>(ptds ? mem_alloc_from_pool_async_ptsz_
+                                            : mem_alloc_from_pool_async_);
+    }
+    if (symbol == "cuMemAllocFromPoolAsync_ptsz") {
+        return reinterpret_cast<void*>(mem_alloc_from_pool_async_ptsz_);
+    }
+    if (symbol == "cuMemFreeAsync") {
+        return reinterpret_cast<void*>(ptds ? mem_free_async_ptsz_ : mem_free_async_);
+    }
+    if (symbol == "cuMemFreeAsync_ptsz") {
+        return reinterpret_cast<void*>(mem_free_async_ptsz_);
     }
     if (symbol == "cuMemFree_v2" || symbol == "cuMemFree") {
         return reinterpret_cast<void*>(mem_free_);
@@ -1664,25 +1748,25 @@ void* DriverDispatch::resolve_direct_symbol(const char* name) const {
         return reinterpret_cast<void*>(context_destroy_);
     }
     if (symbol == "cuStreamGetDevice") {
-        return reinterpret_cast<void*>(stream_get_device_);
+        return reinterpret_cast<void*>(ptds ? stream_get_device_ptsz_ : stream_get_device_);
     }
     if (symbol == "cuStreamGetDevice_ptsz") {
         return reinterpret_cast<void*>(stream_get_device_ptsz_);
     }
     if (symbol == "cuStreamGetCtx") {
-        return reinterpret_cast<void*>(stream_get_context_);
+        return reinterpret_cast<void*>(ptds ? stream_get_context_ptsz_ : stream_get_context_);
     }
     if (symbol == "cuStreamGetCtx_ptsz") {
         return reinterpret_cast<void*>(stream_get_context_ptsz_);
     }
     if (symbol == "cuStreamQuery") {
-        return reinterpret_cast<void*>(stream_query_);
+        return reinterpret_cast<void*>(ptds ? stream_query_ptsz_ : stream_query_);
     }
     if (symbol == "cuStreamQuery_ptsz") {
         return reinterpret_cast<void*>(stream_query_ptsz_);
     }
     if (symbol == "cuStreamSynchronize") {
-        return reinterpret_cast<void*>(stream_synchronize_);
+        return reinterpret_cast<void*>(ptds ? stream_synchronize_ptsz_ : stream_synchronize_);
     }
     if (symbol == "cuStreamSynchronize_ptsz") {
         return reinterpret_cast<void*>(stream_synchronize_ptsz_);

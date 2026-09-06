@@ -72,7 +72,10 @@ Scheduler::Scheduler(MemoryBytes memory_limit_bytes, SchedulerOptions options)
                             ? options.scheduling_policy
                             : SchedulingPolicy::kWeightedRoundRobin),
       max_running_tasks(std::max<std::size_t>(options.max_running_tasks, 1)),
-      max_queued_tasks(options.max_queued_tasks) {
+      max_queued_tasks(options.max_queued_tasks),
+      priority_reserved_slots(std::min(options.priority_reserved_slots,
+                                       std::max<std::size_t>(options.max_running_tasks, 1))),
+      priority_reservation_threshold(options.priority_reservation_threshold) {
     running_task_ids_.reserve(max_running_tasks);
 }
 
@@ -157,6 +160,9 @@ std::optional<TaskSnapshot> Scheduler::dispatch_next() {
     if (running_task_ids_.size() >= max_running_tasks) {
         return std::nullopt;
     }
+    if (priority_reservation_blocks_low_dispatch_locked()) {
+        return std::nullopt;
+    }
 
     const auto task_id = select_next_task_locked();
     if (!task_id.has_value()) {
@@ -172,6 +178,9 @@ std::optional<TaskSnapshot> Scheduler::dispatch_task(TaskId task_id) {
     }
     std::scoped_lock lock(mutex_);
     if (running_task_ids_.size() >= max_running_tasks) {
+        return std::nullopt;
+    }
+    if (priority_reservation_blocks_low_dispatch_locked()) {
         return std::nullopt;
     }
     const auto task_iterator = tasks_.find(task_id);
@@ -319,23 +328,37 @@ std::optional<TaskState> Scheduler::task_state(TaskId task_id) const {
     return task_iterator->second.state;
 }
 
+bool Scheduler::set_priority_reserved_slots(std::size_t reserved_slots) noexcept {
+    std::scoped_lock lock(mutex_);
+    if (scheduling_policy != SchedulingPolicy::kPriority) {
+        return false;
+    }
+    priority_reserved_slots = std::min(reserved_slots, max_running_tasks);
+    return true;
+}
+
 QuotaUsage Scheduler::usage() const {
     return quota_ledger_.usage();
 }
 
 SchedulerStats Scheduler::stats() const {
     std::scoped_lock lock(mutex_);
-    SchedulerStats result{.quota = quota_ledger_.usage(),
-                          .total_task_count = tasks_.size(),
-                          .queued_task_count = queued_task_count_,
-                          .running_task_count = running_task_ids_.size(),
-                          .max_running_tasks = max_running_tasks,
-                          .max_queued_tasks = max_queued_tasks,
-                          .scheduling_policy = scheduling_policy,
-                          .total_queue_wait_microseconds = total_queue_wait_microseconds_,
-                          .max_queue_wait_microseconds = max_queue_wait_microseconds_,
-                          .total_service_time_microseconds = total_service_time_microseconds_,
-                          .max_service_time_microseconds = max_service_time_microseconds_};
+    SchedulerStats result{
+        .quota = quota_ledger_.usage(),
+        .total_task_count = tasks_.size(),
+        .queued_task_count = queued_task_count_,
+        .running_task_count = running_task_ids_.size(),
+        .max_running_tasks = max_running_tasks,
+        .max_queued_tasks = max_queued_tasks,
+        .priority_reserved_slots = priority_reserved_slots,
+        .priority_reservation_threshold = priority_reservation_threshold,
+        .priority_reservation_active =
+            priority_reserved_slots != 0 && scheduling_policy == SchedulingPolicy::kPriority,
+        .scheduling_policy = scheduling_policy,
+        .total_queue_wait_microseconds = total_queue_wait_microseconds_,
+        .max_queue_wait_microseconds = max_queue_wait_microseconds_,
+        .total_service_time_microseconds = total_service_time_microseconds_,
+        .max_service_time_microseconds = max_service_time_microseconds_};
     for (const auto& [task_id, task] : tasks_) {
         static_cast<void>(task_id);
         switch (task.state) {
@@ -364,6 +387,32 @@ std::size_t Scheduler::queued_task_count() const {
 std::size_t Scheduler::running_task_count() const {
     std::scoped_lock lock(mutex_);
     return running_task_ids_.size();
+}
+
+bool Scheduler::priority_reservation_blocks_low_dispatch_locked() const {
+    if (scheduling_policy != SchedulingPolicy::kPriority || priority_reserved_slots == 0) {
+        return false;
+    }
+    // High-priority work can occupy reserved capacity without consuming the
+    // low-priority allowance. Total capacity is checked by the dispatch caller.
+    const auto low_running = static_cast<std::size_t>(
+        std::count_if(running_task_ids_.begin(), running_task_ids_.end(), [this](TaskId task_id) {
+            const auto iterator = tasks_.find(task_id);
+            return iterator != tasks_.end() &&
+                   iterator->second.spec.priority < priority_reservation_threshold;
+        }));
+    if (low_running < max_running_tasks - priority_reserved_slots) {
+        return false;
+    }
+    const auto next_task_id = peek_next_task_locked();
+    if (!next_task_id.has_value()) {
+        return false;
+    }
+    const auto task_iterator = tasks_.find(next_task_id.value());
+    if (task_iterator == tasks_.end() || task_iterator->second.state != TaskState::kQueued) {
+        return false;
+    }
+    return task_iterator->second.spec.priority < priority_reservation_threshold;
 }
 
 std::optional<TaskId> Scheduler::select_next_task_locked() {

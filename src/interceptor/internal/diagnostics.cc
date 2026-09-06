@@ -91,6 +91,21 @@ void report_kernel_launch_diagnostic(const KernelLaunchObservation& observation,
     write_message(message, static_cast<std::size_t>(cursor - message));
 }
 
+void report_graph_launch_diagnostic(const char* api_name, const void* stream,
+                                    std::uint64_t launch_count) noexcept {
+    char message[256]{};
+    char* cursor = message;
+    char* const end = message + sizeof(message);
+    cursor = append_text(cursor, end, "[glimmer] observed CUDA graph launch #");
+    cursor = append_number(cursor, end, launch_count);
+    cursor = append_text(cursor, end, " api=");
+    cursor = append_text(cursor, end, api_name == nullptr ? "unknown" : api_name);
+    cursor = append_text(cursor, end, " stream=0x");
+    cursor = append_number(cursor, end, reinterpret_cast<std::uintptr_t>(stream), 16);
+    cursor = append_text(cursor, end, "\n");
+    write_message(message, static_cast<std::size_t>(cursor - message));
+}
+
 void report_memory_info_diagnostic(const MemoryInfoObservation& observation) noexcept {
     char message[384]{};
     char* cursor = message;

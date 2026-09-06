@@ -14,6 +14,9 @@ using LaunchKernelFunction = CUresult (*)(CUfunction function, unsigned int grid
                                           unsigned int block_dim_z,
                                           unsigned int shared_memory_bytes, CUstream stream,
                                           void** kernel_parameters, void** extra);
+using GraphLaunchFunction = CUresult (*)(CUgraphExec graph_exec, CUstream stream);
+using LaunchKernelExFunction = CUresult (*)(const CUlaunchConfig* config, CUfunction function,
+                                            void** kernel_parameters, void** extra);
 using MemAllocManagedFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes,
                                              unsigned int flags);
 using MemAllocPitchFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t* pitch,
@@ -157,6 +160,10 @@ struct DriverFunctionTable {
     InitFunction init = nullptr;
     LaunchKernelFunction launch_kernel = nullptr;
     LaunchKernelFunction launch_kernel_ptsz = nullptr;
+    LaunchKernelExFunction launch_kernel_ex = nullptr;
+    LaunchKernelExFunction launch_kernel_ex_ptsz = nullptr;
+    GraphLaunchFunction graph_launch = nullptr;
+    GraphLaunchFunction graph_launch_ptsz = nullptr;
     MemAllocFunction mem_alloc = nullptr;
     MemAllocManagedFunction mem_alloc_managed = nullptr;
     MemAllocPitchFunction mem_alloc_pitch = nullptr;
@@ -272,6 +279,8 @@ class DriverDispatch {
                                               unsigned int block_dim_z,
                                               unsigned int shared_memory_bytes, CUstream stream,
                                               void** kernel_parameters, void** extra) const;
+    [[nodiscard]] CUresult graph_launch(CUgraphExec graph_exec, CUstream stream) const;
+    [[nodiscard]] CUresult graph_launch_ptsz(CUgraphExec graph_exec, CUstream stream) const;
     [[nodiscard]] CUresult mem_alloc_managed(CUdeviceptr* device_pointer, std::size_t memory_bytes,
                                              unsigned int flags) const;
     [[nodiscard]] CUresult mem_alloc_pitch(CUdeviceptr* device_pointer, std::size_t* pitch,
@@ -430,8 +439,14 @@ class DriverDispatch {
 
     [[nodiscard]] bool has_get_proc_address() const;
     [[nodiscard]] bool has_get_proc_address_v2() const;
+    [[nodiscard]] CUresult launch_kernel_ex(const CUlaunchConfig* config, CUfunction function,
+                                            void** kernel_parameters, void** extra,
+                                            bool per_thread_default_stream) const;
+    [[nodiscard]] bool has_launch_kernel_ex(bool per_thread_default_stream) const;
     [[nodiscard]] bool has_launch_kernel() const;
     [[nodiscard]] bool has_launch_kernel_ptsz() const;
+    [[nodiscard]] bool has_graph_launch() const;
+    [[nodiscard]] bool has_graph_launch_ptsz() const;
     [[nodiscard]] bool has_mem_alloc_managed() const;
     [[nodiscard]] bool has_mem_alloc_pitch() const;
     [[nodiscard]] bool has_mem_alloc_async() const;
@@ -505,13 +520,17 @@ class DriverDispatch {
     [[nodiscard]] bool has_stream_destroy() const;
 
    private:
-    [[nodiscard]] void* resolve_direct_symbol(const char* name) const;
+    [[nodiscard]] void* resolve_direct_symbol(const char* name, cuuint64_t flags) const;
     [[nodiscard]] void* load_symbol(const char* name) const;
 
     void* library_handle_ = nullptr;
     InitFunction init_ = nullptr;
     LaunchKernelFunction launch_kernel_ = nullptr;
     LaunchKernelFunction launch_kernel_ptsz_ = nullptr;
+    LaunchKernelExFunction launch_kernel_ex_ = nullptr;
+    LaunchKernelExFunction launch_kernel_ex_ptsz_ = nullptr;
+    GraphLaunchFunction graph_launch_ = nullptr;
+    GraphLaunchFunction graph_launch_ptsz_ = nullptr;
     MemAllocFunction mem_alloc_ = nullptr;
     MemAllocManagedFunction mem_alloc_managed_ = nullptr;
     MemAllocPitchFunction mem_alloc_pitch_ = nullptr;

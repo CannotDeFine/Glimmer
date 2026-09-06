@@ -31,6 +31,14 @@ struct DispatchTraceState {
     std::array<std::uint64_t, 4> sequences{};
 };
 
+struct CompletionTraceState {
+    std::size_t calls = 0;
+    std::array<TaskId, 4> task_ids{};
+    std::array<glimmer::core::TaskState, 4> states{};
+    std::array<std::uint64_t, 4> queue_wait_microseconds{};
+    std::array<std::uint64_t, 4> service_time_microseconds{};
+};
+
 struct BlockingRegistrarState {
     std::latch entered{1};
     std::latch release{1};
@@ -66,6 +74,21 @@ void observe_dispatch(void* context,
         state->task_ids[state->calls] = observation.task.task_id;
         state->priorities[state->calls] = observation.task.priority;
         state->sequences[state->calls] = observation.sequence;
+    }
+    ++state->calls;
+}
+
+void observe_completion(void* context,
+                        const glimmer::control::TaskCompletionObservation& observation) noexcept {
+    if (context == nullptr) {
+        return;
+    }
+    auto* state = static_cast<CompletionTraceState*>(context);
+    if (state->calls < state->task_ids.size()) {
+        state->task_ids[state->calls] = observation.task.task_id;
+        state->states[state->calls] = observation.terminal_state;
+        state->queue_wait_microseconds[state->calls] = observation.queue_wait_microseconds;
+        state->service_time_microseconds[state->calls] = observation.service_time_microseconds;
     }
     ++state->calls;
 }
@@ -141,6 +164,57 @@ void test_dispatch_observer_records_policy_order() {
     expect(trace.sequences[0] == 1 && trace.sequences[1] == 2,
            "observer sequence should be monotonic");
     expect(scheduler.usage().used_bytes() == 0, "observed tasks should release quota");
+}
+
+void test_completion_observer_records_terminal_timings() {
+    Scheduler scheduler(100, glimmer::core::SchedulerOptions{.max_running_tasks = 1});
+    CompletionTraceState trace;
+    TaskAdmissionService service(scheduler, std::chrono::milliseconds::zero(), false, nullptr,
+                                 nullptr, observe_completion, &trace);
+    RegistrarState registrar;
+    const auto first = service.submit(
+        TaskAdmissionRequest{.tenant_id = "tenant-a", .memory_bytes = 10, .priority = 1},
+        register_resource, &registrar);
+    const auto second = service.submit(
+        TaskAdmissionRequest{.tenant_id = "tenant-b", .memory_bytes = 10, .priority = 10},
+        register_resource, &registrar);
+    expect(first.accepted() && second.accepted(), "completion observer tasks should be admitted");
+    expect(service.claim(first.task_id).has_value(), "first completion observer task should run");
+    expect(service.complete(first.task_id), "first completion observer task should complete");
+    expect(service.claim(second.task_id).has_value(), "second completion observer task should run");
+    expect(service.complete(second.task_id), "second completion observer task should complete");
+
+    expect(trace.calls == 2, "completion observer should see each terminal transition once");
+    expect(trace.task_ids[0] == first.task_id && trace.task_ids[1] == second.task_id,
+           "completion observer should preserve terminal transition order");
+    expect(trace.states[0] == glimmer::core::TaskState::kCompleted &&
+               trace.states[1] == glimmer::core::TaskState::kCompleted,
+           "completion observer should expose the terminal state");
+    expect(scheduler.usage().used_bytes() == 0,
+           "completion observation must not retain scheduler quota");
+}
+
+void test_external_progress_observations_pair_dispatch_and_completion() {
+    Scheduler scheduler(100);
+    CompletionTraceState trace;
+    TaskAdmissionService service(scheduler, std::chrono::milliseconds::zero(), false, nullptr,
+                                 nullptr, observe_completion, &trace);
+    RegistrarState registrar;
+    const auto admission = service.submit(
+        TaskAdmissionRequest{.tenant_id = "tenant-a", .memory_bytes = 10, .priority = 9},
+        register_resource, &registrar);
+    expect(admission.accepted(), "external observation task should be admitted");
+    const auto lease = scheduler.dispatch_next();
+    expect(lease.has_value(), "external scheduler should dispatch the observation task");
+    service.observe_external_dispatch(admission.task_id);
+    service.observe_external_dispatch(admission.task_id);
+    expect(scheduler.complete(admission.task_id),
+           "external scheduler should complete the observation task");
+    service.observe_external_completion(admission.task_id, glimmer::core::TaskState::kCompleted);
+    expect(trace.calls == 1 && trace.task_ids[0] == admission.task_id,
+           "external progress should emit one completion observation");
+    expect(scheduler.usage().used_bytes() == 0,
+           "external completion observation should preserve quota release");
 }
 
 void test_registration_failure_rolls_back() {
@@ -320,6 +394,8 @@ int main() {
     test_admission_registers_and_cancels();
     test_admission_propagates_priority();
     test_dispatch_observer_records_policy_order();
+    test_completion_observer_records_terminal_timings();
+    test_external_progress_observations_pair_dispatch_and_completion();
     test_registration_failure_rolls_back();
     test_registration_serializes_dispatch();
     test_admission_rejects_invalid_or_unavailable_requests();

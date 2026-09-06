@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <poll.h>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
@@ -82,7 +83,7 @@ std::string receive_response(int client_fd) {
     return {};
 }
 
-void test_server_lifecycle_and_authentication() {
+bool test_server_lifecycle_and_authentication() {
     const std::string path = "/tmp/glimmer-control-test-" + std::to_string(::getpid()) + ".sock";
     static_cast<void>(::unlink(path.c_str()));
     Scheduler scheduler(100);
@@ -93,7 +94,7 @@ void test_server_lifecycle_and_authentication() {
     if (!server.start()) {
         if (errno == EPERM || errno == EACCES || errno == ENOSYS) {
             std::cerr << "Skipping Unix socket test: local socket operations are unavailable\n";
-            return;
+            return false;
         }
         expect(false, "server should start");
     }
@@ -156,9 +157,10 @@ void test_server_lifecycle_and_authentication() {
     expect(!server.running(), "server should stop");
     expect(::access(path.c_str(), F_OK) != 0 && errno == ENOENT,
            "server stop should remove its socket");
+    return true;
 }
 
-void test_server_rejects_wrong_uid() {
+bool test_server_rejects_wrong_uid() {
     const std::string path = "/tmp/glimmer-control-auth-" + std::to_string(::getpid()) + ".sock";
     static_cast<void>(::unlink(path.c_str()));
     Scheduler scheduler(100);
@@ -171,7 +173,7 @@ void test_server_rejects_wrong_uid() {
         if (errno == EPERM || errno == EACCES || errno == ENOSYS) {
             std::cerr << "Skipping Unix socket authentication test: local socket operations are "
                          "unavailable\n";
-            return;
+            return false;
         }
         expect(false, "authentication test server should start");
     }
@@ -187,12 +189,84 @@ void test_server_rejects_wrong_uid() {
     expect(received == 0 || (received < 0 && errno == ECONNRESET),
            "unauthorized client should receive no response bytes");
     static_cast<void>(::close(client_fd));
+    return true;
+}
+
+void expect_closed(int client_fd) {
+    pollfd ready{.fd = client_fd, .events = POLLIN, .revents = 0};
+    expect(::poll(&ready, 1, 3000) > 0, "server should close the rejected stream");
+    char byte = '\0';
+    const ssize_t received = ::recv(client_fd, &byte, 1, 0);
+    expect(received == 0 || (received < 0 && errno == ECONNRESET),
+           "rejected connection should have no further response");
+}
+
+bool test_buffered_requests_and_rejection() {
+    const std::string path = "/tmp/glimmer-control-framing-" + std::to_string(::getpid()) + ".sock";
+    Scheduler scheduler(100);
+    TaskAdmissionService admission(scheduler);
+    TaskControlEndpoint endpoint(admission, register_resource, &scheduler);
+    UnixSocketControlServer server(
+        endpoint, UnixSocketControlConfig{
+                      .socket_path = path, .allowed_uid = ::geteuid(), .io_timeout_ms = 20});
+    if (!server.start()) {
+        if (errno == EPERM || errno == EACCES || errno == ENOSYS) {
+            std::cerr << "Skipping server framing test: Unix sockets unavailable\n";
+            return false;
+        }
+        expect(false, "framing server should start");
+    }
+
+    const int coalesced = connect_client(path.c_str());
+    // Queue both requests before accept: a single receive can contain them.
+    send_request(coalesced, "GLIMMER_TASK_V1 SUBMIT tenant-a 20 1 1\nGLIMMER_TASK_V1 CANCEL 1\n");
+    expect(server.serve_one(), "server should accept coalesced requests");
+    expect(receive_response(coalesced) == "GLIMMER_TASK_V1 OK 1\n",
+           "coalesced first request should be admitted once");
+    expect(receive_response(coalesced) == "GLIMMER_TASK_V1 STATE 1 CANCELLED\n",
+           "coalesced second request should be handled in order");
+    static_cast<void>(::close(coalesced));
+
+    const int oversized = connect_client(path.c_str());
+    send_request(oversized, std::string(glimmer::control::kTaskProtocolMaxLineBytes + 1, 'x') +
+                                "GLIMMER_TASK_V1 SUBMIT injected 20 1 1\n");
+    expect(server.serve_one(), "server should accept the invalid stream for rejection");
+    expect(receive_response(oversized) == "GLIMMER_TASK_V1 ERROR INVALID_REQUEST\n",
+           "oversized line should receive one protocol error");
+    expect_closed(oversized);
+    expect(scheduler.stats().total_task_count == 1,
+           "the suffix of an oversized line must never submit a task");
+    static_cast<void>(::close(oversized));
+
+    const int partial = connect_client(path.c_str());
+    send_request(partial, "GLIMMER_TASK_V1 SUBMIT");
+    expect(server.serve_one(), "server should accept the partial line");
+    expect_closed(partial);
+    static_cast<void>(::close(partial));
+
+    const int eof = connect_client(path.c_str());
+    send_request(eof, "GLIMMER_TASK_V1 QUERY 1");
+    expect(::shutdown(eof, SHUT_WR) == 0 && server.serve_one(),
+           "server should accept an EOF-terminated query");
+    expect(receive_response(eof) == "GLIMMER_TASK_V1 STATE 1 CANCELLED\n",
+           "EOF-framed request compatibility should be preserved");
+    expect_closed(eof);
+    static_cast<void>(::close(eof));
+
+    const int idle = connect_client(path.c_str());
+    expect(server.serve_one(), "server should accept idle client");
+    server.stop();
+    expect_closed(idle);
+    static_cast<void>(::close(idle));
+    return true;
 }
 
 }  // namespace
 
 int main() {
-    test_server_lifecycle_and_authentication();
-    test_server_rejects_wrong_uid();
+    if (!test_server_lifecycle_and_authentication() || !test_server_rejects_wrong_uid() ||
+        !test_buffered_requests_and_rejection()) {
+        return 77;
+    }
     return EXIT_SUCCESS;
 }
