@@ -1,3 +1,12 @@
+add_executable(glimmer_control_task_execution_protocol_test
+    control/task_execution_protocol_test.cc)
+target_link_libraries(glimmer_control_task_execution_protocol_test PRIVATE
+    Glimmer::control Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_control_task_execution_protocol_test)
+add_test(NAME glimmer_control_task_execution_protocol_test
+    COMMAND glimmer_control_task_execution_protocol_test)
+set_tests_properties(glimmer_control_task_execution_protocol_test PROPERTIES TIMEOUT 30)
+
 add_library(glimmer_control_abi_v1_consumer OBJECT control/abi_v1/consumer.cc)
 target_include_directories(glimmer_control_abi_v1_consumer BEFORE PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/control/abi_v1/include"

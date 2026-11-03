@@ -17,6 +17,7 @@ add_library(glimmer_control
     execution_process_memory_protocol.cc
     execution_graph_protocol.cc
     native_epoch_protocol.cc
+    task_execution_protocol.cc
     composite_quota.cc
     device_capacity_quota.cc
     internal/socket_line_reader.cc
