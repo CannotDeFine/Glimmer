@@ -1,9 +1,14 @@
 add_library(glimmer_control
+    async_cooperative_launch_gate.cc
     cooperative_launch_gate.cc
     execution_protocol.cc
     internal/control_request_sequence.cc
     internal/local_control_wake.cc
     internal/owned_control_exchange.cc
+    internal/remote_control_operation.cc
+    internal/prepared_control_future.cc
+    internal/process_control_mailbox.cc
+    internal/owner_pumped_control_state.cc
     internal/shared_control_channel.cc
     execution_socket.cc
     internal/process_identity.cc

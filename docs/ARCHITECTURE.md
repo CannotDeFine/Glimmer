@@ -89,6 +89,9 @@ reply is lost, inconsistent, or cannot establish a safe native outcome. A
 quarantined gate sends no further requests and does not release remote leases;
 the service owner remains responsible for proving physical stop and retiring
 the associated resources. This gate is not yet used by the ordinary launch path.
+Its asynchronous adapter can use a bounded CPU mailbox with caller-driven
+progress. It exposes quarantine before publishing an uncertain result; neither
+mailbox progress nor a future establishes physical GPU completion.
 The execution task server accepts domain messages only after shared-channel
 negotiation and joins its connection workers before endpoint teardown. A lost
 transport reply does not authorize cancellation or prove physical completion.
