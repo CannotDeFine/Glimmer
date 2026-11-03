@@ -68,6 +68,8 @@ an expired running execution is not proof of physical completion. The original
 admission interface retains its existing ownership and ABI.
 The service owner must stop and join backend work and retire leases before
 destruction; destroying the service does not stop a GPU or fence a context.
+Cooperative admission is marked before publication; ordinary task operations
+cannot claim it, and a generation grant is issued at most once per dispatch.
 
 The backend submission queue retains accepted command data until trusted
 proof of no native issue or final physical stop; its receipt remains until

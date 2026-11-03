@@ -1,4 +1,5 @@
 #include "glimmer/control/task_execution_admission.h"
+#include "internal/execution_admission_state.h"
 
 #include <array>
 #include <atomic>
@@ -7,6 +8,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
+#include <new>
 #include <string_view>
 #include <thread>
 
@@ -30,6 +32,27 @@ bool accept_resource(void*, glimmer::core::TaskId) noexcept {
 
 bool reject_resource(void*, glimmer::core::TaskId) noexcept {
     return false;
+}
+
+bool count_registration(void* context, glimmer::core::TaskId) noexcept {
+    ++*static_cast<unsigned*>(context);
+    return true;
+}
+
+void fail_pending_insert() {
+    throw std::bad_alloc();
+}
+
+void test_pending_allocation_failure() {
+    glimmer::core::Scheduler scheduler(100);
+    ExecutionAdmissionState state(scheduler, 0ms, true, nullptr, nullptr, nullptr, nullptr,
+                                  std::nullopt, fail_pending_insert);
+    const TaskAdmissionRequest request{.tenant_id = "tenant", .memory_bytes = 20};
+    unsigned registrations = 0;
+    const auto result =
+        state.submit_cooperative(request, count_registration, &registrations, kOwner);
+    expect(!result.accepted() && registrations == 0 && scheduler.stats().quota.used_bytes() == 0,
+           "failed pending allocation rolls back before registrar publishes resources");
 }
 
 void test_legacy_equivalence() {
@@ -69,7 +92,7 @@ void test_legacy_equivalence() {
 void test_cooperative_ownership() {
     TaskExecutionAdmissionService service(100, {}, 5ms, true);
     const TaskAdmissionRequest request{.tenant_id = "tenant", .memory_bytes = 20};
-    const auto submitted = service.submit(request, accept_resource, nullptr, kOwner);
+    const auto submitted = service.submit_cooperative(request, accept_resource, nullptr, kOwner);
     expect(submitted.accepted() && !service.claim_execution(submitted.task_id, kForeign),
            "only the submitter may claim");
     const auto first = service.claim_execution(submitted.task_id, kOwner);
@@ -132,12 +155,12 @@ void test_priority_and_continuation() {
     TaskExecutionAdmissionService service(100, options, 0ms, true);
     const TaskAdmissionRequest low{.tenant_id = "low", .memory_bytes = 20, .priority = 1};
     const TaskAdmissionRequest high{.tenant_id = "high", .memory_bytes = 20, .priority = 9};
-    const auto first = service.submit(low, accept_resource, nullptr, kOwner);
+    const auto first = service.submit_cooperative(low, accept_resource, nullptr, kOwner);
     const auto initial = service.claim_execution(first.task_id, kOwner);
     expect(initial.has_value(), "low priority execution starts");
     auto execution = TaskExecutionIdentity{
         first.task_id, initial.value_or(glimmer::core::TaskSnapshot{}).dispatch_sequence};
-    const auto second = service.submit(high, accept_resource, nullptr, kOwner);
+    const auto second = service.submit_cooperative(high, accept_resource, nullptr, kOwner);
     expect(second.accepted() && service.retreat_requested(execution, kOwner).value_or(false) &&
                service.suspend_execution(execution, kOwner),
            "high priority requests retreat even when the waiting queue is full");
@@ -225,12 +248,138 @@ void on_completion(void* context, const TaskCompletionObservation&) noexcept {
     static_cast<ObservationCounts*>(context)->completions.fetch_add(1, std::memory_order_relaxed);
 }
 
+void test_cooperative_admission_kind() {
+    ObservationCounts observed;
+    TaskExecutionAdmissionService service(100, {}, 0ms, true, on_dispatch, &observed, on_completion,
+                                          &observed);
+    TaskExecutionAdmissionService unbound(100);
+    const TaskAdmissionRequest request{.tenant_id = "tenant", .memory_bytes = 20};
+    expect(
+        !unbound.submit_cooperative(request, accept_resource, nullptr, kOwner).accepted() &&
+            !service.submit_cooperative(request, accept_resource, nullptr, std::nullopt).accepted(),
+        "cooperative admission requires process binding and a peer");
+    expect(!service.submit_cooperative(request, reject_resource, nullptr, kOwner).accepted() &&
+               service.stats().quota.used_bytes() == 0,
+           "registrar rejection rolls back the pending lease and quota");
+    const auto legacy = service.submit(request, accept_resource, nullptr, kOwner);
+    expect(legacy.accepted() && !service.claim_execution(legacy.task_id, kOwner) &&
+               service.cancel_queued(legacy.task_id, kOwner),
+           "legacy work cannot be silently upgraded to cooperative execution");
+    const auto pending = service.submit_cooperative(request, accept_resource, nullptr, kOwner);
+    expect(pending.accepted() && !service.claim(pending.task_id, kOwner) &&
+               !service.wait_claim(pending.task_id, 1ms, kOwner) &&
+               !service.cancel(pending.task_id) &&
+               !service.cancel_queued(pending.task_id, kOwner) &&
+               !service.cancel_pending_cooperative(pending.task_id, kForeign) &&
+               !service.complete(pending.task_id, kOwner),
+           "legacy and foreign paths cannot claim or terminate cooperative work");
+    const auto claimed = service.claim_execution(pending.task_id, kOwner);
+    expect(claimed.has_value() && !service.claim_execution(pending.task_id, kOwner),
+           "a running generation is not returned as a second launch grant");
+    const TaskExecutionIdentity execution{
+        pending.task_id, claimed.value_or(glimmer::core::TaskSnapshot{}).dispatch_sequence};
+    expect(service.complete_execution(execution, kOwner) && service.stats().quota.used_bytes() == 0,
+           "cooperative completion retires the grant");
+    expect(observed.dispatches.load(std::memory_order_relaxed) == 1 &&
+               observed.completions.load(std::memory_order_relaxed) == 1,
+           "cooperative transitions notify observers once");
+}
+
+void test_pending_claim_cancel_race() {
+    TaskExecutionAdmissionService service(100, {}, 0ms, true);
+    const TaskAdmissionRequest request{.tenant_id = "tenant", .memory_bytes = 20};
+    for (int i = 0; i < 16; ++i) {
+        const auto pending = service.submit_cooperative(request, accept_resource, nullptr, kOwner);
+        expect(pending.accepted(), "race fixture admitted");
+        std::optional<glimmer::core::TaskSnapshot> claimed;
+        bool cancelled = false;
+        std::barrier start(3);
+        std::thread first([&] {
+            start.arrive_and_wait();
+            claimed = service.claim_execution(pending.task_id, kOwner);
+        });
+        std::thread second([&] {
+            start.arrive_and_wait();
+            cancelled = service.cancel_pending_cooperative(pending.task_id, kOwner);
+        });
+        start.arrive_and_wait();
+        first.join();
+        second.join();
+        expect(claimed.has_value() != cancelled, "claim and pending cancellation are exclusive");
+        if (claimed.has_value()) {
+            const TaskExecutionIdentity execution{pending.task_id, claimed->dispatch_sequence};
+            expect(service.complete_execution(execution, kOwner), "race winner is retired");
+        }
+        expect(service.stats().quota.used_bytes() == 0, "pending race releases quota once");
+    }
+}
+
+void test_competing_cooperative_claims() {
+    TaskExecutionAdmissionService service(100, {}, 0ms, true);
+    const TaskAdmissionRequest request{.tenant_id = "tenant", .memory_bytes = 20};
+    const auto pending = service.submit_cooperative(request, accept_resource, nullptr, kOwner);
+    std::array<std::optional<glimmer::core::TaskSnapshot>, 2> claims;
+    std::barrier start(3);
+    std::thread first([&] {
+        start.arrive_and_wait();
+        claims[0] = service.claim_execution(pending.task_id, kOwner);
+    });
+    std::thread second([&] {
+        start.arrive_and_wait();
+        claims[1] = service.claim_execution(pending.task_id, kOwner);
+    });
+    start.arrive_and_wait();
+    first.join();
+    second.join();
+    expect(claims[0].has_value() != claims[1].has_value(), "only one physical launch grant wins");
+    const auto winner = claims[0].has_value() ? claims[0] : claims[1];
+    const TaskExecutionIdentity execution{
+        pending.task_id, winner.value_or(glimmer::core::TaskSnapshot{}).dispatch_sequence};
+    expect(service.complete_execution(execution, kOwner) && service.stats().quota.used_bytes() == 0,
+           "winning grant is retired");
+}
+
+void test_pending_claim_expiry_race() {
+    ObservationCounts observed;
+    TaskExecutionAdmissionService service(100, {}, 1ms, true, nullptr, nullptr, on_completion,
+                                          &observed);
+    const TaskAdmissionRequest request{.tenant_id = "tenant", .memory_bytes = 20};
+    for (int i = 0; i < 8; ++i) {
+        const auto pending = service.submit_cooperative(request, accept_resource, nullptr, kOwner);
+        expect(pending.accepted(), "expiry race fixture admitted");
+        std::this_thread::sleep_for(5ms);
+        std::optional<glimmer::core::TaskSnapshot> claimed;
+        bool expired = false;
+        std::barrier start(3);
+        std::thread first([&] {
+            start.arrive_and_wait();
+            claimed = service.claim_execution(pending.task_id, kOwner);
+        });
+        std::thread second([&] {
+            start.arrive_and_wait();
+            expired = service.reap_expired();
+        });
+        start.arrive_and_wait();
+        first.join();
+        second.join();
+        expect(claimed.has_value() != expired, "claim and expiry are exclusive");
+        if (claimed.has_value()) {
+            const TaskExecutionIdentity execution{pending.task_id, claimed->dispatch_sequence};
+            expect(service.complete_execution(execution, kOwner), "claimed race winner retires");
+        }
+        expect(service.stats().quota.used_bytes() == 0 &&
+                   observed.completions.load(std::memory_order_relaxed) ==
+                       static_cast<unsigned>(i + 1),
+               "expiry or completion releases quota and notifies once");
+    }
+}
+
 void test_competing_terminal_reports() {
     ObservationCounts observed;
     TaskExecutionAdmissionService service(100, {}, 0ms, true, on_dispatch, &observed, on_completion,
                                           &observed);
     const TaskAdmissionRequest request{.tenant_id = "tenant", .memory_bytes = 20};
-    const auto submitted = service.submit(request, accept_resource, nullptr, kOwner);
+    const auto submitted = service.submit_cooperative(request, accept_resource, nullptr, kOwner);
     const auto running = service.claim_execution(submitted.task_id, kOwner);
     expect(running.has_value(), "concurrent fixture has an execution");
     const TaskExecutionIdentity execution{
@@ -261,7 +410,8 @@ void test_suspend_completion_race() {
     TaskExecutionAdmissionService service(100, {}, 0ms, true);
     const TaskAdmissionRequest request{.tenant_id = "tenant", .memory_bytes = 20};
     for (int i = 0; i < 16; ++i) {
-        const auto submitted = service.submit(request, accept_resource, nullptr, kOwner);
+        const auto submitted =
+            service.submit_cooperative(request, accept_resource, nullptr, kOwner);
         const auto running = service.claim_execution(submitted.task_id, kOwner);
         expect(running.has_value(), "race fixture is running");
         const TaskExecutionIdentity execution{
@@ -291,12 +441,17 @@ void test_suspend_completion_race() {
 }  // namespace
 
 int main() {
+    test_pending_allocation_failure();
     test_legacy_equivalence();
     test_cooperative_ownership();
     test_native_epoch();
     test_priority_and_continuation();
     test_pending_expiry_and_native_policy();
     test_native_acceptance_deadline();
+    test_cooperative_admission_kind();
+    test_pending_claim_cancel_race();
+    test_competing_cooperative_claims();
+    test_pending_claim_expiry_race();
     test_competing_terminal_reports();
     test_suspend_completion_race();
     return EXIT_SUCCESS;

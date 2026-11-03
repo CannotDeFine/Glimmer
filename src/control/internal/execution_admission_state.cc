@@ -32,13 +32,15 @@ ExecutionAdmissionState::ExecutionAdmissionState(
     core::Scheduler& scheduler, std::chrono::milliseconds lease_timeout,
     bool bind_leases_to_process, TaskDispatchObserver dispatch_observer,
     void* dispatch_observer_context, TaskCompletionObserver completion_observer,
-    void* completion_observer_context, std::optional<NativeEpochExtent> epoch_policy) noexcept
+    void* completion_observer_context, std::optional<NativeEpochExtent> epoch_policy,
+    void (*before_pending_insert)()) noexcept
     : scheduler_(scheduler),
       lease_timeout_(lease_timeout > std::chrono::milliseconds::zero()
                          ? lease_timeout
                          : std::chrono::milliseconds::zero()),
       bind_leases_to_process_(bind_leases_to_process),
       native_epoch_policy(epoch_policy),
+      before_pending_insert(before_pending_insert),
       dispatch_observer_(dispatch_observer),
       dispatch_observer_context_(dispatch_observer_context),
       completion_observer_(completion_observer),
@@ -48,18 +50,32 @@ core::SubmitResult ExecutionAdmissionState::submit(const TaskAdmissionRequest& r
                                                    TaskResourceRegistrar registrar,
                                                    void* registrar_context,
                                                    std::optional<TaskPeerIdentity> peer) {
-    return submit_impl(request, registrar, registrar_context, peer, std::nullopt);
+    return submit_impl(request, registrar, registrar_context, peer, std::nullopt,
+                       AdmissionKind::kLegacy);
+}
+
+core::SubmitResult ExecutionAdmissionState::submit_cooperative(
+    const TaskAdmissionRequest& request, TaskResourceRegistrar registrar, void* registrar_context,
+    std::optional<TaskPeerIdentity> peer) {
+    return submit_impl(request, registrar, registrar_context, peer, std::nullopt,
+                       AdmissionKind::kCooperative);
 }
 
 core::SubmitResult ExecutionAdmissionState::submit_impl(const TaskAdmissionRequest& request,
                                                         TaskResourceRegistrar registrar,
                                                         void* registrar_context,
                                                         std::optional<TaskPeerIdentity> peer,
-                                                        std::optional<NativeEpochExtent> extent) {
+                                                        std::optional<NativeEpochExtent> extent,
+                                                        AdmissionKind kind) {
     if (registrar == nullptr) {
         return {.status = core::SubmitStatus::kInternalError};
     }
     if (bind_leases_to_process_ && !valid_peer_identity(peer)) {
+        return {.status = core::SubmitStatus::kInvalidTask};
+    }
+    if ((kind != AdmissionKind::kLegacy &&
+         (!bind_leases_to_process_ || !valid_peer_identity(peer))) ||
+        ((kind == AdmissionKind::kNative) != extent.has_value())) {
         return {.status = core::SubmitStatus::kInvalidTask};
     }
 
@@ -80,35 +96,40 @@ core::SubmitResult ExecutionAdmissionState::submit_impl(const TaskAdmissionReque
         return admission;
     }
 
-    if (registrar(registrar_context, admission.task_id)) {
-        if (tracks_pending_lease) {
-            bool recorded = false;
-            try {
-                const auto submitted_at = Clock::now();
-                const auto deadline = lease_timeout_ == std::chrono::milliseconds::zero()
-                                          ? Clock::time_point::max()
-                                          : submitted_at + lease_timeout_;
-                recorded = pending_leases_
-                               .emplace(admission.task_id,
-                                        LeaseRecord{.deadline = deadline,
-                                                    .submitted_at = submitted_at,
-                                                    .reaping = false,
-                                                    .owner = peer,
-                                                    .is_cooperative = extent.has_value(),
-                                                    .native_epoch = extent})
-                               .second;
-            } catch (...) {
-                recorded = false;
+    if (tracks_pending_lease) {
+        bool recorded = false;
+        try {
+            if (before_pending_insert != nullptr) {
+                before_pending_insert();
             }
-            if (!recorded) {
-                static_cast<void>(scheduler_.cancel(admission.task_id));
-                notify_state_change();
-                return {.status = core::SubmitStatus::kInternalError, .task_id = admission.task_id};
-            }
+            // Queue wait begins at scheduler admission and includes registration.
+            const auto submitted_at = Clock::now();
+            const auto deadline = lease_timeout_ == std::chrono::milliseconds::zero()
+                                      ? Clock::time_point::max()
+                                      : submitted_at + lease_timeout_;
+            recorded = pending_leases_
+                           .emplace(admission.task_id,
+                                    LeaseRecord{.deadline = deadline,
+                                                .submitted_at = submitted_at,
+                                                .reaping = false,
+                                                .owner = peer,
+                                                .is_cooperative = kind != AdmissionKind::kLegacy,
+                                                .native_epoch = extent})
+                           .second;
+        } catch (...) {
+            recorded = false;
         }
+        if (!recorded) {
+            static_cast<void>(scheduler_.cancel(admission.task_id));
+            notify_state_change();
+            return {.status = core::SubmitStatus::kInternalError, .task_id = admission.task_id};
+        }
+    }
+    if (registrar(registrar_context, admission.task_id)) {
         return admission;
     }
 
+    pending_leases_.erase(admission.task_id);
     static_cast<void>(scheduler_.cancel(admission.task_id));
     notify_state_change();
     return {.status = core::SubmitStatus::kInternalError, .task_id = admission.task_id};
@@ -552,14 +573,19 @@ bool ExecutionAdmissionState::reap_expired() {
         }
     }
     if (expired_pending_task.has_value()) {
+        const auto before = completion_observer_ == nullptr
+                                ? std::nullopt
+                                : scheduler_.find(expired_pending_task.value());
         const bool cancelled = scheduler_.cancel_queued(expired_pending_task.value());
         bool removed = false;
+        std::optional<LeaseRecord> lease;
         {
             const auto iterator = pending_leases_.find(expired_pending_task.value());
             if (iterator == pending_leases_.end()) {
                 return cancelled;
             }
             if (cancelled) {
+                lease = iterator->second;
                 pending_leases_.erase(iterator);
                 removed = true;
             } else {
@@ -569,6 +595,9 @@ bool ExecutionAdmissionState::reap_expired() {
         }
         if (removed) {
             admission_lock.unlock();
+            if (before.has_value()) {
+                observe_completion(before.value(), core::TaskState::kCancelled, lease);
+            }
             notify_state_change();
             return cancelled;
         }

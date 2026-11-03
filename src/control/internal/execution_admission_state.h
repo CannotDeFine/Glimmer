@@ -7,6 +7,8 @@ namespace glimmer::control {
 // Private state used by the versioned admission service.
 class ExecutionAdmissionState final {
    public:
+    // The optional final hook exercises pending-record allocation failure.
+    // Production callers leave it null; it runs under the admission lock.
     explicit ExecutionAdmissionState(
         core::Scheduler& scheduler,
         std::chrono::milliseconds lease_timeout = std::chrono::milliseconds::zero(),
@@ -14,12 +16,19 @@ class ExecutionAdmissionState final {
         void* dispatch_observer_context = nullptr,
         TaskCompletionObserver completion_observer = nullptr,
         void* completion_observer_context = nullptr,
-        std::optional<NativeEpochExtent> native_epoch_policy = std::nullopt) noexcept;
+        std::optional<NativeEpochExtent> native_epoch_policy = std::nullopt,
+        void (*before_pending_insert)() = nullptr) noexcept;
 
     [[nodiscard]] core::SubmitResult submit(const TaskAdmissionRequest& request,
                                             TaskResourceRegistrar registrar,
                                             void* registrar_context,
                                             std::optional<TaskPeerIdentity> peer = std::nullopt);
+    [[nodiscard]] core::SubmitResult submit_cooperative(const TaskAdmissionRequest& request,
+                                                        TaskResourceRegistrar registrar,
+                                                        void* registrar_context,
+                                                        std::optional<TaskPeerIdentity> peer);
+    [[nodiscard]] bool cancel_pending_cooperative(core::TaskId task_id,
+                                                  std::optional<TaskPeerIdentity> peer);
     [[nodiscard]] bool cancel(core::TaskId task_id);
     [[nodiscard]] bool cancel_queued(core::TaskId task_id,
                                      std::optional<TaskPeerIdentity> peer = std::nullopt);
@@ -115,11 +124,13 @@ class ExecutionAdmissionState final {
         std::uint64_t acceptance_deadline_nanoseconds = 0;
     };
 
+    enum class AdmissionKind : std::uint8_t { kLegacy, kCooperative, kNative };
     [[nodiscard]] core::SubmitResult submit_impl(const TaskAdmissionRequest& request,
                                                  TaskResourceRegistrar registrar,
                                                  void* registrar_context,
                                                  std::optional<TaskPeerIdentity> peer,
-                                                 std::optional<NativeEpochExtent> extent);
+                                                 std::optional<NativeEpochExtent> extent,
+                                                 AdmissionKind kind);
     // Requires admission_mutex_; identity/type checking never renews an extent.
     [[nodiscard]] bool native_epoch_owner_matches(
         TaskExecutionIdentity execution, const std::optional<TaskPeerIdentity>& peer) const;
@@ -149,6 +160,7 @@ class ExecutionAdmissionState final {
     std::chrono::milliseconds lease_timeout_;
     bool bind_leases_to_process_ = false;
     const std::optional<NativeEpochExtent> native_epoch_policy;
+    void (*const before_pending_insert)();
     TaskDispatchObserver dispatch_observer_ = nullptr;
     void* dispatch_observer_context_ = nullptr;
     TaskCompletionObserver completion_observer_ = nullptr;

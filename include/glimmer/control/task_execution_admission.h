@@ -34,6 +34,14 @@ class TaskExecutionAdmissionService final {
                                             TaskResourceRegistrar registrar,
                                             void* registrar_context,
                                             std::optional<TaskPeerIdentity> peer = std::nullopt);
+    // Atomically publishes an owner-bound cooperative admission.
+    [[nodiscard]] core::SubmitResult submit_cooperative(const TaskAdmissionRequest& request,
+                                                        TaskResourceRegistrar registrar,
+                                                        void* registrar_context,
+                                                        std::optional<TaskPeerIdentity> peer);
+    // Cancels only owner-bound cooperative work that has never been dispatched.
+    [[nodiscard]] bool cancel_pending_cooperative(core::TaskId task_id,
+                                                  std::optional<TaskPeerIdentity> peer);
     [[nodiscard]] bool cancel(core::TaskId task_id);
     [[nodiscard]] bool cancel_queued(core::TaskId task_id,
                                      std::optional<TaskPeerIdentity> peer = std::nullopt);

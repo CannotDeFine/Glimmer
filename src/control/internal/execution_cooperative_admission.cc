@@ -8,25 +8,14 @@ std::optional<core::TaskSnapshot> ExecutionAdmissionState::claim_execution(
         return std::nullopt;
     }
     std::unique_lock lock(admission_mutex_);
-    const auto active_epoch = active_leases_.find(task_id);
-    const auto pending_epoch = pending_leases_.find(task_id);
-    if ((active_epoch != active_leases_.end() && active_epoch->second.native_epoch.has_value()) ||
-        (pending_epoch != pending_leases_.end() &&
-         pending_epoch->second.native_epoch.has_value())) {
+    const auto pending = pending_leases_.find(task_id);
+    if (pending == pending_leases_.end() || !pending->second.is_cooperative ||
+        pending->second.native_epoch.has_value() || pending->second.reaping) {
         return std::nullopt;
     }
     auto current = scheduler_.find(task_id);
     if (!current.has_value()) {
         return std::nullopt;
-    }
-    if (current->state == core::TaskState::kRunning) {
-        const auto lease = active_leases_.find(task_id);
-        if (lease == active_leases_.end() || lease->second.reaping ||
-            !owner_matches(lease->second, peer)) {
-            return std::nullopt;
-        }
-        lease->second.is_cooperative = true;
-        return current;
     }
     if (current->state != core::TaskState::kQueued || !pending_owner_matches(task_id, peer)) {
         return std::nullopt;
@@ -44,6 +33,26 @@ std::optional<core::TaskSnapshot> ExecutionAdmissionState::claim_execution(
     observe_dispatch(*snapshot);
     notify_state_change();
     return snapshot;
+}
+
+bool ExecutionAdmissionState::cancel_pending_cooperative(core::TaskId task_id,
+                                                         std::optional<TaskPeerIdentity> peer) {
+    std::unique_lock lock(admission_mutex_);
+    const auto lease = pending_leases_.find(task_id);
+    const auto task = scheduler_.find(task_id);
+    if (lease == pending_leases_.end() || !lease->second.is_cooperative ||
+        lease->second.native_epoch.has_value() || lease->second.reaping ||
+        !owner_matches(lease->second, peer) || !task.has_value() ||
+        task->state != core::TaskState::kQueued || task->dispatch_sequence != 0 ||
+        !scheduler_.cancel_queued(task_id)) {
+        return false;
+    }
+    const auto record = lease->second;
+    pending_leases_.erase(lease);
+    lock.unlock();
+    observe_completion(*task, core::TaskState::kCancelled, record);
+    notify_state_change();
+    return true;
 }
 
 std::optional<bool> ExecutionAdmissionState::retreat_requested(

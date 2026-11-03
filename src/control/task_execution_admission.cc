@@ -41,6 +41,17 @@ core::SubmitResult TaskExecutionAdmissionService::submit(const TaskAdmissionRequ
     return impl_->state.submit(request, registrar, context, peer);
 }
 
+core::SubmitResult TaskExecutionAdmissionService::submit_cooperative(
+    const TaskAdmissionRequest& request, TaskResourceRegistrar registrar, void* context,
+    std::optional<TaskPeerIdentity> peer) {
+    return impl_->state.submit_cooperative(request, registrar, context, peer);
+}
+
+bool TaskExecutionAdmissionService::cancel_pending_cooperative(
+    core::TaskId id, std::optional<TaskPeerIdentity> peer) {
+    return impl_->state.cancel_pending_cooperative(id, peer);
+}
+
 bool TaskExecutionAdmissionService::cancel(core::TaskId id) {
     return impl_->state.cancel(id);
 }

@@ -1,5 +1,7 @@
 add_executable(glimmer_control_task_execution_admission_test
     control/task_execution_admission_test.cc)
+target_include_directories(glimmer_control_task_execution_admission_test PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/control")
 target_link_libraries(glimmer_control_task_execution_admission_test PRIVATE
     Glimmer::control Glimmer::project_options)
 glimmer_enable_clang_tidy(glimmer_control_task_execution_admission_test)

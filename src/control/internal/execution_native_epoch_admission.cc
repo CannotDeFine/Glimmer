@@ -33,7 +33,7 @@ core::SubmitResult ExecutionAdmissionState::submit_native_epoch(
         request.work_units != extent.max_calls) {
         return {.status = core::SubmitStatus::kInvalidTask};
     }
-    return submit_impl(request, registrar, registrar_context, peer, extent);
+    return submit_impl(request, registrar, registrar_context, peer, extent, AdmissionKind::kNative);
 }
 
 std::optional<NativeEpochGrant> ExecutionAdmissionState::claim_native_epoch(
