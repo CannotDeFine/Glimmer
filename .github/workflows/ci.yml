@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Check shell scripts when ShellCheck is available
@@ -29,8 +29,12 @@ jobs:
           fi
       - name: Initialize spdlog
         run: git submodule update --init --recursive -- 3rdparty/spdlog
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install --yes clang-format-18
       - name: Configure
-        run: cmake --preset debug -DGLIMMER_WARNINGS_AS_ERRORS=ON
+        run: >-
+          cmake --preset debug -DGLIMMER_WARNINGS_AS_ERRORS=ON
+          -DGLIMMER_CLANG_FORMAT=/usr/bin/clang-format-18
       - name: Build
         run: cmake --build --preset debug
       - name: Test
