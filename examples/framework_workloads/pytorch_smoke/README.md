@@ -237,9 +237,6 @@ Profiler injection can also affect symbol routing. The analyzer lists `LaunchKer
 observations separately. Driver/Runtime extended launches and their PTDS aliases
 now have explicit wrappers, but seeing kernels is not proof that all launches were admitted. Audit
 the corresponding unprofiled lookup/launch path before claiming coverage.
-See [ADR 0037](../../../docs/decisions/0037-warmed-cuda-timeline-diagnostics.md).
-The coverage and completion fixes are recorded in
-[ADR 0038](../../../docs/decisions/0038-extended-launch-and-completion-correctness.md).
 
 ## Common-window SLO validation
 

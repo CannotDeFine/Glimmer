@@ -140,5 +140,5 @@ from a prototype into a shared-GPU scheduler.
 - Test scheduling logic with a simulated backend and deterministic time source;
   real GPU tests complement but do not replace these tests.
 - Cover failure and rollback paths, not only successful execution.
-- Update the relevant architecture or decision documentation when changing
+- Update the relevant architecture documentation when changing
   public APIs, module boundaries, scheduling semantics, or resource isolation.

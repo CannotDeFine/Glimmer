@@ -99,8 +99,7 @@ owning targets and tests.
   to the preload library. A future control-plane lease may bind a logical
   scheduler task to that process, but a CUDA wrapper must never infer a task
   identity from an untrusted pointer or launch argument.
-- Multi-process tenant accounting is governed by
-  [ADR 0005](decisions/0005-shared-quota-control-plane.md); shared state must
+- Multi-process tenant accounting uses shared state that must
   remain behind the `control` contract and must not leak into CUDA wrappers or
   the `core` ledger.
 - The scheduler operates at explicit task boundaries. It does not claim to
@@ -171,8 +170,7 @@ owning targets and tests.
 - The optional queued-task capacity rejects new work with explicit
   `QUEUE_FULL` backpressure before quota reservation; it does not limit running
   tasks or change weighted ordering.
-- [ADR 0034](decisions/0034-adaptive-slo-reservation.md) defines the opt-in
-  adaptive priority reservation. The controller consumes high-priority
+- The opt-in adaptive priority reservation controller consumes high-priority
   completion observations, changes reserved capacity only at window boundaries,
   and is disabled when no queue-wait target is configured. The control service
   reports transitions made by its simulated executor explicitly; remote workers
@@ -221,17 +219,16 @@ owning targets and tests.
   and tracked as one task on its supplied stream; graph-owned memory nodes retain
   their separate fail-closed policy.
 - Framework benchmark timing and shared measurement windows are owned by the
-  example harness, as defined in
-  [ADR 0035](decisions/0035-common-window-framework-measurements.md). They do not
+  example harness. They do not
   add measurement barriers or application-request semantics to the interceptor.
 - Warmed CUDA profiler ranges and Nsight SQLite analysis also belong to the
-  example harness ([ADR 0037](decisions/0037-warmed-cuda-timeline-diagnostics.md)).
+  example harness.
   They do not instrument runtime hot paths or change event polling. Traced
   diagnostic data is kept separate from untraced benchmark accounting.
 
 ## Change rules
 
 - Add a module responsibility here before implementing a new top-level module.
-- Record an ADR before reversing a dependency direction or exposing a new
-  cross-module contract.
+- Review the architecture before reversing a dependency direction or exposing
+  a new cross-module contract.
 - Add or update tests whenever a module's observable behavior changes.

@@ -13,10 +13,6 @@ update trigger.
 | [DEVELOPMENT_LIFECYCLE.md](DEVELOPMENT_LIFECYCLE.md) | Defines the proposal, design, implementation, verification, review, integration, and release gates. | The development or review workflow changes. |
 | [GIT_GUIDELINES.md](GIT_GUIDELINES.md) | Defines the single-branch workflow and commit-message format. | The contribution workflow changes. |
 | [TESTING.md](TESTING.md) | Defines required test coverage and test levels. | Test policy or infrastructure changes. |
-| [decisions/](decisions/) | Records accepted architecture decisions and their consequences. | A decision affects module boundaries, public behavior, dependencies, or operations. |
-
-The current task-memory isolation decision is recorded in
-[ADR 0008](decisions/0008-task-scoped-memory-isolation.md).
 
 Documentation describes intended behavior, not guesses. Keep current code and
 documentation aligned; mark a planned component as planned until it exists.

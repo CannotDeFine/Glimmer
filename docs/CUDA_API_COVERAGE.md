@@ -66,9 +66,7 @@ Quota accounting has two explicit modes. The default process-local mode is
 configured with `GLIMMER_MEMORY_LIMIT_BYTES` and preserves the M1 behavior.
 Cross-process accounting requires `GLIMMER_QUOTA_MODE=shared`,
 `GLIMMER_QUOTA_TENANT_ID`, and `GLIMMER_MEMORY_LIMIT_BYTES`; the optional
-`GLIMMER_QUOTA_DEVICE_ID` selects the initial device record. Shared state and
-its recovery guarantees are defined by
-[ADR 0005](decisions/0005-shared-quota-control-plane.md).
+`GLIMMER_QUOTA_DEVICE_ID` selects the initial device record.
 Shared mode may additionally set `GLIMMER_TASK_MEMORY_LIMIT_BYTES` to apply a
 narrower limit to the CUDA process attached to the preload library. Covered
 allocations must pass both the tenant aggregate and task limit. If the task
@@ -197,8 +195,7 @@ allocation size. Accepting the import would create an unaccounted path around
 the tenant or task quota. Quota-disabled mode preserves native CUDA behavior.
 The same policy applies to Driver and Runtime IPC entry points and is covered
 by fake-library tests; trusted cross-process IPC accounting remains a future
-control-plane increment. The decision is recorded in
-[ADR 0009](decisions/0009-fail-closed-cuda-ipc-imports.md).
+control-plane increment.
 
 The current `cuGetProcAddress` wrappers reject null or empty symbols and null
 output pointers before entering the real Driver. Version and flag validation
@@ -257,8 +254,7 @@ Each successful allocation record must include at least:
 The allocation map is always local metadata. The authoritative tenant usage
 and admission decision remain behind the control contract, so process-local
 and shared-memory quota stores can be selected without changing wrapper
-semantics. The shared-accounting control-plane contract is defined in [ADR
-0005](decisions/0005-shared-quota-control-plane.md).
+semantics.
 
 The process-local registry serializes pointer release and pointer reuse and
 attaches the CUDA device and context identity to each record. Context-bound
@@ -269,7 +265,7 @@ only after an explicit completion boundary or release, so stream-handle reuse
 cannot silently under-report usage. Context creation/reset paths that are not
 represented by the covered Driver context APIs remain outside the current
 guarantee. Cross-process quota aggregation is available only through the
-explicit shared-memory control-plane mode described in ADR 0005.
+explicit shared-memory control-plane mode.
 
 ## Concurrency and failure rules
 

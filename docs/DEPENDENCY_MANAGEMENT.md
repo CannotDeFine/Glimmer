@@ -74,8 +74,8 @@ Before adding one, document:
 4. Its runtime, build, security, and maintenance cost.
 5. The tests or build checks that verify the integration.
 
-Record a decision under `docs/decisions/` when the dependency affects a public
-API, module boundary, runtime deployment, or long-term operating model.
+Update the architecture guide when the dependency affects a public API, module
+boundary, runtime deployment, or long-term operating model.
 
 ## Source dependency rules
 

@@ -332,9 +332,8 @@ co-location experiment separately with `--build-dir build/cuda-perf`.
 environment cleanup, optimized-build checks, matched workload parameters,
 quota verification, complete repetition sets, identity/metric validation,
 service evidence and cleanup, and failure/output preservation. It uses only
-the Python standard library and runs without PyTorch or a GPU. See
-[ADR 0036](decisions/0036-optimized-uncontended-baselines.md) for scope and
-limitations. Do not run builds, tests, or other benchmarks alongside timed GPU
+the Python standard library and runs without PyTorch or a GPU. Do not run
+builds, tests, or other benchmarks alongside timed GPU
 experiments.
 
 `glimmer_pytorch_launch_profile_test` checks the optional warmed CUDA profiler
@@ -345,8 +344,7 @@ outputs. It requires neither Nsight nor PyTorch. The measurement suite rejects
 profiled data as ordinary benchmark results. Run
 `run_launch_profile.py --mode local --role training --duration-seconds 1`
 from the PyTorch example path for optional real Nsight validation; repeat
-native/quota/remote and inference separately. See
-[ADR 0037](decisions/0037-warmed-cuda-timeline-diagnostics.md). Profiling success
+native/quota/remote and inference separately. Profiling success
 is not a performance or complete-interception-coverage pass.
 
 The following additional interceptor regressions require CUDA headers but not
@@ -365,8 +363,7 @@ GPU hardware:
 extended aliases with a real kernel and a launch attribute under one-slot
 enforcement. The Driver PTX GPU test exercises both proc-address stream flags.
 The PyTorch measurement test rejects failed, cancelled, undrained, and malformed
-scheduler metrics even when application output is valid. See
-[ADR 0038](decisions/0038-extended-launch-and-completion-correctness.md).
+scheduler metrics even when application output is valid.
 
 When clang-tidy is unavailable, report it explicitly rather than treating the
 lint preset as passed. When GPU hardware or the CUDA Toolkit is unavailable,

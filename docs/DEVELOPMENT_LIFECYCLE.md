@@ -31,7 +31,7 @@ Proposed -> Designed -> Implemented -> Verified -> Reviewed -> Integrated -> Rel
 | Stage | Required output | Exit criteria |
 | --- | --- | --- |
 | Proposed | Scope, non-goals, acceptance criteria, risk, and rollback plan. | The problem and observable result are unambiguous. |
-| Designed | Affected modules, interfaces, data flow, and decisions. | Architecture and dependency impacts are understood; required ADRs are identified. |
+| Designed | Affected modules, interfaces, data flow, and decisions. | Architecture and dependency impacts are understood. |
 | Implemented | Source, tests, build wiring, and documentation for the logical change. | The change is complete enough to build and review as one unit. |
 | Verified | Reproducible commands and their results. | Required build, test, lint, sanitizer, format, and hardware checks pass or are explicitly recorded as unavailable. |
 | Reviewed | Review findings with severity and disposition. | No unresolved Blocker or Major findings remain; every accepted risk is documented. |
@@ -57,7 +57,7 @@ Classify the change before implementation:
 | Documentation-only | Identify the affected rule or user workflow and verify links and wording. |
 | Internal code change | Identify ownership, error paths, concurrency behavior, and tests. |
 | Behavior or API change | Define compatibility, rejection behavior, regression tests, and documentation updates. |
-| Module or dependency change | Read [ARCHITECTURE.md](ARCHITECTURE.md), relevant ADRs, and [DEPENDENCY_MANAGEMENT.md](DEPENDENCY_MANAGEMENT.md) before editing. |
+| Module or dependency change | Read [ARCHITECTURE.md](ARCHITECTURE.md) and [DEPENDENCY_MANAGEMENT.md](DEPENDENCY_MANAGEMENT.md) before editing. |
 | CUDA/interceptor change | Define the intercepted symbol paths, ABI signatures, reentrancy behavior, quota effects, and GPU/no-GPU test plan. |
 
 Do not begin implementation when the acceptance criteria or ownership model is
@@ -71,7 +71,7 @@ Read the project rules relevant to the change:
   ownership, logging, assertions, and concurrency.
 - [TESTING.md](TESTING.md) for the required test level and failure-path
   coverage.
-- [ARCHITECTURE.md](ARCHITECTURE.md) and relevant ADRs for module boundaries
+- [ARCHITECTURE.md](ARCHITECTURE.md) for module boundaries
   and dependency direction.
 - [DEPENDENCY_MANAGEMENT.md](DEPENDENCY_MANAGEMENT.md) before changing a
   dependency.
@@ -80,7 +80,7 @@ Read the project rules relevant to the change:
 
 The design must identify the affected module and its contract. For a new
 cross-module interface, a changed dependency direction, or a changed accepted
-architecture decision, add or update an ADR before implementation. The design
+architecture decision, update the architecture guide before implementation. The design
 must also state:
 
 - input validation and external error mapping;
@@ -268,4 +268,4 @@ If any statement is false, keep the change `Implemented`, `Verified`, or
 If a rule cannot be followed, record the reason, affected risk, alternative
 verification, owner, and follow-up issue or task. An exception expires when the
 change is integrated unless it is intentionally converted into a documented
-project rule or ADR.
+project rule.
