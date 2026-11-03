@@ -1,5 +1,6 @@
 add_library(glimmer_control
     execution_protocol.cc
+    execution_dnn_protocol.cc
     execution_dnn_backend_protocol.cc
     execution_nccl_protocol.cc
     execution_blas_protocol.cc
