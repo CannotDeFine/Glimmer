@@ -1,5 +1,6 @@
 add_library(glimmer_control
     execution_protocol.cc
+    execution_blas_protocol.cc
     execution_function_protocol.cc
     execution_jit_protocol.cc
     execution_pointer_protocol.cc
