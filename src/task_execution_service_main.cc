@@ -1,5 +1,6 @@
 #include "glimmer/control/task_execution_endpoint.h"
 #include "glimmer/control/unix_socket_task_execution_server.h"
+#include "glimmer/core/adaptive_slo.h"
 #if defined(GLIMMER_TASK_SERVICE_TESTING)
 #include "dispatch_test_hooks.h"
 #endif
@@ -8,10 +9,12 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -35,6 +38,10 @@ struct Options {
     core::SchedulingPolicy policy = core::SchedulingPolicy::kWeightedRoundRobin;
     std::size_t reserved = 0;
     std::uint32_t threshold = 1;
+    std::uint64_t adaptive_target_us = 0;
+    std::size_t adaptive_window = 32;
+    std::size_t adaptive_max_reserved = 0;
+    bool trace_scheduler = false;
     control::NativeEpochExtent epoch{};
     unsigned epoch_fields = 0;
 };
@@ -48,6 +55,10 @@ bool number(std::string_view text, T& result) {
 bool parse_options(int argc, char** argv, Options& options) {
     for (int index = 1; index < argc; ++index) {
         const std::string_view option = argv[index];
+        if (option == "--trace-scheduler") {
+            options.trace_scheduler = true;
+            continue;
+        }
         if (index + 1 >= argc) return false;
         const std::string_view value = argv[++index];
         if (option == "--socket")
@@ -67,6 +78,13 @@ bool parse_options(int argc, char** argv, Options& options) {
             if (!number(value, options.reserved)) return false;
         } else if (option == "--priority-threshold") {
             if (!number(value, options.threshold)) return false;
+        } else if (option == "--adaptive-slo-target-queue-us") {
+            if (!number(value, options.adaptive_target_us)) return false;
+        } else if (option == "--adaptive-slo-window") {
+            if (!number(value, options.adaptive_window) || options.adaptive_window == 0)
+                return false;
+        } else if (option == "--adaptive-slo-max-reserved-slots") {
+            if (!number(value, options.adaptive_max_reserved)) return false;
         } else if (option == "--native-epoch-max-calls") {
             if ((options.epoch_fields & 1U) || !number(value, options.epoch.max_calls))
                 return false;
@@ -87,8 +105,15 @@ bool parse_options(int argc, char** argv, Options& options) {
         } else
             return false;
     }
-    return !options.socket.empty() && options.quota > 0 && options.max_running > 0 &&
-           options.has_queued && options.max_queued > 0 &&
+    const auto adaptive_max = options.adaptive_max_reserved == 0
+                                  ? (options.max_running > 1 ? options.max_running - 1 : 0)
+                                  : options.adaptive_max_reserved;
+    const bool valid_adaptive =
+        options.adaptive_target_us == 0 ||
+        (options.policy == core::SchedulingPolicy::kPriority && adaptive_max > 0 &&
+         adaptive_max <= options.max_running && options.reserved <= adaptive_max);
+    return valid_adaptive && !options.socket.empty() && options.quota > 0 &&
+           options.max_running > 0 && options.has_queued && options.max_queued > 0 &&
            options.reserved <= options.max_running &&
            (options.epoch_fields == 0 ||
             (options.epoch_fields == 15 && control::valid_native_epoch_extent(options.epoch)));
@@ -110,6 +135,33 @@ bool register_task(void*, core::TaskId) noexcept {
 #endif
     return true;
 }
+void trace_dispatch(void*, const control::TaskDispatchObservation& observation) noexcept {
+    static_cast<void>(std::fprintf(
+        stderr,
+        "[glimmer] scheduler dispatch sequence=%llu task_id=%llu tenant=%s priority=%u "
+        "memory_bytes=%llu work_units=%u timestamp_ns=%llu\n",
+        static_cast<unsigned long long>(observation.sequence),
+        static_cast<unsigned long long>(observation.task.task_id),
+        observation.task.tenant_id.c_str(), observation.task.priority,
+        static_cast<unsigned long long>(observation.task.memory_bytes), observation.task.work_units,
+        static_cast<unsigned long long>(observation.dispatched_at_nanoseconds)));
+}
+struct AdaptiveContext {
+    core::AdaptiveSloController* controller = nullptr;
+    std::mutex mutex;
+    std::optional<std::size_t> pending;
+};
+void observe_completion(void* context,
+                        const control::TaskCompletionObservation& observation) noexcept {
+    auto& state = *static_cast<AdaptiveContext*>(context);
+    std::scoped_lock lock(state.mutex);
+    const auto recommendation =
+        state.controller->observe({.priority = observation.task.priority,
+                                   .queue_wait_microseconds = observation.queue_wait_microseconds});
+    if (recommendation) {
+        state.pending = recommendation;
+    }
+}
 void rollback_task(void*, core::TaskId) noexcept {}
 bool empty(const control::TaskExecutionLeaseStatus& state) {
     return state.queued_tasks == 0 && state.running_tasks == 0 && state.pending_legacy == 0 &&
@@ -124,6 +176,8 @@ int run(int argc, char** argv) {
                   << " --socket PATH --quota-bytes N --max-concurrent-tasks N "
                      "--max-queued-tasks N [--scheduler-policy fifo|weighted_rr|drr|priority] "
                      "[--priority-reserved-slots N] [--priority-threshold N] "
+                     "[--adaptive-slo-target-queue-us N] [--adaptive-slo-window N] "
+                     "[--adaptive-slo-max-reserved-slots N] [--trace-scheduler] "
                      "[--native-epoch-max-calls N --native-epoch-prefix-calls N "
                      "--native-epoch-pending-prefixes N --native-epoch-acceptance-us N]\n";
         return 0;
@@ -138,6 +192,19 @@ int run(int argc, char** argv) {
     ::sigemptyset(&action.sa_mask);
     if (::sigaction(SIGINT, &action, nullptr) != 0 || ::sigaction(SIGTERM, &action, nullptr) != 0)
         return 1;
+    std::optional<core::AdaptiveSloController> adaptive_controller;
+    AdaptiveContext adaptive_context;
+    if (options.adaptive_target_us != 0) {
+        const auto maximum = options.adaptive_max_reserved == 0 ? options.max_running - 1
+                                                                : options.adaptive_max_reserved;
+        adaptive_controller.emplace(
+            core::AdaptiveSloOptions{.initial_reserved_slots = options.reserved,
+                                     .max_reserved_slots = maximum,
+                                     .priority_threshold = options.threshold,
+                                     .target_queue_wait_microseconds = options.adaptive_target_us,
+                                     .observation_window = options.adaptive_window});
+        adaptive_context.controller = &*adaptive_controller;
+    }
     auto admission = std::make_unique<control::TaskExecutionAdmissionService>(
         options.quota,
         core::SchedulerOptions{.max_running_tasks = options.max_running,
@@ -145,7 +212,8 @@ int run(int argc, char** argv) {
                                .priority_reserved_slots = options.reserved,
                                .priority_reservation_threshold = options.threshold,
                                .scheduling_policy = options.policy},
-        std::chrono::milliseconds::zero(), true, nullptr, nullptr, nullptr, nullptr,
+        std::chrono::milliseconds::zero(), true, options.trace_scheduler ? trace_dispatch : nullptr,
+        nullptr, adaptive_controller ? observe_completion : nullptr, &adaptive_context,
         options.epoch_fields == 15 ? std::optional{options.epoch} : std::nullopt);
     control::TaskExecutionEndpoint endpoint(std::move(admission), register_task, rollback_task,
                                             nullptr);
@@ -169,6 +237,20 @@ int run(int argc, char** argv) {
             failed = true;
             stop_requested = 1;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (!draining && !stop_requested) {
+            std::optional<std::size_t> recommendation;
+            {
+                std::scoped_lock lock(adaptive_context.mutex);
+                recommendation.swap(adaptive_context.pending);
+            }
+            if (recommendation && !endpoint.set_priority_reserved_slots(*recommendation)) {
+                failed = true;
+                stop_requested = 1;
+            } else if (recommendation && options.trace_scheduler) {
+                static_cast<void>(std::fprintf(stderr, "[glimmer] adaptive reservation slots=%zu\n",
+                                               *recommendation));
+            }
         }
     }
     server.stop();

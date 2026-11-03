@@ -12,6 +12,7 @@
 #include <poll.h>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <thread>
@@ -34,17 +35,35 @@ struct Service {
     std::string directory;
     std::string path;
     pid_t pid = -1;
-    explicit Service(const char* executable, bool poison = false, bool with_native = true) {
+    int trace_fd = -1;
+    std::string trace;
+    explicit Service(const char* executable, bool poison = false, bool with_native = true,
+                     bool adaptive = false) {
         char pattern[] = "/tmp/glimmer-task-service-XXXXXX";
         const auto* made = ::mkdtemp(pattern);
         require(made != nullptr, "create socket directory");
         directory = made;
         path = directory + "/service.sock";
+        int trace_pipe[2] = {-1, -1};
+        if (adaptive) {
+            require(::pipe2(trace_pipe, O_CLOEXEC | O_NONBLOCK) == 0, "create trace pipe");
+        }
         pid = ::fork();
         require(pid >= 0, "fork service");
         if (pid == 0) {
+            if (adaptive) {
+                ::close(trace_pipe[0]);
+                if (::dup2(trace_pipe[1], STDERR_FILENO) < 0) ::_exit(126);
+                ::close(trace_pipe[1]);
+            }
             if (poison) ::setenv("GLIMMER_TEST_DISPATCH_UNCERTAIN", "1", 1);
-            if (with_native) {
+            if (adaptive) {
+                ::execl(executable, executable, "--socket", path.c_str(), "--quota-bytes", "100",
+                        "--max-concurrent-tasks", "2", "--max-queued-tasks", "8",
+                        "--scheduler-policy", "priority", "--adaptive-slo-target-queue-us", "1",
+                        "--adaptive-slo-window", "1", "--trace-scheduler",
+                        static_cast<char*>(nullptr));
+            } else if (with_native) {
                 ::execl(executable, executable, "--socket", path.c_str(), "--quota-bytes", "100",
                         "--max-concurrent-tasks", "1", "--max-queued-tasks", "8",
                         "--native-epoch-max-calls", "4", "--native-epoch-prefix-calls", "2",
@@ -56,6 +75,10 @@ struct Service {
                         static_cast<char*>(nullptr));
             }
             ::_exit(127);
+        }
+        if (adaptive) {
+            ::close(trace_pipe[1]);
+            trace_fd = trace_pipe[0];
         }
         const auto deadline = std::chrono::steady_clock::now() + 3s;
         struct stat status {};
@@ -69,6 +92,7 @@ struct Service {
             pid = -1;
             ::unlink(path.c_str());
             ::rmdir(directory.c_str());
+            if (trace_fd >= 0) ::close(trace_fd);
             throw std::runtime_error("service creates socket");
         }
     }
@@ -81,6 +105,25 @@ struct Service {
         }
         ::unlink(path.c_str());
         ::rmdir(directory.c_str());
+        if (trace_fd >= 0) ::close(trace_fd);
+    }
+    void wait_for_trace(std::string_view expected) {
+        const auto deadline = std::chrono::steady_clock::now() + 3s;
+        while (trace.find(expected) == std::string::npos &&
+               std::chrono::steady_clock::now() < deadline) {
+            pollfd descriptor{.fd = trace_fd, .events = POLLIN, .revents = 0};
+            const auto result = ::poll(&descriptor, 1, 100);
+            if (result < 0 && errno == EINTR) continue;
+            require(result >= 0, "poll trace pipe");
+            if (result == 0) continue;
+            char buffer[1024];
+            const auto size = ::read(trace_fd, buffer, sizeof(buffer));
+            if (size > 0)
+                trace.append(buffer, static_cast<std::size_t>(size));
+            else
+                require(size < 0 && (errno == EAGAIN || errno == EINTR), "read trace pipe");
+        }
+        require(trace.find(expected) != std::string::npos, "expected scheduler trace arrives");
     }
     bool still_running() {
         const auto result = wait_child(pid, nullptr, WNOHANG);
@@ -296,19 +339,76 @@ void test_native_disabled(const char* executable) {
     service.join_success();
 }
 
+void test_adaptive_reservation(const char* executable) {
+    Service service(executable, false, false, true);
+    SharedTaskControlClient client(service.path);
+    const auto first = exec(client, "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE low 10 1 1\n");
+    const auto second = exec(client, "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE low 10 1 1\n");
+    const auto high = exec(client, "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE high 10 1 1 1\n");
+    require(first.kind == TaskExecutionProtocolResponseKind::kExecutionLease &&
+                second.kind == TaskExecutionProtocolResponseKind::kExecutionLease &&
+                high.kind == TaskExecutionProtocolResponseKind::kAccepted,
+            "adaptive fixture queues high priority behind two running tasks");
+    std::this_thread::sleep_for(20ms);
+    const auto complete = [&](const TaskExecutionProtocolResponse& lease) {
+        return exec(client, "GLIMMER_TASK_EXEC_V1 EXEC_COMPLETE " + std::to_string(lease.task_id) +
+                                " " + std::to_string(lease.generation) + "\n");
+    };
+    require(complete(first).state == TaskProtocolState::kCompleted,
+            "first low-priority task completes");
+    const auto granted =
+        exec(client, "GLIMMER_TASK_EXEC_V1 EXEC_CLAIM " + std::to_string(high.task_id) + "\n");
+    require(granted.kind == TaskExecutionProtocolResponseKind::kExecutionLease &&
+                complete(granted).state == TaskProtocolState::kCompleted,
+            "high-priority queued task completes");
+    service.wait_for_trace("scheduler dispatch");
+    service.wait_for_trace("adaptive reservation slots=1");
+    const auto blocked = exec(client, "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE low 10 1 1\n");
+    require(blocked.kind == TaskExecutionProtocolResponseKind::kAccepted,
+            "adaptive reservation blocks a second low-priority task");
+    require(complete(second).state == TaskProtocolState::kCompleted,
+            "remaining low-priority task completes");
+    const auto released =
+        exec(client, "GLIMMER_TASK_EXEC_V1 EXEC_CLAIM " + std::to_string(blocked.task_id) + "\n");
+    require(released.kind == TaskExecutionProtocolResponseKind::kExecutionLease &&
+                complete(released).state == TaskProtocolState::kCompleted,
+            "blocked task completes after capacity is available");
+    require(::kill(service.pid, SIGTERM) == 0, "stop adaptive service");
+    service.join_success();
+}
+
 void test_invalid_options(const char* executable) {
     char pattern[] = "/tmp/glimmer-task-options-XXXXXX";
     const auto* made = ::mkdtemp(pattern);
     require(made != nullptr, "create private option-test directory");
     const std::string path = std::string(made) + "/service.sock";
-    for (const bool partial_native : {false, true}) {
+    for (int invalid = 0; invalid < 6; ++invalid) {
         const auto child = ::fork();
         require(child >= 0, "fork invalid-option service");
         if (child == 0) {
-            if (partial_native) {
+            if (invalid == 1) {
                 ::execl(executable, executable, "--socket", path.c_str(), "--quota-bytes", "100",
                         "--max-concurrent-tasks", "1", "--max-queued-tasks", "8",
                         "--native-epoch-max-calls", "4", static_cast<char*>(nullptr));
+            } else if (invalid == 2) {
+                ::execl(executable, executable, "--socket", path.c_str(), "--quota-bytes", "100",
+                        "--max-concurrent-tasks", "2", "--max-queued-tasks", "8",
+                        "--adaptive-slo-target-queue-us", "1", static_cast<char*>(nullptr));
+            } else if (invalid == 3) {
+                ::execl(executable, executable, "--socket", path.c_str(), "--quota-bytes", "100",
+                        "--max-concurrent-tasks", "2", "--max-queued-tasks", "8",
+                        "--scheduler-policy", "priority", "--adaptive-slo-target-queue-us", "1",
+                        "--adaptive-slo-max-reserved-slots", "3", static_cast<char*>(nullptr));
+            } else if (invalid == 4) {
+                ::execl(executable, executable, "--socket", path.c_str(), "--quota-bytes", "100",
+                        "--max-concurrent-tasks", "2", "--max-queued-tasks", "8",
+                        "--scheduler-policy", "priority", "--adaptive-slo-target-queue-us", "1",
+                        "--adaptive-slo-window", "0", static_cast<char*>(nullptr));
+            } else if (invalid == 5) {
+                ::execl(executable, executable, "--socket", path.c_str(), "--quota-bytes", "100",
+                        "--max-concurrent-tasks", "1", "--max-queued-tasks", "8",
+                        "--scheduler-policy", "priority", "--adaptive-slo-target-queue-us", "1",
+                        static_cast<char*>(nullptr));
             } else {
                 ::execl(executable, executable, "--socket", path.c_str(), "--quota-bytes", "100",
                         "--max-concurrent-tasks", "1", "--max-queued-tasks", "0",
@@ -343,6 +443,7 @@ int main(int argc, char** argv) {
         test_drain(argv[1]);
         test_owner_channel(argv[1]);
         test_native_disabled(argv[1]);
+        test_adaptive_reservation(argv[1]);
         test_invalid_options(argv[1]);
         test_uncertain_shutdown(argv[2]);
         Service client_service(argv[1]);
