@@ -606,6 +606,17 @@ target_link_libraries(glimmer_core_execution_priority_test PRIVATE Glimmer::core
 glimmer_enable_clang_tidy(glimmer_core_execution_priority_test)
 add_test(NAME glimmer_core_execution_priority_test COMMAND glimmer_core_execution_priority_test)
 
+add_executable(glimmer_native_execution_epoch_test
+    interceptor/native_execution_epoch_test.cc
+    "${PROJECT_SOURCE_DIR}/src/interceptor/internal/native_execution_epoch.cc")
+target_include_directories(glimmer_native_execution_epoch_test PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/interceptor")
+target_link_libraries(glimmer_native_execution_epoch_test PRIVATE
+    Glimmer::control Glimmer::project_options Threads::Threads)
+glimmer_enable_clang_tidy(glimmer_native_execution_epoch_test)
+add_test(NAME glimmer_native_execution_epoch_test COMMAND glimmer_native_execution_epoch_test)
+set_tests_properties(glimmer_native_execution_epoch_test PROPERTIES TIMEOUT 20)
+
 add_executable(glimmer_backend_execution_submission_queue_test
     backend/execution_submission_queue_test.cc
 )
