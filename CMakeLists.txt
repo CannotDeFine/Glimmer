@@ -53,6 +53,9 @@ if(GLIMMER_BUILD_CUDA_WORKLOAD)
     endif()
 endif()
 
+include(cmake/ExecutionHostOptimization.cmake)
+glimmer_configure_execution_host_optimization()
+
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
