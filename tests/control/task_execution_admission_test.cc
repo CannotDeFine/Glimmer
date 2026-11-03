@@ -69,6 +69,43 @@ void count_completion(void* context, const TaskCompletionObservation&) noexcept 
     ++static_cast<DispatchFaultCounts*>(context)->completions;
 }
 
+struct CompletionDurations {
+    unsigned calls = 0;
+    std::uint64_t queue_wait_microseconds = 0;
+    std::uint64_t service_time_microseconds = 0;
+};
+
+void record_durations(void* context, const TaskCompletionObservation& observation) noexcept {
+    auto& result = *static_cast<CompletionDurations*>(context);
+    ++result.calls;
+    result.queue_wait_microseconds = observation.queue_wait_microseconds;
+    result.service_time_microseconds = observation.service_time_microseconds;
+}
+
+void test_continuation_accumulates_durations() {
+    CompletionDurations durations;
+    TaskExecutionAdmissionService service(100, {}, 0ms, true, nullptr, nullptr, record_durations,
+                                          &durations);
+    const auto task = service.submit_cooperative({.tenant_id = "timed", .memory_bytes = 60},
+                                                 accept_resource, nullptr, kOwner);
+    const auto first = service.claim_execution(task.task_id, kOwner);
+    expect(first.has_value(), "timing fixture acquires the first execution");
+    const TaskExecutionIdentity initial{
+        task.task_id, first.value_or(glimmer::core::TaskSnapshot{}).dispatch_sequence};
+    std::this_thread::sleep_for(10ms);
+    expect(service.suspend_execution(initial, kOwner) && durations.calls == 0,
+           "suspension does not publish terminal timing");
+    std::this_thread::sleep_for(10ms);
+    const auto second = service.claim_execution(task.task_id, kOwner);
+    const TaskExecutionIdentity resumed{
+        task.task_id, second.value_or(glimmer::core::TaskSnapshot{}).dispatch_sequence};
+    expect(second.has_value() && service.complete_execution(resumed, kOwner),
+           "timing fixture resumes and completes");
+    expect(durations.calls == 1 && durations.service_time_microseconds >= 9000 &&
+               durations.queue_wait_microseconds >= 9000,
+           "terminal timing includes earlier running and paused segments");
+}
+
 void test_detailed_dispatch_failures() {
     using namespace glimmer::core;
     namespace faults = glimmer::core::internal;
@@ -616,5 +653,6 @@ int main() {
     test_pending_claim_expiry_race();
     test_competing_terminal_reports();
     test_suspend_completion_race();
+    test_continuation_accumulates_durations();
     return EXIT_SUCCESS;
 }
