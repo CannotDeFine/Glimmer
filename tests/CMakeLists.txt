@@ -1,3 +1,14 @@
+add_executable(glimmer_control_task_recovery_journal_test
+    control/task_recovery_journal_test.cc)
+target_include_directories(glimmer_control_task_recovery_journal_test PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/control")
+target_link_libraries(glimmer_control_task_recovery_journal_test PRIVATE
+    Glimmer::control Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_control_task_recovery_journal_test)
+add_test(NAME glimmer_control_task_recovery_journal_test
+    COMMAND glimmer_control_task_recovery_journal_test)
+set_tests_properties(glimmer_control_task_recovery_journal_test PROPERTIES TIMEOUT 30)
+
 add_executable(glimmer_control_unix_socket_task_execution_server_test
     control/unix_socket_task_execution_server_test.cc
     "${PROJECT_SOURCE_DIR}/src/control/task_execution_endpoint.cc")

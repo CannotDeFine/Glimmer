@@ -29,6 +29,7 @@ add_library(glimmer_control
     device_capacity_quota.cc
     internal/socket_line_reader.cc
     internal/socket_path.cc
+    internal/task_recovery_journal.cc
     launch_gate.cc
     process_memory_quota.cc
     shared_memory_quota.cc
