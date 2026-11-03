@@ -49,7 +49,7 @@ int main() {
                                CU_GET_PROC_ADDRESS_DEFAULT, &query_status),
               "cuGetProcAddress") &&
         queried_memory_info != nullptr && query_status == CU_GET_PROC_ADDRESS_SUCCESS;
-    using MemoryInfoFunction = CUresult (*)(std::size_t * free_bytes, std::size_t * total_bytes);
+    using MemoryInfoFunction = CUresult (*)(std::size_t* free_bytes, std::size_t* total_bytes);
     const auto queried_memory_info_function =
         reinterpret_cast<MemoryInfoFunction>(queried_memory_info);
 
