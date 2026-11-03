@@ -90,6 +90,10 @@ bool TaskExecutionAdmissionService::fail(core::TaskId id, std::optional<TaskPeer
     return impl_->state.fail(id, peer);
 }
 
+bool TaskExecutionAdmissionService::forget_terminal(core::TaskId id) {
+    return impl_->state.forget_terminal(id);
+}
+
 std::optional<core::TaskSnapshot> TaskExecutionAdmissionService::claim_execution(
     core::TaskId id, std::optional<TaskPeerIdentity> peer) {
     return impl_->state.claim_execution(id, peer);

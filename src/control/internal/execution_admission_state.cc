@@ -152,6 +152,14 @@ bool ExecutionAdmissionState::cancel(core::TaskId task_id) {
     return cancelled;
 }
 
+bool ExecutionAdmissionState::forget_terminal(core::TaskId task_id) {
+    std::scoped_lock lock(admission_mutex_);
+    if (active_leases_.contains(task_id) || pending_leases_.contains(task_id)) {
+        return false;
+    }
+    return scheduler_.forget(task_id);
+}
+
 bool ExecutionAdmissionState::cancel_queued(core::TaskId task_id,
                                             std::optional<TaskPeerIdentity> peer) {
     std::scoped_lock admission_lock(admission_mutex_);

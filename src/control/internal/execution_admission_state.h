@@ -57,6 +57,7 @@ class ExecutionAdmissionState final {
                                 std::optional<TaskPeerIdentity> peer = std::nullopt);
     [[nodiscard]] bool fail(core::TaskId task_id,
                             std::optional<TaskPeerIdentity> peer = std::nullopt);
+    [[nodiscard]] bool forget_terminal(core::TaskId task_id);
     // Cooperative execution requires process-bound leases and a nonzero
     // dispatch generation. Backend suspension is reported only after the
     // physical kernel has stopped; CUDA handles never enter this service.

@@ -55,6 +55,34 @@ void test_pending_allocation_failure() {
            "failed pending allocation rolls back before registrar publishes resources");
 }
 
+void test_forget_terminal() {
+    TaskExecutionAdmissionService service(100, {}, 0ms, true);
+    const TaskAdmissionRequest request{.tenant_id = "tenant", .memory_bytes = 20};
+    const auto submitted = service.submit_cooperative(request, accept_resource, nullptr, kOwner);
+    expect(submitted.accepted() && !service.forget_terminal(submitted.task_id),
+           "pending work cannot be forgotten");
+    const auto claimed = service.claim_execution(submitted.task_id, kOwner);
+    expect(claimed.has_value() && !service.forget_terminal(submitted.task_id),
+           "running work cannot be forgotten");
+    const TaskExecutionIdentity execution{
+        submitted.task_id, claimed.value_or(glimmer::core::TaskSnapshot{}).dispatch_sequence};
+    expect(service.complete_execution(execution, kOwner) &&
+               service.forget_terminal(submitted.task_id) && !service.find(submitted.task_id) &&
+               !service.forget_terminal(submitted.task_id),
+           "retired terminal work can be forgotten exactly once");
+    const auto next = service.submit_cooperative(request, accept_resource, nullptr, kOwner);
+    expect(next.accepted() && next.task_id > submitted.task_id &&
+               service.cancel_pending_cooperative(next.task_id, kOwner) &&
+               service.forget_terminal(next.task_id),
+           "forgetting cannot recycle an old task identity");
+    TaskExecutionAdmissionService unbound(100);
+    const auto untracked = unbound.submit(request, accept_resource, nullptr);
+    expect(untracked.accepted() && !unbound.forget_terminal(untracked.task_id) &&
+               unbound.cancel_queued(untracked.task_id) &&
+               unbound.forget_terminal(untracked.task_id),
+           "scheduler guards untracked legacy records too");
+}
+
 void test_legacy_equivalence() {
     glimmer::core::Scheduler scheduler(100);
     TaskAdmissionService old_service(scheduler);
@@ -475,6 +503,7 @@ void test_suspend_completion_race() {
 
 int main() {
     test_pending_allocation_failure();
+    test_forget_terminal();
     test_legacy_equivalence();
     test_cooperative_ownership();
     test_native_epoch();

@@ -87,6 +87,11 @@ class TaskExecutionAdmissionService final {
                                 std::optional<TaskPeerIdentity> peer = std::nullopt);
     [[nodiscard]] bool fail(core::TaskId task_id,
                             std::optional<TaskPeerIdentity> peer = std::nullopt);
+    // Remove a terminal scheduler record only after its lease is retired.
+    // Forgetting is not resource release or proof of physical completion.
+    // It removes the record from task-count statistics and does not wait for
+    // a concurrent completion observer to return.
+    [[nodiscard]] bool forget_terminal(core::TaskId task_id);
     // Cooperative execution requires process-bound leases and a nonzero
     // dispatch generation. Backend suspension is reported only after the
     // physical kernel has stopped; CUDA handles never enter this service.
