@@ -1,4 +1,6 @@
 #include "glimmer/control/task_protocol.h"
+#include "glimmer/control/task_execution_protocol.h"
+#include "glimmer/control/shared_task_control_client.h"
 #include "glimmer/control/unix_socket_client.h"
 
 #include <charconv>
@@ -21,6 +23,38 @@ void print_usage(std::ostream& output, std::string_view program) {
            << "  " << program << " --socket PATH fail TASK_ID\n"
            << "  " << program << " --socket PATH stats\n"
            << "  " << program << " --socket PATH metrics\n";
+    output << "  " << program << " --execution --socket PATH stats|metrics\n";
+}
+
+int execution_query(int argc, char** argv) {
+    using namespace glimmer::control;
+    if (argc != 5 || std::string_view(argv[2]) != "--socket" ||
+        (std::string_view(argv[4]) != "stats" && std::string_view(argv[4]) != "metrics")) {
+        print_usage(std::cerr, argv[0]);
+        return EXIT_FAILURE;
+    }
+    TaskExecutionProtocolRequest request;
+    request.operation = std::string_view(argv[4]) == "stats"
+                            ? TaskExecutionProtocolOperation::kStats
+                            : TaskExecutionProtocolOperation::kMetrics;
+    const auto encoded = format_task_execution_protocol_request(request);
+    if (!encoded) return EXIT_FAILURE;
+    SharedTaskControlClient client{argv[3]};
+    const auto response = client.request(*encoded);
+    if (!response) {
+        std::cerr << "failed to communicate with task execution service\n";
+        return EXIT_FAILURE;
+    }
+    const auto parsed = parse_task_execution_protocol_response(*response);
+    const auto expected = request.operation == TaskExecutionProtocolOperation::kStats
+                              ? TaskExecutionProtocolResponseKind::kStats
+                              : TaskExecutionProtocolResponseKind::kMetrics;
+    if (!parsed.parsed() || !parsed.response || parsed.response->kind != expected) {
+        std::cerr << "invalid task execution service response\n";
+        return EXIT_FAILURE;
+    }
+    std::cout << *response;
+    return EXIT_SUCCESS;
 }
 
 template <typename Integer>
@@ -57,6 +91,9 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--help") {
         print_usage(std::cout, argv[0]);
         return EXIT_SUCCESS;
+    }
+    if (argc >= 2 && std::string_view(argv[1]) == "--execution") {
+        return execution_query(argc, argv);
     }
     if (argc < 4 || std::string_view(argv[1]) != "--socket") {
         print_usage(std::cerr, argv[0]);

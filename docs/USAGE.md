@@ -29,6 +29,11 @@ for covered allocations, add `GLIMMER_MEMORY_LIMIT_BYTES` to the application's
 environment. A software limit is not hardware isolation and cannot account for
 allocation paths that are not intercepted.
 
+For a separate `glimmer_task_execution_service` socket, add `--execution`
+before `--socket` to query `stats` or `metrics`. Its responses use the
+versioned execution protocol and are not interchangeable with the ordinary
+control-service responses.
+
 ## Shutdown
 
 Allow applications to finish before stopping the service. The control client

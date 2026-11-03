@@ -68,7 +68,8 @@ if(BUILD_TESTING)
     add_test(NAME glimmer_task_execution_service_process_test
         COMMAND glimmer_task_execution_service_process_test
             $<TARGET_FILE:glimmer_task_execution_service>
-            $<TARGET_FILE:glimmer_task_execution_service_test_host>)
+            $<TARGET_FILE:glimmer_task_execution_service_test_host>
+            $<TARGET_FILE:glimmer_control_client>)
     set_tests_properties(glimmer_task_execution_service_process_test PROPERTIES TIMEOUT 15)
     add_test(NAME glimmer_control_service_help COMMAND glimmer_control_service --help)
     set_tests_properties(glimmer_control_service_help PROPERTIES

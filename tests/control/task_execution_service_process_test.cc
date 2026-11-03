@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <csignal>
 #include <cstdlib>
+#include <fcntl.h>
 #include <iostream>
 #include <poll.h>
 #include <stdexcept>
@@ -116,6 +117,49 @@ NativeEpochResponse epoch(SharedTaskControlClient& client, const NativeEpochRequ
     const auto parsed = reply ? parse_native_epoch_response(*reply) : std::nullopt;
     require(parsed.has_value(), "native response decodes");
     return parsed.value_or(NativeEpochResponse{});
+}
+
+void test_execution_client(Service& service, const char* client_executable) {
+    for (const auto* operation : {"stats", "metrics", "claim"}) {
+        int descriptors[2];
+        require(::pipe2(descriptors, O_CLOEXEC) == 0, "create client output pipe");
+        const auto child = ::fork();
+        require(child >= 0, "fork execution client");
+        if (child == 0) {
+            ::close(descriptors[0]);
+            if (::dup2(descriptors[1], STDOUT_FILENO) < 0) ::_exit(126);
+            ::close(descriptors[1]);
+            ::execl(client_executable, client_executable, "--execution", "--socket",
+                    service.path.c_str(), operation, static_cast<char*>(nullptr));
+            ::_exit(127);
+        }
+        ::close(descriptors[1]);
+        std::string output;
+        char buffer[512];
+        ssize_t size = 0;
+        do {
+            size = ::read(descriptors[0], buffer, sizeof(buffer));
+            if (size > 0) output.append(buffer, static_cast<std::size_t>(size));
+        } while (size > 0 || (size < 0 && errno == EINTR));
+        ::close(descriptors[0]);
+        int status = 0;
+        require(wait_child(child, &status, 0) == child && WIFEXITED(status) && size == 0,
+                "execution client exits and output is read completely");
+        if (std::string_view(operation) == "claim") {
+            require(WEXITSTATUS(status) != 0 && output.empty(),
+                    "execution client rejects unsupported state-changing operations");
+            continue;
+        }
+        require(WEXITSTATUS(status) == 0, "execution query completes successfully");
+        const auto parsed = parse_task_execution_protocol_response(output);
+        const auto expected = std::string_view(operation) == "stats"
+                                  ? TaskExecutionProtocolResponseKind::kStats
+                                  : TaskExecutionProtocolResponseKind::kMetrics;
+        require(parsed.parsed() && parsed.response && parsed.response->kind == expected,
+                "execution client prints the versioned stats or metrics reply");
+    }
+    require(::kill(service.pid, SIGTERM) == 0, "stop execution client fixture");
+    service.join_success();
 }
 void test_drain(const char* executable) {
     Service service(executable);
@@ -295,12 +339,14 @@ void test_invalid_options(const char* executable) {
 }  // namespace
 int main(int argc, char** argv) {
     try {
-        require(argc == 3, "service and test-host executables required");
+        require(argc == 4, "service, test-host and client executables required");
         test_drain(argv[1]);
         test_owner_channel(argv[1]);
         test_native_disabled(argv[1]);
         test_invalid_options(argv[1]);
         test_uncertain_shutdown(argv[2]);
+        Service client_service(argv[1]);
+        test_execution_client(client_service, argv[3]);
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
