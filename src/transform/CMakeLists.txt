@@ -1,0 +1,6 @@
+add_library(glimmer_transform ptx_transform.cc cuda_module_image.cc ptx_static_storage.cc)
+add_library(Glimmer::transform ALIAS glimmer_transform)
+set_target_properties(glimmer_transform PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(glimmer_transform PUBLIC "${PROJECT_SOURCE_DIR}/include")
+target_link_libraries(glimmer_transform PUBLIC Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_transform)

@@ -258,3 +258,48 @@ glimmer_enable_clang_tidy(glimmer_control_task_protocol_test)
 
 add_test(NAME glimmer_control_task_protocol_test
     COMMAND glimmer_control_task_protocol_test)
+
+add_executable(glimmer_ptx_uniform_loop_test transform/ptx_uniform_loop_test.cc)
+target_link_libraries(glimmer_ptx_uniform_loop_test PRIVATE
+    Glimmer::transform Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_ptx_uniform_loop_test)
+add_test(NAME glimmer_ptx_uniform_loop_test COMMAND glimmer_ptx_uniform_loop_test)
+set_tests_properties(glimmer_ptx_uniform_loop_test PROPERTIES TIMEOUT 30)
+if(CUDAToolkit_NVCC_EXECUTABLE)
+    add_test(NAME glimmer_ptx_uniform_loop_compiler_test COMMAND "${CMAKE_COMMAND}"
+        "-DTRANSFORMER=$<TARGET_FILE:glimmer_ptx_uniform_loop_test>"
+        "-DNVCC=${CUDAToolkit_NVCC_EXECUTABLE}"
+        "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/ptx-uniform-loop"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/transform/check_uniform_loop_ptx.cmake")
+    set_tests_properties(glimmer_ptx_uniform_loop_compiler_test PROPERTIES TIMEOUT 120)
+endif()
+add_executable(glimmer_transform_ptx_static_storage_test transform/ptx_static_storage_test.cc)
+target_link_libraries(glimmer_transform_ptx_static_storage_test PRIVATE
+    Glimmer::transform Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_transform_ptx_static_storage_test)
+add_test(NAME glimmer_transform_ptx_static_storage_test COMMAND glimmer_transform_ptx_static_storage_test)
+set_tests_properties(glimmer_transform_ptx_static_storage_test PROPERTIES TIMEOUT 30)
+add_executable(glimmer_transform_cuda_module_image_test transform/cuda_module_image_test.cc)
+target_link_libraries(glimmer_transform_cuda_module_image_test PRIVATE Glimmer::transform Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_transform_cuda_module_image_test)
+add_test(NAME glimmer_transform_cuda_module_image_test COMMAND glimmer_transform_cuda_module_image_test)
+add_executable(glimmer_ptx_transform_test
+    interceptor/ptx_transform_test.cc
+)
+target_include_directories(glimmer_ptx_transform_test PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/interceptor")
+target_link_libraries(glimmer_ptx_transform_test PRIVATE Glimmer::transform Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_ptx_transform_test)
+add_test(NAME glimmer_ptx_transform_test COMMAND glimmer_ptx_transform_test)
+add_test(NAME glimmer_ptx_aggregate_parameters_test
+    COMMAND glimmer_ptx_transform_test --aggregate-parameters)
+set_tests_properties(glimmer_ptx_aggregate_parameters_test PROPERTIES TIMEOUT 30)
+if(CUDAToolkit_NVCC_EXECUTABLE)
+    add_test(NAME glimmer_ptx_compiler_test
+        COMMAND "${CMAKE_COMMAND}"
+            "-DTRANSFORMER=$<TARGET_FILE:glimmer_ptx_transform_test>"
+            "-DNVCC=${CUDAToolkit_NVCC_EXECUTABLE}"
+            "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/ptx-compiler"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/transform/check_compiler_ptx.cmake")
+    set_tests_properties(glimmer_ptx_compiler_test PROPERTIES TIMEOUT 120)
+endif()

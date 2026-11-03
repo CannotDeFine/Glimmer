@@ -60,6 +60,7 @@ if(BUILD_TESTING)
     )
 endif()
 
+add_subdirectory(transform)
 add_subdirectory(core)
 add_subdirectory(backend)
 add_subdirectory(control)
