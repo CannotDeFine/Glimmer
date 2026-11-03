@@ -34,6 +34,10 @@ TaskExecutionAdmissionService::TaskExecutionAdmissionService(
 
 TaskExecutionAdmissionService::~TaskExecutionAdmissionService() = default;
 
+bool TaskExecutionAdmissionService::set_priority_reserved_slots(std::size_t slots) {
+    return impl_->state.set_priority_reserved_slots(slots);
+}
+
 core::SubmitResult TaskExecutionAdmissionService::submit(const TaskAdmissionRequest& request,
                                                          TaskResourceRegistrar registrar,
                                                          void* context,

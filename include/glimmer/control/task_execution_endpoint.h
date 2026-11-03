@@ -59,6 +59,8 @@ class TaskExecutionEndpoint final {
     // verify both scheduler task counts, every lease count, and all registered
     // resources before destruction. A timeout is not proof of physical stop.
     [[nodiscard]] std::optional<TaskExecutionLeaseStatus> lease_status() const noexcept;
+    // Only available before shutdown. Must not be called by endpoint callbacks.
+    [[nodiscard]] bool set_priority_reserved_slots(std::size_t slots) noexcept;
 
    private:
     struct Impl;

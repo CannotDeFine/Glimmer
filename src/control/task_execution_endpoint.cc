@@ -449,6 +449,21 @@ bool TaskExecutionEndpoint::begin_shutdown() noexcept {
     return impl_->await_shutdown() == ShutdownPhase::kDraining;
 }
 
+bool TaskExecutionEndpoint::set_priority_reserved_slots(std::size_t slots) noexcept {
+    try {
+        if (impl_->await_shutdown() != ShutdownPhase::kAccepting) {
+            return false;
+        }
+        std::shared_lock lock(impl_->gate_);
+        if (impl_->phase_.load(std::memory_order_acquire) != ShutdownPhase::kAccepting) {
+            return false;
+        }
+        return impl_->admission_service_->set_priority_reserved_slots(slots);
+    } catch (...) {
+        return false;
+    }
+}
+
 std::optional<TaskExecutionLeaseStatus> TaskExecutionEndpoint::lease_status() const noexcept {
     try {
         while (true) {

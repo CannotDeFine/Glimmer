@@ -149,6 +149,9 @@ class TaskExecutionAdmissionService final {
     [[nodiscard]] std::optional<core::TaskSnapshot> find(core::TaskId task_id) const;
     [[nodiscard]] core::SchedulerStats stats() const;
     [[nodiscard]] TaskExecutionLeaseStatus lease_status() const;
+    // Update priority reservation and wake blocked claims. Returns false when
+    // priority scheduling is disabled.
+    [[nodiscard]] bool set_priority_reserved_slots(std::size_t slots);
 
    private:
     struct Impl;

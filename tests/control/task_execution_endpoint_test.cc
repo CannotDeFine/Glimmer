@@ -563,9 +563,71 @@ void test_shutdown_waits_for_registration() {
            "admission that won the race remains owner-cancellable");
 }
 
+void test_reservation_shutdown_race() {
+    using namespace glimmer::core;
+    using namespace std::chrono_literals;
+    for (int i = 0; i < 32; ++i) {
+        Resources resources;
+        auto admission = std::make_unique<TaskExecutionAdmissionService>(
+            100, SchedulerOptions{.max_running_tasks = 2,
+                                  .max_queued_tasks = 4,
+                                  .scheduling_policy = SchedulingPolicy::kPriority});
+        TaskExecutionEndpoint service(std::move(admission), register_resource, rollback_resource,
+                                      &resources);
+        std::barrier start(3);
+        bool updated = false;
+        bool stopped = false;
+        std::thread setter([&] {
+            start.arrive_and_wait();
+            updated = service.set_priority_reserved_slots(1);
+        });
+        std::thread shutdown([&] {
+            start.arrive_and_wait();
+            stopped = service.begin_shutdown();
+        });
+        start.arrive_and_wait();
+        setter.join();
+        shutdown.join();
+        static_cast<void>(updated);
+        expect(stopped && !service.set_priority_reserved_slots(0),
+               "reservation cannot change after shutdown begins");
+    }
+    Resources resources;
+    auto admission = std::make_unique<TaskExecutionAdmissionService>(
+        100, SchedulerOptions{.max_running_tasks = 2,
+                              .max_queued_tasks = 4,
+                              .scheduling_policy = SchedulingPolicy::kPriority});
+    TaskExecutionEndpoint service(std::move(admission), register_resource, rollback_resource,
+                                  &resources);
+    std::atomic<bool> stop_setters{false};
+    std::atomic<unsigned> started{0};
+    std::array<std::thread, 4> setters;
+    for (auto& setter : setters) {
+        setter = std::thread([&] {
+            static_cast<void>(service.set_priority_reserved_slots(1));
+            started.fetch_add(1);
+            started.notify_all();
+            while (!stop_setters.load()) {
+                static_cast<void>(service.set_priority_reserved_slots(1));
+            }
+        });
+    }
+    for (auto count = started.load(); count != setters.size(); count = started.load()) {
+        started.wait(count);
+    }
+    auto shutdown = std::async(std::launch::async, [&] { return service.begin_shutdown(); });
+    expect(shutdown.wait_for(2s) == std::future_status::ready && shutdown.get(),
+           "continuous reservation updates cannot starve shutdown");
+    stop_setters.store(true);
+    for (auto& setter : setters) {
+        setter.join();
+    }
+}
+
 }  // namespace
 
 int main() {
+    test_reservation_shutdown_race();
     test_legacy_golden();
     test_handoff_preserves_completion_on_registration_failure();
     test_routing_and_ownership();

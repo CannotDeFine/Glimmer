@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
+#include <future>
 #include <iostream>
 #include <new>
 #include <string_view>
@@ -80,6 +81,62 @@ void record_durations(void* context, const TaskCompletionObservation& observatio
     ++result.calls;
     result.queue_wait_microseconds = observation.queue_wait_microseconds;
     result.service_time_microseconds = observation.service_time_microseconds;
+}
+
+void test_reservation_update_wakes_claim() {
+    using namespace glimmer::core;
+    TaskExecutionAdmissionService service(
+        100, SchedulerOptions{.max_running_tasks = 2,
+                              .max_queued_tasks = 4,
+                              .priority_reserved_slots = 1,
+                              .priority_reservation_threshold = 1,
+                              .scheduling_policy = SchedulingPolicy::kPriority});
+    const TaskAdmissionRequest request{.tenant_id = "low", .memory_bytes = 10};
+    const auto first = service.submit(request, accept_resource, nullptr);
+    const auto second = service.submit(request, accept_resource, nullptr);
+    expect(first.accepted() && second.accepted() && service.claim(first.task_id).has_value(),
+           "reservation fixture has a low-priority task running");
+    auto waiting =
+        std::async(std::launch::async, [&] { return service.wait_claim(second.task_id, 2s); });
+    expect(waiting.wait_for(50ms) == std::future_status::timeout,
+           "reservation blocks the second low-priority task");
+    expect(service.set_priority_reserved_slots(0), "priority reservation updates");
+    expect(waiting.wait_for(500ms) == std::future_status::ready && waiting.get().has_value(),
+           "reservation update wakes the blocked claim");
+    expect(service.complete(first.task_id) && service.complete(second.task_id),
+           "reservation fixture retires both tasks");
+    TaskExecutionAdmissionService fifo(100);
+    expect(!fifo.set_priority_reserved_slots(1), "non-priority scheduling rejects reservation");
+}
+
+void test_reservation_update_completion_race() {
+    using namespace glimmer::core;
+    TaskExecutionAdmissionService service(
+        100, SchedulerOptions{.max_running_tasks = 2,
+                              .max_queued_tasks = 4,
+                              .scheduling_policy = SchedulingPolicy::kPriority});
+    for (int i = 0; i < 32; ++i) {
+        const auto task =
+            service.submit({.tenant_id = "race", .memory_bytes = 10}, accept_resource, nullptr);
+        expect(task.accepted() && service.claim(task.task_id).has_value(),
+               "completion race fixture starts");
+        bool updated = false;
+        bool completed = false;
+        std::barrier start(3);
+        std::thread setter([&] {
+            start.arrive_and_wait();
+            updated = service.set_priority_reserved_slots(1);
+        });
+        std::thread completion([&] {
+            start.arrive_and_wait();
+            completed = service.complete(task.task_id);
+        });
+        start.arrive_and_wait();
+        setter.join();
+        completion.join();
+        expect(updated && completed && service.forget_terminal(task.task_id),
+               "concurrent completion and reservation update both succeed");
+    }
 }
 
 void test_continuation_accumulates_durations() {
@@ -637,6 +694,8 @@ void test_suspend_completion_race() {
 }  // namespace
 
 int main() {
+    test_reservation_update_wakes_claim();
+    test_reservation_update_completion_race();
     test_pending_allocation_failure();
     test_detailed_dispatch_failures();
     test_forget_terminal();

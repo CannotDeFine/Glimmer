@@ -110,6 +110,7 @@ class ExecutionAdmissionState final {
     [[nodiscard]] std::optional<core::TaskSnapshot> find(core::TaskId task_id) const;
     [[nodiscard]] core::SchedulerStats stats() const;
     [[nodiscard]] TaskExecutionLeaseStatus lease_status() const;
+    [[nodiscard]] bool set_priority_reserved_slots(std::size_t slots);
 
    private:
     core::Scheduler& scheduler_;

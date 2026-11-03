@@ -656,6 +656,18 @@ bool ExecutionAdmissionState::reap_expired() {
     return failed;
 }
 
+bool ExecutionAdmissionState::set_priority_reserved_slots(std::size_t slots) {
+    bool updated = false;
+    {
+        std::scoped_lock lock(admission_mutex_);
+        updated = scheduler_.set_priority_reserved_slots(slots);
+    }
+    if (updated) {
+        notify_state_change();
+    }
+    return updated;
+}
+
 void ExecutionAdmissionState::notify_state_change() noexcept {
     {
         std::scoped_lock lock(state_mutex_);
