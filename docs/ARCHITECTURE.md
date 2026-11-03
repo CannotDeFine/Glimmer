@@ -77,6 +77,10 @@ retires newly issued cooperative or native work and rolls back its resource bind
 only when non-issue is known. An uncertain transport delivery is not retried or
 treated as proof of non-issue. Completion observers are not resource ownership.
 
+The shared task client uses an authenticated local channel and pins the first
+service incarnation for its logical session. It does not replay a request after
+an uncertain reply or fall back to another transport.
+
 The backend submission queue retains accepted command data until trusted
 proof of no native issue or final physical stop; its receipt remains until
 reply acknowledgement. It owns neither CUDA calls nor scheduling policy.

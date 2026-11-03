@@ -1,3 +1,14 @@
+add_executable(glimmer_control_shared_task_control_client_test
+    control/shared_task_control_client_test.cc)
+target_include_directories(glimmer_control_shared_task_control_client_test PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/control")
+target_link_libraries(glimmer_control_shared_task_control_client_test PRIVATE
+    Glimmer::control Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_control_shared_task_control_client_test)
+add_test(NAME glimmer_control_shared_task_control_client_test
+    COMMAND glimmer_control_shared_task_control_client_test)
+set_tests_properties(glimmer_control_shared_task_control_client_test PROPERTIES TIMEOUT 30)
+
 add_executable(glimmer_control_task_execution_endpoint_test
     control/task_execution_endpoint_test.cc
     "${PROJECT_SOURCE_DIR}/src/control/task_execution_endpoint.cc")
