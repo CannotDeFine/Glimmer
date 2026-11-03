@@ -323,6 +323,7 @@ bool test_cooperative_release_proof() {
                     "start generation-bound cooperative release")) {
             return false;
         }
+        if (!ticket) return false;
         passed &= expect(!registry.confirm_cooperative_release(*ticket) &&
                              registry.prepare_cooperative_release(*ticket) &&
                              !registry.prepare_cooperative_release(*ticket),

@@ -108,14 +108,14 @@ TaskExecutionProtocolResponse exec(SharedTaskControlClient& client, const std::s
     const auto parsed = wire ? parse_task_execution_protocol_response(*wire)
                              : TaskExecutionProtocolResponseParseResult{};
     require(parsed.parsed(), "execution response decodes");
-    return *parsed.response;
+    return parsed.response.value_or(TaskExecutionProtocolResponse{});
 }
 NativeEpochResponse epoch(SharedTaskControlClient& client, const NativeEpochRequest& request) {
     const auto wire = format_native_epoch_request(request);
     const auto reply = wire ? client.request(*wire) : std::nullopt;
     const auto parsed = reply ? parse_native_epoch_response(*reply) : std::nullopt;
     require(parsed.has_value(), "native response decodes");
-    return *parsed;
+    return parsed.value_or(NativeEpochResponse{});
 }
 void test_drain(const char* executable) {
     Service service(executable);
@@ -132,7 +132,7 @@ void test_drain(const char* executable) {
         const auto wire = foreign.request(done);
         const auto parsed = wire ? parse_task_execution_protocol_response(*wire)
                                  : TaskExecutionProtocolResponseParseResult{};
-        ::_exit(parsed.parsed() &&
+        ::_exit(parsed.parsed() && parsed.response &&
                         parsed.response->kind == TaskExecutionProtocolResponseKind::kError
                     ? 0
                     : 1);
@@ -155,7 +155,7 @@ void test_drain(const char* executable) {
         while (progress == internal::OwnedExchangeProgress::kPending) {
             const auto wait = owner.wait_state(sent.ticket);
             require(wait.has_value(), "V3 response exposes wait descriptor");
-            pollfd descriptor{.fd = wait->descriptor, .events = POLLIN, .revents = 0};
+            pollfd descriptor{.fd = wait ? wait->descriptor : -1, .events = POLLIN, .revents = 0};
             require(::poll(&descriptor, 1, 1000) > 0, "V3 response wakes owner");
             progress = owner.poll(sent.ticket, response);
         }

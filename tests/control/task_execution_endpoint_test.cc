@@ -260,18 +260,19 @@ void test_dispatch_failures_preserve_ownership() {
             faults::dispatch_test_faults = 0;
             const auto status = service->lease_status();
             expect(status.has_value(), "fault fixture status available");
+            const auto lease_status = status.value_or(TaskExecutionLeaseStatus{});
             if (uncertain) {
-                expect(!response && status->pending_cooperative == 1 && status->reaping == 1 &&
-                           resources.rolled_back.load() == 0,
+                expect(!response && lease_status.pending_cooperative == 1 &&
+                           lease_status.reaping == 1 && resources.rolled_back.load() == 0,
                        "uncertain dispatch cannot be published as pending or released");
             } else {
                 const bool was_published = std::string_view(operation_name) == "claim";
-                expect(response && status->pending_cooperative == 0 && used(*service) == 0 &&
+                expect(response && lease_status.pending_cooperative == 0 && used(*service) == 0 &&
                            resources.rolled_back.load() == (was_published ? 0U : 1U),
                        "clean failure rolls back only an unpublished resource");
-                const auto decoded = parse_task_execution_protocol_response(*response);
+                const auto decoded = parse_task_execution_protocol_response(response.value_or(""));
                 expect(decoded.parsed(), "clean failure response parses");
-                const auto value = *decoded.response;
+                const auto value = decoded.response.value_or(TaskExecutionProtocolResponse{});
                 if (std::string_view(operation_name) == "acquire") {
                     expect(value.kind == TaskExecutionProtocolResponseKind::kError,
                            "clean acquire failure is not accepted");
@@ -302,14 +303,15 @@ void test_dispatch_failures_preserve_ownership() {
         const auto status = service->lease_status();
         expect(status && resources.rolled_back.load() == 0,
                "published continuation resource never uses unpublished rollback");
+        const auto lease_status = status.value_or(TaskExecutionLeaseStatus{});
         if (uncertain) {
-            expect(!reply && status->pending_cooperative == 1 && status->reaping == 1,
+            expect(!reply && lease_status.pending_cooperative == 1 && lease_status.reaping == 1,
                    "uncertain continuation retains ownership");
         } else {
             const auto decoded = reply ? parse_task_execution_protocol_response(*reply)
                                        : TaskExecutionProtocolResponseParseResult{};
-            expect(decoded.parsed() && decoded.response->state == TaskProtocolState::kFailed &&
-                       used(*service) == 0,
+            expect(decoded.parsed() && decoded.response &&
+                       decoded.response->state == TaskProtocolState::kFailed && used(*service) == 0,
                    "clean continuation failure reports terminal without releasing owner resource");
         }
     }
@@ -341,7 +343,7 @@ void test_published_native_claim_format_failure() {
         } else {
             testing::fail_next_endpoint_response_format();
         }
-        expect(!service->handle(*wire, kOwner) && resources.rolled_back.load() == 0 &&
+        expect(!service->handle(wire.value_or(""), kOwner) && resources.rolled_back.load() == 0 &&
                    legacy(*service, "GLIMMER_TASK_V1 QUERY " +
                                         std::to_string(pending.grant.execution.task_id) + "\n")
                            .state == TaskProtocolState::kFailed &&

@@ -210,14 +210,15 @@ void test_owner_reply_hint_channel() {
         };
         const auto lease = parse_task_execution_protocol_response(
             exchange("GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n"));
-        expect(lease.parsed() &&
+        expect(lease.parsed() && lease.response &&
                    lease.response->kind == TaskExecutionProtocolResponseKind::kExecutionLease,
                "owner channel receives a cooperative grant");
-        const auto done = "GLIMMER_TASK_EXEC_V1 EXEC_COMPLETE " +
-                          std::to_string(lease.response->task_id) + " " +
-                          std::to_string(lease.response->generation) + "\n";
+        const auto granted = lease.response.value_or(TaskExecutionProtocolResponse{});
+        const auto done = "GLIMMER_TASK_EXEC_V1 EXEC_COMPLETE " + std::to_string(granted.task_id) +
+                          " " + std::to_string(granted.generation) + "\n";
         const auto completed = parse_task_execution_protocol_response(exchange(done));
-        expect(completed.parsed() && completed.response->state == TaskProtocolState::kCompleted,
+        expect(completed.parsed() && completed.response &&
+                   completed.response->state == TaskProtocolState::kCompleted,
                "owner channel receives a terminal acknowledgment");
         expect(client.close_idle(), "close idle owner channel");
     }
