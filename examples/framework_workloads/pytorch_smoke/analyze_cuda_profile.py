@@ -63,6 +63,40 @@ def analyze_database(database):
               "device_id": kernel_rows[0][2], "global_pid": kernel_rows[0][3],
               "kernels": interval_summary(intervals),
               "kernel_duration": distribution([end - start for start, end in intervals])}
+    columns = {row[1] for row in database.execute(f"PRAGMA table_info({kernel_table})")}
+    name_columns = [name for name in ("mangledName", "demangledName", "shortName")
+                    if name in columns]
+    groups = defaultdict(list)
+    if name_columns:
+        # A missing preferred string falls back to the next actual string,
+        # not merely the next nonnull ID (which might have no StringIds row).
+        joins = " ".join(f"LEFT JOIN StringIds s{index} ON k.{name}=s{index}.id"
+                         for index, name in enumerate(name_columns))
+        names = [f"s{index}.value" for index in range(len(name_columns))]
+        expression = f"COALESCE({', '.join(names)})" if len(names) > 1 else names[0]
+        named_rows = database.execute(
+            f"SELECT k.start, k.end, {expression} FROM {kernel_table} k {joins}").fetchall()
+    else:
+        named_rows = [(start, end, None) for start, end, _, _ in kernel_rows]
+    if len(named_rows) != len(kernel_rows):
+        raise ValueError("kernel name join changed the captured event count")
+    for start, end, name in named_rows:
+        if name is not None and (not isinstance(name, str) or not name):
+            raise ValueError("invalid captured kernel name")
+        groups[name].append(end - start)
+    total_ns = result["kernel_duration"]["total_ns"]
+    named_groups = [{"name": name, **distribution(durations),
+                     "captured_kernel_time_fraction": sum(durations) / total_ns}
+                    for name, durations in groups.items()]
+    if sum(group["total_ns"] for group in named_groups) != total_ns:
+        raise ValueError("named kernel durations do not reconcile with captured total")
+    result["kernel_duration_by_name"] = {
+        "name_columns": name_columns, "total_ns": total_ns,
+        "unknown_total_ns": sum(groups.get(None, [])),
+        "groups": sorted(named_groups, key=lambda group: (-group["total_ns"], group["name"] or "")),
+        "denominator": "sum of captured kernel durations, including overlap and unknown names",
+        "classification": "unclassified; names alone do not prove input format or preemption",
+    }
     activity_counts = {"KERNEL": len(intervals)}
     for kind in ("MEMCPY", "MEMSET"):
         table = f"CUPTI_ACTIVITY_KIND_{kind}"
@@ -112,6 +146,8 @@ def analyze_database(database):
         "Return values are raw profiler fields, not an independent CUDA status validation.",
         "Profiler injection can change symbol routing; audit unprofiled interception separately.",
         "Warnings about missing events prevent completeness claims and reliable gap comparisons.",
+        "Named-kernel time fractions use duration sums, not launch counts or interval union.",
+        "Unknown names stay in the denominator; routing evidence is required for preemption classification.",
     ]
     return result
 

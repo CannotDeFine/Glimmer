@@ -130,6 +130,49 @@ class LaunchProfileTest(unittest.TestCase):
         self.assertTrue(result["diagnostic_only"])
         self.assertEqual(result["trace_quality"], "no_reported_warnings")
 
+    def test_named_kernel_time_is_duration_weighted_and_conserves_unknown_work(self):
+        database = self.database()
+        database.executescript("""
+            ALTER TABLE CUPTI_ACTIVITY_KIND_KERNEL ADD COLUMN shortName INTEGER;
+            INSERT INTO StringIds VALUES(3, 'kernel_a'), (4, 'kernel_b');
+            UPDATE CUPTI_ACTIVITY_KIND_KERNEL SET shortName=CASE start WHEN 0 THEN 3 ELSE 4 END;
+            INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES(5, 25, 0, 7, 3), (26, 27, 0, 7, 999);
+        """)
+        result = analyze_database(database)
+        named = result["kernel_duration_by_name"]
+        self.assertEqual(named["total_ns"], 41)
+        self.assertEqual(named["unknown_total_ns"], 1)
+        groups = {row["name"]: row for row in named["groups"]}
+        self.assertEqual(groups["kernel_a"]["count"], 2)
+        self.assertEqual(groups["kernel_a"]["total_ns"], 30)
+        self.assertAlmostEqual(groups["kernel_a"]["captured_kernel_time_fraction"], 30 / 41)
+        self.assertNotEqual(groups["kernel_a"]["captured_kernel_time_fraction"], 2 / 4)
+        self.assertAlmostEqual(sum(row["captured_kernel_time_fraction"] for row in groups.values()), 1)
+        self.assertGreater(named["total_ns"], result["kernels"]["covered_ns"])
+        self.assertEqual(groups[None]["total_ns"], 1)
+
+    def test_missing_name_columns_do_not_invent_zero_unknown_gpu_time(self):
+        named = analyze_database(self.database())["kernel_duration_by_name"]
+        self.assertEqual(named["name_columns"], [])
+        self.assertEqual(named["unknown_total_ns"], 20)
+        self.assertEqual(named["groups"][0]["name"], None)
+        self.assertEqual(named["groups"][0]["captured_kernel_time_fraction"], 1)
+
+    def test_name_priority_fallback_and_duplicate_strings_are_checked(self):
+        database = self.database()
+        database.executescript("""
+            ALTER TABLE CUPTI_ACTIVITY_KIND_KERNEL ADD COLUMN mangledName INTEGER;
+            ALTER TABLE CUPTI_ACTIVITY_KIND_KERNEL ADD COLUMN shortName INTEGER;
+            INSERT INTO StringIds VALUES(3, 'raw_symbol'), (4, 'short_symbol');
+            UPDATE CUPTI_ACTIVITY_KIND_KERNEL SET mangledName=CASE start WHEN 0 THEN 3 ELSE 999 END,
+                shortName=4;
+        """)
+        groups = analyze_database(database)["kernel_duration_by_name"]["groups"]
+        self.assertEqual({row["name"] for row in groups}, {"raw_symbol", "short_symbol"})
+        database.execute("INSERT INTO StringIds VALUES(3, 'duplicate_symbol')")
+        with self.assertRaisesRegex(ValueError, "event count"):
+            analyze_database(database)
+
     def test_missing_optional_memory_and_driver_tables_are_supported(self):
         database = self.database()
         database.executescript("DROP TABLE CUPTI_ACTIVITY_KIND_MEMCPY; DROP TABLE CUPTI_ACTIVITY_KIND_DRIVER;")
