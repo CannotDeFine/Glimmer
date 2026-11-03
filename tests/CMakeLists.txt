@@ -164,6 +164,10 @@ set_tests_properties(glimmer_control_execution_graph_protocol_test PROPERTIES TI
 
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME glimmer_aggregate_sm_audit_test
+        COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/examples/aggregate_sm_audit_test.py)
+    set_tests_properties(glimmer_aggregate_sm_audit_test PROPERTIES TIMEOUT 30)
+
     add_test(NAME glimmer_execution_host_optimization_build_test
         COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/build/execution_host_optimization_test.py)
     set_tests_properties(glimmer_execution_host_optimization_build_test PROPERTIES TIMEOUT 60)
