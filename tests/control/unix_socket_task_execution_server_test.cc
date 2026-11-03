@@ -23,6 +23,7 @@
 
 namespace {
 std::atomic<int> fail_path_stat_after{0};
+std::atomic<bool> replace_path_at_stat{false};
 std::atomic<bool> fail_listen{false};
 const char* replacement_path = nullptr;
 const char* socket_path = nullptr;
@@ -34,6 +35,13 @@ extern "C" int __real_lstat(const char*, struct stat*);
 extern "C" int __real_listen(int, int);
 extern "C" int __wrap_lstat(const char* path, struct stat* status) {
     if (fail_path_stat_after.load() > 0 && fail_path_stat_after.fetch_sub(1) == 1) {
+        if (replace_path_at_stat.exchange(false)) {
+            if (replacement_path == nullptr || socket_path == nullptr ||
+                ::rename(replacement_path, socket_path) != 0) {
+                std::abort();
+            }
+            return __real_lstat(path, status);
+        }
         errno = EIO;
         return -1;
     }
@@ -115,6 +123,18 @@ int main() {
     TaskExecutionEndpoint endpoint(std::move(admission), register_resource, rollback_resource,
                                    &resources);
     {
+        glimmer::core::Scheduler legacy_scheduler(100);
+        TaskAdmissionService legacy_admission(legacy_scheduler);
+        TaskControlEndpoint legacy_endpoint(legacy_admission, register_resource, &resources);
+        UnixSocketControlServer legacy_server(legacy_endpoint,
+                                              {.socket_path = path, .allowed_uid = std::nullopt});
+        fail_listen.store(true);
+        expect(!legacy_server.start(), "legacy server rejects listen failure");
+        struct stat status {};
+        expect(::lstat(path.c_str(), &status) != 0 && errno == ENOENT,
+               "legacy server removes its identified socket after listen failure");
+    }
+    {
         UnixSocketTaskExecutionServer failed(endpoint, {.socket_path = path});
         fail_path_stat_after.store(2);
         expect(!failed.start(), "post-bind identity failure is rejected");
@@ -127,10 +147,18 @@ int main() {
         expect(::lstat(path.c_str(), &orphan) != 0 && errno == ENOENT,
                "identified path is removed after listen failure");
         const std::string replacement = std::string(directory) + "/replacement";
-        const int replacement_fd = ::open(replacement.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
+        int replacement_fd = ::open(replacement.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
         expect(replacement_fd >= 0 && ::close(replacement_fd) == 0, "create test replacement");
         replacement_path = replacement.c_str();
         socket_path = path.c_str();
+        replace_path_at_stat.store(true);
+        fail_path_stat_after.store(2);
+        expect(!failed.start(), "replacement before identity capture is rejected");
+        expect(::lstat(path.c_str(), &orphan) == 0 && S_ISREG(orphan.st_mode),
+               "replacement before identity capture is preserved");
+        expect(::unlink(path.c_str()) == 0, "remove test-owned pre-stat replacement");
+        replacement_fd = ::open(replacement.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
+        expect(replacement_fd >= 0 && ::close(replacement_fd) == 0, "recreate test replacement");
         fail_listen.store(true);
         expect(!failed.start(), "listen failure after replacement is rejected");
         replacement_path = nullptr;

@@ -130,10 +130,8 @@ bool UnixSocketControlServer::start() noexcept {
     std::memcpy(address.sun_path, config_.socket_path.c_str(), config_.socket_path.size() + 1);
     const auto address_length =
         static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + config_.socket_path.size() + 1);
-    if (::bind(socket_fd, reinterpret_cast<const sockaddr*>(&address), address_length) != 0 ||
-        ::listen(socket_fd, 16) != 0) {
+    if (::bind(socket_fd, reinterpret_cast<const sockaddr*>(&address), address_length) != 0) {
         const int failure_errno = errno;
-        internal::unlink_socket_path_if_owned(socket_fd, config_.socket_path);
         static_cast<void>(::close(socket_fd));
         errno = failure_errno;
         return false;
@@ -141,7 +139,15 @@ bool UnixSocketControlServer::start() noexcept {
 
     if (!internal::stat_socket_path(config_.socket_path, &socket_device_, &socket_inode_)) {
         const int failure_errno = errno;
-        internal::unlink_socket_path_if_owned(socket_fd, config_.socket_path);
+        static_cast<void>(::close(socket_fd));
+        socket_device_ = 0;
+        socket_inode_ = 0;
+        errno = failure_errno;
+        return false;
+    }
+    if (::listen(socket_fd, 16) != 0) {
+        const int failure_errno = errno;
+        internal::unlink_socket_path_if_matches(config_.socket_path, socket_device_, socket_inode_);
         static_cast<void>(::close(socket_fd));
         socket_device_ = 0;
         socket_inode_ = 0;

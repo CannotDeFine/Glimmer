@@ -39,6 +39,7 @@ class UnixSocketControlServer final {
 
     // Binds and listens on the configured path. Existing filesystem entries
     // are never removed by start(); stale paths must be handled explicitly.
+    // The parent directory must be trusted against concurrent path replacement.
     [[nodiscard]] bool start() noexcept;
 
     // Accepts one client connection and starts its request loop. The caller

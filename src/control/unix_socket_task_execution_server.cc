@@ -66,13 +66,7 @@ struct UnixSocketTaskExecutionServer::Impl {
     }
 
     void unlink_owned() noexcept {
-        std::uint64_t current_device = 0;
-        std::uint64_t current_inode = 0;
-        if ((device != 0 || inode != 0) &&
-            internal::stat_socket_path(config.socket_path, &current_device, &current_inode) &&
-            current_device == device && current_inode == inode) {
-            static_cast<void>(::unlink(config.socket_path.c_str()));
-        }
+        internal::unlink_socket_path_if_matches(config.socket_path, device, inode);
         device = 0;
         inode = 0;
     }
