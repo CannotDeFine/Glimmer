@@ -158,6 +158,10 @@ struct VersionedRemoteLaunchGate::State {
             auto exchange = client.request_detailed(*line, timing ? &measured : nullptr);
             account(timing, measured, false);
             permit.relock();
+            if (poisoned) {
+                slot->phase = Phase::kUncertain;
+                return false;
+            }
             if (exchange.status != VersionedExchangeStatus::kResponse || !exchange.response) {
                 slot->phase = Phase::kUncertain;
                 permit.poison();
@@ -243,6 +247,10 @@ std::optional<core::TaskId> VersionedRemoteLaunchGate::acquire(LaunchGateTiming*
                     state_->client.request_detailed(*line, timing ? &measured : nullptr);
                 account(timing, measured, request.operation == TaskProtocolOperation::kClaim);
                 permit.relock();
+                if (state_->poisoned) {
+                    owned->phase = State::Phase::kUncertain;
+                    return std::nullopt;
+                }
                 if (exchange.status != VersionedExchangeStatus::kResponse || !exchange.response) {
                     if (is_initial && exchange.status == VersionedExchangeStatus::kNotPublished)
                         discard();
@@ -329,6 +337,12 @@ bool VersionedRemoteLaunchGate::fail(core::TaskId task, LaunchGateTiming* timing
     const Timing timer(timing);
     if (::getpid() != state_->owner) return false;
     return state_->report(task, TaskProtocolOperation::kFail, TaskProtocolState::kFailed, timing);
+}
+void VersionedRemoteLaunchGate::quarantine() noexcept {
+    if (::getpid() != state_->owner) return;
+    std::scoped_lock lock(state_->mutex);
+    state_->poisoned = true;
+    state_->changed.notify_all();
 }
 bool VersionedRemoteLaunchGate::quarantined() const noexcept {
     if (::getpid() != state_->owner) return true;

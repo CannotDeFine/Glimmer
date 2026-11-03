@@ -37,6 +37,9 @@ class VersionedRemoteLaunchGate final {
     [[nodiscard]] bool heartbeat(core::TaskId task) noexcept;
     [[nodiscard]] bool complete(core::TaskId task, LaunchGateTiming* timing = nullptr) noexcept;
     [[nodiscard]] bool fail(core::TaskId task, LaunchGateTiming* timing = nullptr) noexcept;
+    // Called when physical work may still be running without a reliable
+    // completion observation. This never publishes a terminal transition.
+    void quarantine() noexcept;
     [[nodiscard]] bool quarantined() const noexcept;
     // Only a quarantined session exposes these diagnostic records. A task ID
     // is not a recovery handle unless an external owner independently proves

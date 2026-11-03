@@ -271,6 +271,8 @@ void fair_broker_order() {
            "bind fair broker listener");
     std::promise<void> has_blocked;
     std::promise<void> release;
+    std::promise<void> acquire_in_flight;
+    std::promise<void> release_acquire;
     std::vector<std::string> order;
     std::thread peer([&] {
         const int socket = ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
@@ -340,6 +342,11 @@ void fair_broker_order() {
                    "each physical fixture task retires in order");
             state(id, TaskProtocolState::kFailed);
         }
+        expect(read().operation == TaskProtocolOperation::kAcquire,
+               "final acquisition is already published");
+        acquire_in_flight.set_value();
+        release_acquire.get_future().wait();
+        lease(13);
         expect(::close(socket) == 0, "close fully retired fair broker session");
     });
     {
@@ -377,6 +384,19 @@ void fair_broker_order() {
         expect(first.get() == 11 && second.get() == 12, "normal lane retains FIFO order");
         for (glimmer::core::TaskId id = 1; id <= 12; ++id)
             expect(gate.fail(id), "retire every seeded task");
+        auto final = std::async(std::launch::async, [&] { return gate.acquire(); });
+        expect(acquire_in_flight.get_future().wait_for(2s) == std::future_status::ready,
+               "acquisition is in flight before local quarantine");
+        gate.quarantine();
+        release_acquire.set_value();
+        expect(!final.get() && gate.quarantined(),
+               "a late lease never grants work after local quarantine");
+        const auto retained = gate.retained();
+        expect(retained && retained->size() == 1 &&
+                   (*retained)[0].phase ==
+                       VersionedRemoteLaunchGate::RetainedPhase::kUnknownIdentity &&
+                   !gate.heartbeat(13) && !gate.fail(13),
+               "in-flight ownership remains unknown without further publication");
     }
     peer.join();
     expect(order.size() == 11, "all queued requests were observed");
@@ -392,7 +412,12 @@ void fair_broker_order() {
            "remove only owned fair broker resources");
 }
 
-enum class Fault : std::uint8_t { kBadAcquire, kLostClaim, kLostCompletion };
+enum class Fault : std::uint8_t {
+    kBadAcquire,
+    kLostClaim,
+    kLostCompletion,
+    kQuarantinedCompletion
+};
 
 void uncertain_reply(Fault fault) {
     std::array<char, 50> pattern{};
@@ -411,6 +436,8 @@ void uncertain_reply(Fault fault) {
                ::listen(listener, 4) == 0,
            "bind owned fault listener");
     std::promise<void> release;
+    std::promise<void> terminal_in_flight;
+    std::promise<void> terminal_returned;
     std::thread peer([&] {
         const int socket = ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
         expect(socket >= 0, "accept one fault session");
@@ -442,6 +469,13 @@ void uncertain_reply(Fault fault) {
             expect(line == (fault == Fault::kLostClaim ? "GLIMMER_TASK_V1 CLAIM 17\n"
                                                        : "GLIMMER_TASK_V1 COMPLETE 17\n"),
                    "claim or terminal identity remains exact");
+            if (fault == Fault::kQuarantinedCompletion) {
+                terminal_in_flight.set_value();
+                release.get_future().wait();
+                expect(channel.publish_response("GLIMMER_TASK_V1 STATE 17 COMPLETED\n"),
+                       "a delayed terminal acknowledgement is delivered");
+                terminal_returned.get_future().wait();
+            }
         }
         expect(::close(socket) == 0, "close without replaying a lost result");
     });
@@ -449,7 +483,16 @@ void uncertain_reply(Fault fault) {
         VersionedRemoteLaunchGate gate({.control_socket = path},
                                        VersionedControlTransport::kSharedMemory);
         const auto task = gate.acquire();
-        if (fault == Fault::kLostCompletion) {
+        if (fault == Fault::kQuarantinedCompletion) {
+            expect(task == 17, "terminal fixture first grants a task");
+            auto terminal = std::async(std::launch::async, [&] { return gate.complete(17); });
+            expect(terminal_in_flight.get_future().wait_for(2s) == std::future_status::ready,
+                   "terminal is in flight before local quarantine");
+            gate.quarantine();
+            release.set_value();
+            expect(!terminal.get(), "late terminal acknowledgement does not clear quarantine");
+            terminal_returned.set_value();
+        } else if (fault == Fault::kLostCompletion) {
             expect(task == 17 && !gate.complete(17), "lost terminal cannot release capacity");
         } else {
             expect(!task, "untrusted or lost acquisition cannot authorize work");
@@ -483,4 +526,5 @@ int main() {
     uncertain_reply(Fault::kBadAcquire);
     uncertain_reply(Fault::kLostClaim);
     uncertain_reply(Fault::kLostCompletion);
+    uncertain_reply(Fault::kQuarantinedCompletion);
 }
