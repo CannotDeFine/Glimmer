@@ -1,5 +1,6 @@
 add_library(glimmer_control
     execution_protocol.cc
+    internal/control_request_sequence.cc
     internal/local_control_wake.cc
     internal/owned_control_exchange.cc
     internal/shared_control_channel.cc
