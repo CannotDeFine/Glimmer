@@ -480,6 +480,72 @@ void test_concurrent_auto_fallback(int listener, const std::string& path, bool l
     expect(::poll(&pending, 1, 0) == 0, "concurrent failure does not reconnect or replay");
 }
 
+void test_concurrent_shared_and_fork(int listener, const std::string& path) {
+    constexpr std::size_t count = 4;
+    std::promise<void> parent_consumed;
+    std::thread peer([&] {
+        const int fd = ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+        expect(fd >= 0, "accept concurrently initialized shared client");
+        SocketLineReader reader(fd);
+        std::string line;
+        expect(
+            reader.read_line(line, 2000) == SocketLineStatus::kLine && line == kSharedControlOpen,
+            "concurrent shared client negotiates once");
+        expect(::send(fd, kSharedControlReady.data(), kSharedControlReady.size(), MSG_NOSIGNAL) ==
+                   static_cast<ssize_t>(kSharedControlReady.size()),
+               "send concurrent shared ready");
+        SharedControlChannel channel;
+        expect(channel.create_server({17, 18}) && channel.send_offer(fd, std::chrono::seconds(2)),
+               "offer one shared incarnation");
+        std::array<bool, count> seen{};
+        for (std::size_t i = 0; i < count; ++i) {
+            expect(channel.receive_request(fd, 2000, line) == SharedControlReadStatus::kLine,
+                   "concurrent shared request arrives");
+            bool matched = false;
+            for (std::size_t n = 0; n < count; ++n) {
+                if (line == "SHARED-" + std::to_string(n) + "\n") {
+                    expect(!seen[n], "concurrent shared request is unique");
+                    seen[n] = true;
+                    matched = true;
+                }
+            }
+            expect(matched && channel.publish_response(line),
+                   "each shared request receives its matching response");
+        }
+        expect(channel.receive_request(fd, 2000, line) == SharedControlReadStatus::kLine &&
+                   line == "PARENT\n" && channel.publish_response("OK\n"),
+               "parent retains the same channel after fork");
+        parent_consumed.get_future().wait();
+        expect(::close(fd) == 0, "close concurrent shared peer");
+    });
+    VersionedTaskControlClient client(path, VersionedControlTransport::kSharedMemory, 1000);
+    std::array<std::thread, count> workers;
+    std::barrier start(static_cast<std::ptrdiff_t>(count));
+    for (std::size_t n = 0; n < count; ++n) {
+        workers[n] = std::thread([&, n] {
+            const auto line = "SHARED-" + std::to_string(n) + "\n";
+            start.arrive_and_wait();
+            expect(client.request(line) == line, "shared requests cannot consume another reply");
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    const pid_t child = ::fork();
+    expect(child >= 0, "fork active shared session");
+    if (child == 0) {
+        ::_exit(client.request_detailed("CHILD\n").status == VersionedExchangeStatus::kNotPublished
+                    ? EXIT_SUCCESS
+                    : EXIT_FAILURE);
+    }
+    int status = 0;
+    expect(::waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "fork child cannot publish on an inherited shared client");
+    expect(client.request("PARENT\n") == "OK\n", "parent shared session survives child exit");
+    parent_consumed.set_value();
+    peer.join();
+    pollfd pending{.fd = listener, .events = POLLIN, .revents = 0};
+    expect(::poll(&pending, 1, 0) == 0, "shared concurrency and fork do not reconnect");
+}
+
 void test_socket_publication_fault(int listener, const std::string& path, bool partial) {
     std::thread peer([&] {
         const int fd = ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
@@ -616,6 +682,7 @@ int main() {
     test_auto_reconnect_identity(listener, path, {9, 8});
     test_concurrent_auto_fallback(listener, path, false);
     test_concurrent_auto_fallback(listener, path, true);
+    test_concurrent_shared_and_fork(listener, path);
     test_socket_publication_fault(listener, path, false);
     test_socket_publication_fault(listener, path, true);
     test_shared_publication_fault(listener, path, false, false);

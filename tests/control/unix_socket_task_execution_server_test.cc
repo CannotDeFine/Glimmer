@@ -4,6 +4,7 @@
 #include "glimmer/control/task_execution_endpoint.h"
 #include "glimmer/control/task_execution_protocol.h"
 #include "glimmer/control/unix_socket_task_execution_server.h"
+#include "glimmer/control/versioned_task_control_client.h"
 #include "internal/task_execution_endpoint_test_hooks.h"
 #include "internal/owned_control_exchange.h"
 #include "internal/task_recovery_endpoint.h"
@@ -150,10 +151,12 @@ void test_uncertain_dispatch_is_not_replayed() {
         }
     });
     {
-        SharedTaskControlClient client(path);
+        VersionedTaskControlClient client(path, VersionedControlTransport::kSharedMemory);
         resources.fail_next_dispatch.store(true);
-        expect(!client.request("GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n"),
-               "uncertain dispatch returns a lost response");
+        expect(
+            client.request_detailed("GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n").status ==
+                VersionedExchangeStatus::kUncertain,
+            "uncertain dispatch returns a lost response");
         const auto status = endpoint.lease_status();
         expect(status && status->pending_cooperative == 1 && status->reaping == 1 &&
                    resources.registered.load() == 1 && resources.rolled_back.load() == 0,
@@ -527,6 +530,27 @@ int main(int argc, char** argv) {
     reject_raw(path, std::string(300, 'x') + "\nGLIMMER_TASK_V1 SUBMIT tenant 1 1 1\n");
     expect(resources.registered.load() == 0, "unnegotiated requests cannot register resources");
 
+    {
+        VersionedTaskControlClient versioned(path, VersionedControlTransport::kSharedMemory);
+        VersionedControlTiming timing;
+        const auto submitted = versioned.request("GLIMMER_TASK_V1 SUBMIT tenant 10 1 1\n", &timing);
+        expect(submitted == "GLIMMER_TASK_V1 OK 1\n" && timing.used_shared_memory &&
+                   timing.elapsed_nanoseconds > 0,
+               "versioned client submits V1 work to the real shared service");
+        expect(versioned.request("GLIMMER_TASK_V1 CLAIM 1\n") ==
+                       "GLIMMER_TASK_V1 LEASE 1 tenant 10 1 1\n" &&
+                   versioned.request("GLIMMER_TASK_V1 COMPLETE 1\n") ==
+                       "GLIMMER_TASK_V1 STATE 1 COMPLETED\n",
+               "versioned client claims and completes the same real V1 lease");
+        const auto stats_wire = versioned.request("GLIMMER_TASK_V1 STATS\n");
+        const auto stats = parse_task_protocol_response(stats_wire.value_or(""));
+        expect(
+            stats.parsed() && stats.response && stats.response->stats.completed_task_count == 1 &&
+                stats.response->stats.queued_task_count == 0 &&
+                stats.response->stats.running_task_count == 0 && resources.registered.load() == 1,
+            "real V1 shared path registers once and retires its work");
+    }
+
     SharedTaskControlClient client(path);
     resources.fail_next_format.store(true);
     expect(!client.request("GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n") &&
@@ -603,7 +627,7 @@ int main(int argc, char** argv) {
     const auto claim_done = client.request(finish_claim);
     expect(claim_done && parse_task_execution_protocol_response(*claim_done).parsed(),
            "winning claim completes");
-    expect(resources.registered.load() == 4 && resources.rolled_back.load() == 1,
+    expect(resources.registered.load() == 5 && resources.rolled_back.load() == 1,
            "published tasks are not rolled back");
 
     expect(endpoint.begin_shutdown(), "stop new authorization before transport teardown");
@@ -626,7 +650,7 @@ int main(int argc, char** argv) {
     reject_raw(path, "GLIMMER_SHM_V2 OPEN\n");
     denied.join();
     wrong_uid.stop();
-    expect(resources.registered.load() == 4 && resources.rolled_back.load() == 1,
+    expect(resources.registered.load() == 5 && resources.rolled_back.load() == 1,
            "wrong UID cannot reach endpoint or change resources");
     expect(::rmdir(directory) == 0, "remove private directory");
     test_recovery_after_lost_replies();
