@@ -18,6 +18,10 @@ add_library(glimmer_control
     execution_graph_protocol.cc
     native_epoch_protocol.cc
     task_execution_protocol.cc
+    task_execution_admission.cc
+    internal/execution_admission_state.cc
+    internal/execution_cooperative_admission.cc
+    internal/execution_native_epoch_admission.cc
     composite_quota.cc
     device_capacity_quota.cc
     internal/socket_line_reader.cc

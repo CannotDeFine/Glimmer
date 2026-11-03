@@ -62,6 +62,13 @@ The generation-bound task codec has a separate C++ interface and wire envelope
 from the original task codec. Decoding a message is not peer authentication,
 execution authorization or evidence of GPU completion.
 
+The execution admission service owns its scheduler and lease state. Its
+cooperative and native epoch transitions require authenticated identities;
+an expired running execution is not proof of physical completion. The original
+admission interface retains its existing ownership and ABI.
+The service owner must stop and join backend work and retire leases before
+destruction; destroying the service does not stop a GPU or fence a context.
+
 The backend submission queue retains accepted command data until trusted
 proof of no native issue or final physical stop; its receipt remains until
 reply acknowledgement. It owns neither CUDA calls nor scheduling policy.
