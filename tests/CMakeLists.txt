@@ -97,6 +97,15 @@ foreach(gate_test IN ITEMS remote_control_operation prepared_control_future
     set_tests_properties(glimmer_control_${gate_test}_test PROPERTIES TIMEOUT 30)
 endforeach()
 
+add_executable(glimmer_control_cooperative_remote_process_test
+    control/cooperative_remote_process_test.cc)
+target_link_libraries(glimmer_control_cooperative_remote_process_test PRIVATE Glimmer::control)
+glimmer_enable_clang_tidy(glimmer_control_cooperative_remote_process_test)
+add_test(NAME glimmer_control_cooperative_remote_process_test
+    COMMAND glimmer_control_cooperative_remote_process_test
+        $<TARGET_FILE:glimmer_task_execution_service>)
+set_tests_properties(glimmer_control_cooperative_remote_process_test PROPERTIES TIMEOUT 20)
+
 add_executable(glimmer_control_task_execution_admission_test
     control/task_execution_admission_test.cc)
 target_include_directories(glimmer_control_task_execution_admission_test PRIVATE
