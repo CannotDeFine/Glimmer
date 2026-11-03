@@ -1,5 +1,6 @@
 add_library(glimmer_core
     adaptive_slo.cc
+    execution_priority.cc
     quota_ledger.cc
     scheduler.cc
     scheduler_mode.cc

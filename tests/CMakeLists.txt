@@ -303,3 +303,8 @@ if(CUDAToolkit_NVCC_EXECUTABLE)
             -P "${CMAKE_CURRENT_SOURCE_DIR}/transform/check_compiler_ptx.cmake")
     set_tests_properties(glimmer_ptx_compiler_test PROPERTIES TIMEOUT 120)
 endif()
+
+add_executable(glimmer_core_execution_priority_test core/execution_priority_test.cc)
+target_link_libraries(glimmer_core_execution_priority_test PRIVATE Glimmer::core Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_core_execution_priority_test)
+add_test(NAME glimmer_core_execution_priority_test COMMAND glimmer_core_execution_priority_test)

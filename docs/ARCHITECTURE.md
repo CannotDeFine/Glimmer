@@ -44,6 +44,9 @@ concrete responsibility and a testable interface.
 | `interceptor` | `src/interceptor/` and `src/interceptor/internal/` | Provides ABI-compatible wrappers for covered CUDA Driver, PTDS stream-ordered Driver, CUDA kernel and graph launches, Runtime, memory-pool, IPC, external-memory, array, graphics, and graph-memory APIs, routes supported symbol lookups, and owns process-local allocation metadata while using `control` for quota decisions. Accounted allocations update the ledger; APIs whose ownership or byte lifetime cannot be reconstructed are explicitly fail-closed under quota and delegated when quota is disabled. Observe mode forwards launches and emits a sampled boundary diagnostic; enforce mode admits covered launches through a process-local `control::LaunchGate`, or an opt-in authenticated Unix-socket launch lease, and releases the slot after an internal CUDA event completes. Neither path provides kernel preemption. The `internal/` headers are private implementation interfaces and are not public project headers. |
 | `examples` | `examples/` | Contains independent real-GPU CUDA workload harnesses, optional framework workload programs, and the opt-in `cuda_task_backend/` demonstration. Each directory owns its source and generated artifacts; examples do not modify transparent interception behavior or define scheduler policy. |
 
+The core execution-priority planner computes decisions from trusted observations;
+it does not own device execution or establish physical retirement.
+
 `control::CompositeQuota` is the isolation boundary used when a shared tenant
 has a narrower per-process task limit. It admits, commits, cancels, releases,
 and virtualizes memory through both quota stores while keeping shared-memory
