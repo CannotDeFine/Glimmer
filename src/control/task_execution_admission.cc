@@ -178,4 +178,8 @@ core::SchedulerStats TaskExecutionAdmissionService::stats() const {
     return impl_->state.stats();
 }
 
+TaskExecutionLeaseStatus TaskExecutionAdmissionService::lease_status() const {
+    return impl_->state.lease_status();
+}
+
 }  // namespace glimmer::control

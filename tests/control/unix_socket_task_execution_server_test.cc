@@ -231,9 +231,14 @@ int main() {
     expect(resources.registered.load() == 4 && resources.rolled_back.load() == 1,
            "published tasks are not rolled back");
 
+    expect(endpoint.begin_shutdown(), "stop new authorization before transport teardown");
     serving.store(false);
     acceptor.join();
     server.stop();
+    const auto status_after_join = endpoint.lease_status();
+    expect(status_after_join && status_after_join->queued_tasks == 0 &&
+               status_after_join->running_tasks == 0 && status_after_join->reaping == 0,
+           "transport is joined before final empty lease snapshot");
     expect(::access(path.c_str(), F_OK) != 0, "stop unlinks owned socket");
     UnixSocketTaskExecutionServer wrong_uid(
         endpoint,

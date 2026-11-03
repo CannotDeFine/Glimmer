@@ -83,6 +83,9 @@ an uncertain reply or fall back to another transport.
 The execution task server accepts domain messages only after shared-channel
 negotiation and joins its connection workers before endpoint teardown. A lost
 transport reply does not authorize cancellation or prove physical completion.
+Endpoint shutdown prevents new grants while allowing owners to retire existing
+work. Internal lease counts do not prove that external resources are released
+or that GPU execution has stopped.
 
 The backend submission queue retains accepted command data until trusted
 proof of no native issue or final physical stop; its receipt remains until

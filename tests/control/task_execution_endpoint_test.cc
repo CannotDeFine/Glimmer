@@ -8,6 +8,7 @@
 #include <atomic>
 #include <barrier>
 #include <cstdlib>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -25,10 +26,19 @@ constexpr NativeEpochExtent kExtent{4, 2, 2, 1000000};
 struct Resources {
     std::atomic<unsigned> registered{0};
     std::atomic<unsigned> rolled_back{0};
+    std::atomic<bool> hold_registration{false};
+    std::atomic<bool> registration_entered{false};
+    std::atomic<bool> registration_release{false};
 };
 
 bool register_resource(void* context, glimmer::core::TaskId) noexcept {
-    static_cast<Resources*>(context)->registered.fetch_add(1, std::memory_order_relaxed);
+    auto* resources = static_cast<Resources*>(context);
+    resources->registered.fetch_add(1, std::memory_order_relaxed);
+    if (resources->hold_registration.load()) {
+        resources->registration_entered.store(true);
+        resources->registration_entered.notify_all();
+        resources->registration_release.wait(false);
+    }
     return true;
 }
 
@@ -287,6 +297,127 @@ void test_concurrent_claims() {
            "winning dispatch retires");
 }
 
+void test_shutdown_and_status() {
+    Resources resources;
+    auto service = endpoint(resources);
+    const auto active = exec(*service, "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n");
+    const auto pending = exec(*service, "GLIMMER_TASK_EXEC_V1 SUBMIT tenant 20 1 1\n");
+    const auto legacy_pending = legacy(*service, "GLIMMER_TASK_V1 SUBMIT tenant 20 1 1\n");
+    NativeEpochRequest native;
+    native.request_sequence = 1;
+    native.admission = {.tenant_id = "tenant", .memory_bytes = 20, .work_units = 4};
+    native.extent = kExtent;
+    const auto native_pending = epoch(*service, native);
+    const auto before = service->lease_status();
+    expect(before && before->running_tasks == 1 && before->queued_tasks == 3 &&
+               before->active_cooperative == 1 && before->pending_cooperative == 1 &&
+               before->pending_legacy == 1 && before->pending_native == 1,
+           "status distinguishes active and pending lease types");
+    expect(service->begin_shutdown() && service->begin_shutdown(), "shutdown is idempotent");
+    expect(exec(*service, "GLIMMER_TASK_EXEC_V1 SUBMIT tenant 1 1 1\n").kind ==
+                   TaskExecutionProtocolResponseKind::kError &&
+               exec(*service,
+                    "GLIMMER_TASK_EXEC_V1 EXEC_CLAIM " + std::to_string(pending.task_id) + "\n")
+                       .kind == TaskExecutionProtocolResponseKind::kError,
+           "shutdown rejects admission and dispatch");
+    const auto handoff = operation("EXEC_COMPLETE_ACQUIRE", {active.task_id, active.generation});
+    expect(exec(*service, handoff.substr(0, handoff.size() - 1) + " tenant 1 1 1\n").kind ==
+                   TaskExecutionProtocolResponseKind::kError &&
+               service->lease_status().value_or(TaskExecutionLeaseStatus{}).active_cooperative == 1,
+           "shutdown rejects handoff without completing the original task");
+    native.operation = NativeEpochOperation::kClaim;
+    native.execution = native_pending.grant.execution;
+    native.request_sequence = 2;
+    expect(epoch(*service, native).kind == NativeEpochResponseKind::kError,
+           "shutdown refuses native grant");
+    native.operation = NativeEpochOperation::kCancelPending;
+    native.request_sequence = 3;
+    expect(
+        epoch(*service, native).kind == NativeEpochResponseKind::kAcknowledged &&
+            exec(*service, "GLIMMER_TASK_EXEC_V1 CANCEL " + std::to_string(pending.task_id) + "\n")
+                    .state == TaskProtocolState::kCancelled &&
+            legacy(*service,
+                   "GLIMMER_TASK_V1 CANCEL " + std::to_string(legacy_pending.task_id) + "\n")
+                    .state == TaskProtocolState::kCancelled &&
+            exec(*service, operation("EXEC_COMPLETE", {active.task_id, active.generation})).state ==
+                TaskProtocolState::kCompleted,
+        "owners can retire pending and physically completed work during drain");
+    const auto after = service->lease_status();
+    expect(after && after->running_tasks == 0 && after->queued_tasks == 0 && after->reaping == 0 &&
+               after->active_cooperative == 0 && after->pending_cooperative == 0 &&
+               after->pending_legacy == 0 && after->pending_native == 0,
+           "internal lease state is empty after retirement");
+}
+
+void test_untracked_legacy_and_native_drain() {
+    Resources resources;
+    auto unbound = endpoint(resources, false);
+    const auto legacy_pending = legacy(*unbound, "GLIMMER_TASK_V1 SUBMIT tenant 20 1 1\n");
+    const auto untracked = unbound->lease_status();
+    expect(untracked && untracked->queued_tasks == 1 && untracked->pending_legacy == 0,
+           "untracked legacy tasks remain visible in scheduler counts");
+    expect(unbound->begin_shutdown() &&
+               legacy(*unbound,
+                      "GLIMMER_TASK_V1 CANCEL " + std::to_string(legacy_pending.task_id) + "\n")
+                       .state == TaskProtocolState::kCancelled,
+           "untracked legacy pending task can be cancelled during drain");
+
+    auto bound = endpoint(resources);
+    NativeEpochRequest native;
+    native.request_sequence = 1;
+    native.admission = {.tenant_id = "tenant", .memory_bytes = 20, .work_units = 4};
+    native.extent = kExtent;
+    const auto grant = epoch(*bound, native);
+    expect(grant.kind == NativeEpochResponseKind::kGranted && bound->begin_shutdown() &&
+               bound->lease_status().value_or(TaskExecutionLeaseStatus{}).active_native == 1,
+           "running native lease remains owned during shutdown");
+    native.operation = NativeEpochOperation::kComplete;
+    native.execution = grant.grant.execution;
+    native.issued_calls = 4;
+    native.request_sequence = 2;
+    expect(epoch(*bound, native).kind == NativeEpochResponseKind::kAcknowledged &&
+               bound->lease_status().value_or(TaskExecutionLeaseStatus{}).running_tasks == 0,
+           "owner can report actual native completion during drain");
+}
+
+void test_shutdown_waits_for_registration() {
+    using namespace std::chrono_literals;
+    Resources resources;
+    resources.hold_registration.store(true);
+    auto service = endpoint(resources);
+    auto submit = std::async(std::launch::async, [&] {
+        return service->handle("GLIMMER_TASK_EXEC_V1 SUBMIT tenant 20 1 1\n", kOwner);
+    });
+    resources.registration_entered.wait(false);
+    auto shutdown = std::async(std::launch::async, [&] { return service->begin_shutdown(); });
+    expect(shutdown.wait_for(20ms) == std::future_status::timeout,
+           "shutdown waits for an in-flight registration");
+    std::atomic<bool> stop_readers{false};
+    std::array<std::thread, 4> readers;
+    for (auto& reader : readers) {
+        reader = std::thread([&] {
+            while (!stop_readers.load()) {
+                static_cast<void>(service->handle("GLIMMER_TASK_V1 STATS\n", kOwner));
+            }
+        });
+    }
+    resources.registration_release.store(true);
+    resources.registration_release.notify_all();
+    expect(shutdown.wait_for(2s) == std::future_status::ready,
+           "continuous readers cannot starve shutdown");
+    stop_readers.store(true);
+    for (auto& reader : readers) {
+        reader.join();
+    }
+    const auto reply = parse_task_execution_protocol_response(submit.get().value_or(""));
+    expect(reply.parsed() && shutdown.get(), "in-flight admission completes before shutdown");
+    const auto pending = reply.response.value_or(TaskExecutionProtocolResponse{});
+    expect(exec(*service, "GLIMMER_TASK_EXEC_V1 CANCEL " + std::to_string(pending.task_id) + "\n")
+                       .state == TaskProtocolState::kCancelled &&
+               used(*service) == 0,
+           "admission that won the race remains owner-cancellable");
+}
+
 }  // namespace
 
 int main() {
@@ -296,5 +427,8 @@ int main() {
     test_unpublished_rollback();
     test_existing_pending_not_rolled_back();
     test_concurrent_claims();
+    test_shutdown_and_status();
+    test_untracked_legacy_and_native_drain();
+    test_shutdown_waits_for_registration();
     return EXIT_SUCCESS;
 }

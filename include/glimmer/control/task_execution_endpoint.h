@@ -17,14 +17,14 @@ using TaskResourceRollback = void (*)(void* context, core::TaskId task_id) noexc
 // Owns the admission service and routes complete lines by exact wire envelope.
 // The transferred service must have no pending or active work, including if
 // endpoint construction fails before ownership is fully established.
+// Any previously borrowed references to it must never be used after transfer.
 // The registrar and observer contexts must outlive the endpoint. The registrar
-// may bind resources but must not publish or issue work; observers are telemetry
-// only and must not issue work. Legacy queued cancellation is owner-checked
-// when process binding is enabled. QUERY/STATS/METRICS are not owner-filtered;
-// the transport must restrict who can reach them. Before
-// destruction the owner must stop admission and all callers, stop and join
-// backend work, retire every lease, and release registered external resources.
-// Endpoint destruction does not prove GPU completion or fence a CUDA context.
+// may bind resources but must not reenter this endpoint, publish or issue work;
+// observers are telemetry only and must not reenter or issue work. Legacy queued cancellation is
+// owner-checked when process binding is enabled. QUERY/STATS/METRICS are not owner-filtered; the
+// transport must restrict who can reach them. Before destruction the owner must stop admission and
+// all callers, stop and join backend work, retire every lease, and release registered external
+// resources. Endpoint destruction does not prove GPU completion or fence a CUDA context.
 class TaskExecutionEndpoint final {
    public:
     explicit TaskExecutionEndpoint(std::unique_ptr<TaskExecutionAdmissionService> service,
@@ -39,6 +39,18 @@ class TaskExecutionEndpoint final {
 
     [[nodiscard]] std::optional<std::string> handle(
         std::string_view line, std::optional<TaskPeerIdentity> peer = std::nullopt) noexcept;
+
+    // Irreversibly refuse new admissions and dispatch grants while allowing
+    // owners to report actual stop or completion. Waits for handlers already
+    // in flight, including bounded WAIT requests of up to 60 seconds. Never
+    // calls CUDA, stops the backend, reaps leases, or releases external
+    // resources. Remaining pending tasks must be cancelled by their owners;
+    // they cannot be treated as retired when teardown is considered.
+    [[nodiscard]] bool begin_shutdown() noexcept;
+    // Advisory snapshot only. After stopping/joining callers, independently
+    // verify both scheduler task counts, every lease count, and all registered
+    // resources before destruction. A timeout is not proof of physical stop.
+    [[nodiscard]] std::optional<TaskExecutionLeaseStatus> lease_status() const noexcept;
 
    private:
     struct Impl;

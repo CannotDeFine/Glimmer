@@ -658,4 +658,27 @@ core::SchedulerStats ExecutionAdmissionState::stats() const {
     return scheduler_.stats();
 }
 
+TaskExecutionLeaseStatus ExecutionAdmissionState::lease_status() const {
+    std::scoped_lock lock(admission_mutex_);
+    const auto stats = scheduler_.stats();
+    TaskExecutionLeaseStatus result{.queued_tasks = stats.queued_task_count,
+                                    .running_tasks = stats.running_task_count};
+    const auto count = [&result](const auto& leases, bool active) {
+        for (const auto& entry : leases) {
+            const auto& lease = entry.second;
+            result.reaping += lease.reaping ? 1U : 0U;
+            if (lease.native_epoch.has_value()) {
+                ++(active ? result.active_native : result.pending_native);
+            } else if (lease.is_cooperative) {
+                ++(active ? result.active_cooperative : result.pending_cooperative);
+            } else {
+                ++(active ? result.active_legacy : result.pending_legacy);
+            }
+        }
+    };
+    count(pending_leases_, false);
+    count(active_leases_, true);
+    return result;
+}
+
 }  // namespace glimmer::control

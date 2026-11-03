@@ -4,7 +4,10 @@
 
 #include "glimmer/core/scheduler.h"
 
+#include <atomic>
+#include <mutex>
 #include <new>
+#include <shared_mutex>
 #include <stdexcept>
 #include <utility>
 
@@ -21,6 +24,23 @@ void throw_next_endpoint_response_format() noexcept {
 }  // namespace testing
 #endif
 namespace {
+
+enum class ShutdownPhase : std::uint8_t { kAccepting, kPending, kDraining, kFailed };
+
+[[nodiscard]] bool creates_or_dispatches(TaskExecutionProtocolOperation operation) noexcept {
+    switch (operation) {
+        case TaskExecutionProtocolOperation::kSubmit:
+        case TaskExecutionProtocolOperation::kAcquire:
+        case TaskExecutionProtocolOperation::kClaim:
+        case TaskExecutionProtocolOperation::kWait:
+        case TaskExecutionProtocolOperation::kExecutionClaim:
+        case TaskExecutionProtocolOperation::kExecutionAcquire:
+        case TaskExecutionProtocolOperation::kExecutionCompleteAcquire:
+            return true;
+        default:
+            return false;
+    }
+}
 
 [[nodiscard]] bool fail_response_for_test() {
 #ifdef GLIMMER_ENDPOINT_TESTING
@@ -348,15 +368,28 @@ struct TaskExecutionEndpoint::Impl {
         }
     }
 
-    std::optional<std::string> handle(std::string_view line,
-                                      std::optional<TaskPeerIdentity> peer) noexcept;
+    std::optional<std::string> handle(std::string_view line, std::optional<TaskPeerIdentity> peer,
+                                      bool draining) noexcept;
     std::optional<std::string> handle_native_epoch(std::string_view line,
-                                                   std::optional<TaskPeerIdentity> peer);
+                                                   std::optional<TaskPeerIdentity> peer,
+                                                   bool draining);
+
+    // New readers wait outside the gate while a shutdown writer is pending.
+    [[nodiscard]] ShutdownPhase await_shutdown() const noexcept {
+        auto current = phase_.load(std::memory_order_acquire);
+        while (current == ShutdownPhase::kPending) {
+            phase_.wait(current, std::memory_order_acquire);
+            current = phase_.load(std::memory_order_acquire);
+        }
+        return current;
+    }
 
     std::unique_ptr<TaskExecutionAdmissionService> admission_service_;
     TaskResourceRegistrar registrar_;
     TaskResourceRollback rollback_;
     void* registrar_context_;
+    mutable std::shared_mutex gate_;
+    std::atomic<ShutdownPhase> phase_{ShutdownPhase::kAccepting};
 };
 
 TaskExecutionEndpoint::TaskExecutionEndpoint(std::unique_ptr<TaskExecutionAdmissionService> service,
@@ -368,11 +401,65 @@ TaskExecutionEndpoint::~TaskExecutionEndpoint() = default;
 
 std::optional<std::string> TaskExecutionEndpoint::handle(
     std::string_view line, std::optional<TaskPeerIdentity> peer) noexcept {
-    return impl_->handle(line, peer);
+    try {
+        while (true) {
+            if (impl_->await_shutdown() == ShutdownPhase::kFailed) {
+                return std::nullopt;
+            }
+            std::shared_lock lock(impl_->gate_);
+            const auto phase = impl_->phase_.load(std::memory_order_acquire);
+            if (phase == ShutdownPhase::kPending) {
+                continue;
+            }
+            if (phase == ShutdownPhase::kFailed) {
+                return std::nullopt;
+            }
+            return impl_->handle(line, peer, phase == ShutdownPhase::kDraining);
+        }
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
-std::optional<std::string> TaskExecutionEndpoint::Impl::handle(
-    std::string_view line, std::optional<TaskPeerIdentity> peer) noexcept {
+bool TaskExecutionEndpoint::begin_shutdown() noexcept {
+    auto expected = ShutdownPhase::kAccepting;
+    if (impl_->phase_.compare_exchange_strong(expected, ShutdownPhase::kPending,
+                                              std::memory_order_acq_rel)) {
+        try {
+            std::unique_lock lock(impl_->gate_);
+            impl_->phase_.store(ShutdownPhase::kDraining, std::memory_order_release);
+        } catch (...) {
+            impl_->phase_.store(ShutdownPhase::kFailed, std::memory_order_release);
+        }
+        impl_->phase_.notify_all();
+    }
+    return impl_->await_shutdown() == ShutdownPhase::kDraining;
+}
+
+std::optional<TaskExecutionLeaseStatus> TaskExecutionEndpoint::lease_status() const noexcept {
+    try {
+        while (true) {
+            if (impl_->await_shutdown() == ShutdownPhase::kFailed) {
+                return std::nullopt;
+            }
+            std::shared_lock lock(impl_->gate_);
+            const auto phase = impl_->phase_.load(std::memory_order_acquire);
+            if (phase == ShutdownPhase::kPending) {
+                continue;
+            }
+            if (phase == ShutdownPhase::kFailed) {
+                return std::nullopt;
+            }
+            return impl_->admission_service_->lease_status();
+        }
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string> TaskExecutionEndpoint::Impl::handle(std::string_view line,
+                                                               std::optional<TaskPeerIdentity> peer,
+                                                               bool draining) noexcept {
     const auto version = envelope(line);
     const bool legacy = version != kTaskExecutionProtocolVersion;
     const auto format_response = [legacy](const TaskExecutionProtocolResponse& response) {
@@ -381,7 +468,7 @@ std::optional<std::string> TaskExecutionEndpoint::Impl::handle(
     try {
         if (version == kNativeEpochProtocolVersion) {
             try {
-                return handle_native_epoch(line, peer);
+                return handle_native_epoch(line, peer, draining);
             } catch (...) {
                 return std::nullopt;
             }
@@ -406,6 +493,9 @@ std::optional<std::string> TaskExecutionEndpoint::Impl::handle(
                 return format_response(error_response(parse_error_code(parsed.error)));
             }
             request = *parsed.request;
+        }
+        if (draining && creates_or_dispatches(request.operation)) {
+            return format_response(error_response(TaskProtocolErrorCode::kInvalidRequest));
         }
         switch (request.operation) {
             case TaskExecutionProtocolOperation::kSubmit: {
@@ -698,7 +788,7 @@ TaskProtocolErrorCode epoch_admission_error(core::SubmitStatus status) noexcept 
 }  // namespace
 
 std::optional<std::string> TaskExecutionEndpoint::Impl::handle_native_epoch(
-    std::string_view line, std::optional<TaskPeerIdentity> peer) {
+    std::string_view line, std::optional<TaskPeerIdentity> peer, bool draining) {
     NativeEpochResponse response;
     const auto request = parse_native_epoch_request(line);
     if (!request) {
@@ -707,6 +797,10 @@ std::optional<std::string> TaskExecutionEndpoint::Impl::handle_native_epoch(
     response.operation = request->operation;
     response.request_sequence = request->request_sequence;
     response.grant.execution = request->execution;
+    if (draining && (request->operation == NativeEpochOperation::kAcquire ||
+                     request->operation == NativeEpochOperation::kClaim)) {
+        return encode_epoch_response(response);
+    }
     UnpublishedTask unpublished(*admission_service_, rollback_, registrar_context_, peer);
     switch (request->operation) {
         case NativeEpochOperation::kAcquire:

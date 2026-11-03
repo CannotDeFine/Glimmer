@@ -2,9 +2,26 @@
 
 #include "glimmer/control/task_admission.h"
 
+#include <cstddef>
 #include <memory>
 
 namespace glimmer::control {
+
+// An instantaneous view of internal admission state, not proof that the
+// backend stopped, external resources were released, or callers have joined.
+// Some legacy configurations do not create lease records: both task counts
+// and all lease counts must be zero before concluding internal state is empty.
+struct TaskExecutionLeaseStatus {
+    std::size_t queued_tasks = 0;
+    std::size_t running_tasks = 0;
+    std::size_t pending_legacy = 0;
+    std::size_t pending_cooperative = 0;
+    std::size_t pending_native = 0;
+    std::size_t active_legacy = 0;
+    std::size_t active_cooperative = 0;
+    std::size_t active_native = 0;
+    std::size_t reaping = 0;
+};
 
 // Owns its scheduler and serializes its admission state. No other admission
 // service or external caller can mutate that scheduler. Construction may throw
@@ -119,6 +136,7 @@ class TaskExecutionAdmissionService final {
     [[nodiscard]] bool reap_expired();
     [[nodiscard]] std::optional<core::TaskSnapshot> find(core::TaskId task_id) const;
     [[nodiscard]] core::SchedulerStats stats() const;
+    [[nodiscard]] TaskExecutionLeaseStatus lease_status() const;
 
    private:
     struct Impl;

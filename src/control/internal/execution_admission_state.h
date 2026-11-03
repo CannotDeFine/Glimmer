@@ -1,6 +1,6 @@
 #pragma once
 
-#include "glimmer/control/task_admission.h"
+#include "glimmer/control/task_execution_admission.h"
 
 namespace glimmer::control {
 
@@ -106,6 +106,7 @@ class ExecutionAdmissionState final {
     [[nodiscard]] bool reap_expired();
     [[nodiscard]] std::optional<core::TaskSnapshot> find(core::TaskId task_id) const;
     [[nodiscard]] core::SchedulerStats stats() const;
+    [[nodiscard]] TaskExecutionLeaseStatus lease_status() const;
 
    private:
     core::Scheduler& scheduler_;
@@ -156,7 +157,7 @@ class ExecutionAdmissionState final {
     // admission -> scheduler; state_mutex_ is never held while acquiring it.
     // Observers run after unlocking, before notifying state waiters. The
     // registrar remains part of the serialized submission transaction.
-    std::mutex admission_mutex_;
+    mutable std::mutex admission_mutex_;
     std::chrono::milliseconds lease_timeout_;
     bool bind_leases_to_process_ = false;
     const std::optional<NativeEpochExtent> native_epoch_policy;
