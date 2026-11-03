@@ -87,7 +87,8 @@ add_test(NAME glimmer_control_cooperative_gate_quarantine_test
 set_tests_properties(glimmer_control_cooperative_gate_quarantine_test PROPERTIES TIMEOUT 20)
 
 foreach(gate_test IN ITEMS remote_control_operation prepared_control_future
-        process_control_mailbox owner_pumped_control_gate cooperative_launch_gate)
+        process_control_mailbox owner_pumped_control_gate cooperative_launch_gate
+        local_control_wake adjacent_control_handoff)
     add_executable(glimmer_control_${gate_test}_test control/${gate_test}_test.cc)
     target_include_directories(glimmer_control_${gate_test}_test PRIVATE
         "${PROJECT_SOURCE_DIR}/src/control")
