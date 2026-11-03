@@ -7,7 +7,9 @@
 #include <cstring>
 #include <future>
 #include <iostream>
+#include <poll.h>
 #include <string>
+#include <string_view>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -76,6 +78,41 @@ void offer_lost_reply(int listener, bool should_reply, std::promise<void>& relea
     static_cast<void>(::close(fd));
 }
 
+void test_rejected_negotiation(int listener, const std::string& path) {
+    for (const std::string_view reply :
+         {"malformed\n", "GLIMMER_SHM_V1 READY\n", "GLIMMER_SHM_V2 READY\n", "partial"}) {
+        std::thread peer([&] {
+            const int fd = ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+            expect(fd >= 0, "accept malformed-negotiation client");
+            SocketLineReader reader(fd);
+            std::string line;
+            expect(reader.read_line(line, 2000) == SocketLineStatus::kLine &&
+                       line == kSharedControlOpen,
+                   "client sends only negotiation before shared channel is ready");
+            expect(::send(fd, reply.data(), reply.size(), MSG_NOSIGNAL) ==
+                       static_cast<ssize_t>(reply.size()),
+                   "send malformed or incomplete offer");
+            pollfd ready{.fd = fd, .events = POLLIN, .revents = 0};
+            expect(::poll(&ready, 1, 2000) > 0, "client finishes failed negotiation");
+            char byte = 0;
+            if (reply == kSharedControlReady) {
+                expect(::recv(fd, &byte, 1, 0) == 1 && byte == 'O',
+                       "ready response allows only descriptor acknowledgment");
+                expect(::poll(&ready, 1, 2000) > 0, "missing descriptor offer times out");
+            }
+            expect(::recv(fd, &byte, 1, 0) == 0,
+                   "failed negotiation closes without publishing domain work");
+            expect(::close(fd) == 0, "close rejected negotiation peer");
+        });
+        SharedTaskControlClient client(path, 200);
+        expect(!client.request("GLIMMER_TASK_EXEC_V1 STATS\n"),
+               "malformed or incomplete negotiation is rejected");
+        peer.join();
+        pollfd pending{.fd = listener, .events = POLLIN, .revents = 0};
+        expect(::poll(&pending, 1, 0) == 0, "rejected negotiation does not reconnect");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -99,6 +136,8 @@ int main() {
     std::thread server([&] {
         offer(listener, {1, 2}, true, first_response);
         first_closed.set_value();
+        offer(listener, {1, 3}, false, unused);
+        offer(listener, {3, 2}, false, unused);
         offer(listener, {3, 4}, false, unused);
         offer_lost_reply(listener, false, unused);
         lost_returned.get_future().wait();
@@ -121,13 +160,16 @@ int main() {
     first_response.set_value();
     first_closed.get_future().wait();
     expect(!client.request("TEST\n"), "lost request is not replayed");
-    expect(!client.request("TEST\n"), "new service incarnation is rejected");
+    expect(!client.request("TEST\n"), "changed second incarnation word is rejected");
+    expect(!client.request("TEST\n"), "changed first incarnation word is rejected");
+    expect(!client.request("TEST\n"), "both changed incarnation words are rejected");
     SharedTaskControlClient another_client(path, 2000);
     expect(!another_client.request("LOST\n"), "lost reply returns without replay");
     lost_returned.set_value();
     expect(another_client.request("NEXT\n") == "OK\n", "only explicit next call reconnects");
     next_returned.set_value();
     server.join();
+    test_rejected_negotiation(listener, path);
     static_cast<void>(::close(listener));
     expect(::unlink(path.c_str()) == 0 && ::rmdir(directory) == 0, "remove private socket");
     return EXIT_SUCCESS;
