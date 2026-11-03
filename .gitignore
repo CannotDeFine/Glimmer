@@ -1,7 +1,12 @@
 /build/
+/artifacts/
+/assets/
+/.deps/
 /.cache/
 /compile_commands.json
-/AGENTS.md
+/*.sqlite
+/*.sqlite-shm
+/*.sqlite-wal
 __pycache__/
 *.py[cod]
 /examples/priority_demo/output/
