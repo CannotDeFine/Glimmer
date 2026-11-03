@@ -90,6 +90,14 @@ Endpoint shutdown prevents new grants while allowing owners to retire existing
 work. Internal lease counts do not prove that external resources are released
 or that GPU execution has stopped.
 
+The host-only task execution service uses its own socket and scheduler; it
+does not own CUDA work or external resources. It binds leases to the connecting
+process and accepts clients with the service's effective UID. On shutdown it
+refuses new grants while continuing to receive completion or cancellation
+reports, and exits normally only when all task and lease counts are empty.
+Clients must report completion only after physical execution has stopped.
+This service does not recover tasks after a process or service restart.
+
 The separate recovery session binds operation identities to a peer, nonce and
 service incarnation. It retains bounded results until acknowledged and permits
 an identical request to recover a lost reply. The session client delivers each

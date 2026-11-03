@@ -27,6 +27,13 @@ target_link_libraries(glimmer_control_service
 
 glimmer_enable_clang_tidy(glimmer_control_service)
 
+add_executable(glimmer_task_execution_service task_execution_service_main.cc)
+set_target_properties(glimmer_task_execution_service PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
+target_link_libraries(glimmer_task_execution_service
+    PRIVATE Glimmer::control Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_task_execution_service)
+
 add_executable(glimmer_control_client control_client_main.cc)
 
 set_target_properties(glimmer_control_client PROPERTIES
@@ -42,6 +49,27 @@ target_link_libraries(glimmer_control_client
 glimmer_enable_clang_tidy(glimmer_control_client)
 
 if(BUILD_TESTING)
+    add_executable(glimmer_task_execution_service_test_host task_execution_service_main.cc)
+    target_compile_definitions(glimmer_task_execution_service_test_host
+        PRIVATE GLIMMER_TASK_SERVICE_TESTING)
+    target_include_directories(glimmer_task_execution_service_test_host
+        PRIVATE "${PROJECT_SOURCE_DIR}/src/core")
+    target_link_libraries(glimmer_task_execution_service_test_host
+        PRIVATE Glimmer::control Glimmer::project_options)
+    glimmer_enable_clang_tidy(glimmer_task_execution_service_test_host)
+
+    add_executable(glimmer_task_execution_service_process_test
+        "${PROJECT_SOURCE_DIR}/tests/control/task_execution_service_process_test.cc")
+    target_include_directories(glimmer_task_execution_service_process_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
+    target_link_libraries(glimmer_task_execution_service_process_test
+        PRIVATE Glimmer::control Glimmer::project_options)
+    glimmer_enable_clang_tidy(glimmer_task_execution_service_process_test)
+    add_test(NAME glimmer_task_execution_service_process_test
+        COMMAND glimmer_task_execution_service_process_test
+            $<TARGET_FILE:glimmer_task_execution_service>
+            $<TARGET_FILE:glimmer_task_execution_service_test_host>)
+    set_tests_properties(glimmer_task_execution_service_process_test PROPERTIES TIMEOUT 15)
     add_test(NAME glimmer_control_service_help COMMAND glimmer_control_service --help)
     set_tests_properties(glimmer_control_service_help PROPERTIES
         PASS_REGULAR_EXPRESSION "Usage:"
