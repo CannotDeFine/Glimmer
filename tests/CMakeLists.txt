@@ -1,5 +1,8 @@
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME glimmer_artifact_paths_test
+        COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/build/artifact_paths_test.py
+    )
     add_test(NAME glimmer_pytorch_measurements_test
         COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/examples/pytorch_measurements_test.py
