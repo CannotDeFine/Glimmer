@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -153,6 +154,77 @@ class ArtifactPathsTest(unittest.TestCase):
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((Path(result.stdout.strip()) / "run.json").is_file())
+
+
+class BuildStorageTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="glimmer-build-policy-")
+        self.addCleanup(self.temporary.cleanup)
+        self.base = Path(self.temporary.name)
+        self.project = self.base / "project"
+        (self.project / "cmake").mkdir(parents=True)
+        shutil.copyfile(PROJECT / "cmake/BuildStorage.cmake", self.project / "cmake/BuildStorage.cmake")
+        shutil.copyfile(PROJECT / "CMakePresets.json", self.project / "CMakePresets.json")
+        (self.project / "CMakeLists.txt").write_text(
+            'cmake_minimum_required(VERSION 3.20)\n'
+            'include(cmake/BuildStorage.cmake)\n'
+            'glimmer_check_build_storage()\nproject(StorageFixture LANGUAGES NONE)\n')
+
+    def configure(self, binary, source=None):
+        return subprocess.run(['cmake', '-S', str(source or self.project), '-B', str(binary)],
+                              capture_output=True, text=True, timeout=10)
+
+    def test_all_fixed_presets_candidate_and_real_external_directory(self):
+        presets = json.loads((self.project / "CMakePresets.json").read_text())
+        names = [p['name'] for p in presets['configurePresets'] if not p.get('hidden')]
+        for binary in [self.project / 'build' / n for n in names + ['candidate']] + [self.base / 'external']:
+            with self.subTest(binary=binary):
+                result = self.configure(binary)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        # The preset file is authoritative; no second hardcoded name list.
+        presets['configurePresets'].append(dict(name='fixture-sdk', inherits='debug'))
+        (self.project / 'CMakePresets.json').write_text(json.dumps(presets))
+        self.assertEqual(self.configure(self.project / 'build/fixture-sdk').returncode, 0)
+
+    def test_numbered_source_hidden_and_legacy_builds_rejected_without_deleting_evidence(self):
+        legacy = self.project / 'build/old-experiment-1'
+        legacy.mkdir(parents=True)
+        evidence = legacy / 'qualified-binary'
+        evidence.write_bytes(b'preserved')
+        for binary in (legacy, self.project, self.project / 'build/base',
+                       self.project / 'artifacts/new-build', self.project / 'build/candidate-2'):
+            with self.subTest(binary=binary):
+                self.assertNotEqual(self.configure(binary).returncode, 0)
+        self.assertEqual(evidence.read_bytes(), b'preserved')
+
+    def test_aliases_and_frozen_or_different_source_candidate_are_rejected(self):
+        binary = self.project / 'build/candidate'
+        binary.mkdir(parents=True)
+        evidence = binary / 'retained-evidence'
+        evidence.write_bytes(b'preserved')
+        marker = binary / '.glimmer-frozen'
+        marker.touch()
+        self.assertIn('frozen evidence', self.configure(binary).stderr)
+        marker.unlink()
+        marker.symlink_to(self.base / 'missing-marker-target')
+        result = self.configure(binary)
+        self.assertIn('frozen evidence', result.stderr)
+        self.assertTrue(marker.is_symlink())
+        self.assertEqual(evidence.read_bytes(), b'preserved')
+        marker.unlink()
+        external = self.base / 'alias'
+        external.symlink_to(binary, target_is_directory=True)
+        self.assertIn('symlink aliases', self.configure(external).stderr)
+        self.assertEqual(self.configure(binary).returncode, 0)
+        other = self.base / 'other-source'
+        other.mkdir()
+        (other / 'CMakeLists.txt').write_text(
+            'cmake_minimum_required(VERSION 3.20)\n'
+            f'include("{self.project}/cmake/BuildStorage.cmake")\n'
+            'glimmer_check_build_storage()\nproject(OtherFixture LANGUAGES NONE)\n')
+        result = self.configure(binary, source=other)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('does not match the source', result.stderr)
 
 
 if __name__ == "__main__":

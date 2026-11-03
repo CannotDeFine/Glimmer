@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 
+include(cmake/BuildStorage.cmake)
+glimmer_check_build_storage()
+
 project(Glimmer VERSION 0.1.0 LANGUAGES CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")

@@ -21,3 +21,16 @@ Project-local output must resolve under `artifacts/`; new output under
 `build/` is rejected. Explicit dedicated directories outside the project are
 supported. Existing build contents are not moved or deleted. Treat this as a
 developer workflow guard, not a security boundary against concurrent changes.
+
+## Reusable build directories
+
+For builds inside the repository, the root CMake project accepts the configured
+preset slots under `build/` and the additional `build/candidate/` slot. It
+rejects numbered or other unlisted directories, in-source and ancestor builds,
+symlink aliases, frozen markers, and caches owned by a different source tree.
+Canonical external build directories remain supported.
+
+This is a workflow safeguard, not a filesystem lock. CMake may create or update
+its cache before the check runs, so do not invoke it on a frozen directory.
+The guard does not measure or enforce a build storage budget, remove files, or
+make historical build contents disposable.
