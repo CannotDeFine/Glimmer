@@ -11,6 +11,7 @@
 #include <cstring>
 #include <future>
 #include <iostream>
+#include <optional>
 #include <poll.h>
 #include <string>
 #include <string_view>
@@ -150,7 +151,10 @@ void test_explicit_fallback(int listener, const std::string& path, std::string_v
         expect(::close(fd) == 0, "close without the second response");
     });
     VersionedTaskControlClient client(path, VersionedControlTransport::kAuto, 1000);
-    expect(client.request("FIRST\n") == "OK\n", "explicit unsupported enables fallback");
+    VersionedControlTiming timing;
+    expect(client.request("FIRST\n", &timing) == "OK\n" && !timing.used_shared_memory &&
+               timing.elapsed_nanoseconds > 0,
+           "explicit unsupported enables timed socket fallback");
     const pid_t child = ::fork();
     expect(child >= 0, "fork fallback client");
     if (child == 0) {
@@ -183,13 +187,17 @@ void test_strict_shared_rejects_unsupported(int listener, const std::string& pat
         expect(::close(fd) == 0, "close strict peer");
     });
     VersionedTaskControlClient client(path, VersionedControlTransport::kSharedMemory, 1000);
-    expect(!client.request("NEVER\n"), "strict shared mode cannot fall back");
+    VersionedControlTiming timing{42, true};
+    expect(!client.request("NEVER\n", &timing) && !timing.used_shared_memory,
+           "strict shared mode cannot fall back or report an unestablished channel");
     peer.join();
 }
 
 void test_socket_mode_and_invalid_selection(int listener, const std::string& path) {
     VersionedTaskControlClient invalid(path, static_cast<VersionedControlTransport>(255), 1000);
-    expect(!invalid.request("NEVER\n"), "invalid mode is rejected before connecting");
+    VersionedControlTiming timing{42, true};
+    expect(!invalid.request("NEVER\n", &timing) && !timing.used_shared_memory,
+           "invalid mode is rejected before connecting and resets timing");
     pollfd pending{.fd = listener, .events = POLLIN, .revents = 0};
     expect(::poll(&pending, 1, 0) == 0, "invalid mode never contacts service");
     std::thread peer([&] {
@@ -250,12 +258,98 @@ void test_pinned_auto_cannot_downgrade(int listener, const std::string& path) {
         expect(::close(replacement) == 0, "close replacement peer");
     });
     VersionedTaskControlClient client(path, VersionedControlTransport::kAuto, 1000);
-    expect(client.request("FIRST\n") == "OK\n", "auto client establishes shared identity");
+    VersionedControlTiming timing;
+    expect(client.request("FIRST\n", &timing) == "OK\n" && timing.used_shared_memory &&
+               timing.elapsed_nanoseconds > 0,
+           "auto client establishes and measures shared identity");
     consumed.set_value();
     disconnected.get_future().wait();
     expect(!client.request("LOST\n"), "disconnected request fails without retry");
     expect(!client.request("NEVER\n"), "pinned client rejects unsupported downgrade");
     peer.join();
+}
+
+void test_environment_selection(int listener, const std::string& path) {
+    const char* old_value = std::getenv("GLIMMER_CONTROL_TRANSPORT");
+    const std::optional<std::string> saved =
+        old_value ? std::optional<std::string>(old_value) : std::nullopt;
+    expect(::setenv("GLIMMER_CONTROL_TRANSPORT", "invalid", 1) == 0, "set invalid mode");
+    VersionedTaskControlClient invalid(path, VersionedControlTransport::kEnvironment, 1000);
+    expect(::setenv("GLIMMER_CONTROL_TRANSPORT", "auto", 1) == 0, "set auto mode");
+    VersionedTaskControlClient automatic(path, VersionedControlTransport::kEnvironment, 1000);
+    expect(::unsetenv("GLIMMER_CONTROL_TRANSPORT") == 0, "unset transport mode");
+    VersionedTaskControlClient default_socket(path, VersionedControlTransport::kEnvironment, 1000);
+    expect(::setenv("GLIMMER_CONTROL_TRANSPORT", "socket", 1) == 0, "set socket mode");
+    VersionedTaskControlClient socket(path, VersionedControlTransport::kEnvironment, 1000);
+    expect(::setenv("GLIMMER_CONTROL_TRANSPORT", "shared_memory", 1) == 0, "set shared mode");
+    VersionedTaskControlClient shared(path, VersionedControlTransport::kEnvironment, 1000);
+    expect(saved ? ::setenv("GLIMMER_CONTROL_TRANSPORT", saved->c_str(), 1) == 0
+                 : ::unsetenv("GLIMMER_CONTROL_TRANSPORT") == 0,
+           "restore prior environment before starting peer thread");
+    expect(!invalid.request("NEVER\n"), "invalid captured environment rejects before connect");
+    std::thread peer([&] {
+        const int fd = ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+        expect(fd >= 0, "accept environment-selected client");
+        SocketLineReader reader(fd);
+        std::string line;
+        expect(
+            reader.read_line(line, 2000) == SocketLineStatus::kLine && line == kSharedControlOpen,
+            "auto mode is captured at construction");
+        expect(::send(fd, kSharedControlUnsupported.data(), kSharedControlUnsupported.size(),
+                      MSG_NOSIGNAL) == static_cast<ssize_t>(kSharedControlUnsupported.size()),
+               "environment peer sends unsupported");
+        expect(reader.read_line(line, 2000) == SocketLineStatus::kLine && line == "ENV\n",
+               "captured auto mode falls back on the same socket");
+        constexpr std::string_view response = "OK\n";
+        expect(::send(fd, response.data(), response.size(), MSG_NOSIGNAL) ==
+                   static_cast<ssize_t>(response.size()),
+               "environment peer responds");
+        expect(::close(fd) == 0, "close environment peer");
+    });
+    expect(automatic.request("ENV\n") == "OK\n", "captured environment mode remains selected");
+    peer.join();
+    for (auto* client : {&default_socket, &socket}) {
+        std::thread socket_peer([&] {
+            const int fd = ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+            expect(fd >= 0, "accept captured socket client");
+            SocketLineReader reader(fd);
+            std::string line;
+            expect(reader.read_line(line, 2000) == SocketLineStatus::kLine && line == "SOCKET\n",
+                   "unset and socket environment modes do not negotiate");
+            constexpr std::string_view response = "OK\n";
+            expect(::send(fd, response.data(), response.size(), MSG_NOSIGNAL) ==
+                       static_cast<ssize_t>(response.size()),
+                   "captured socket response sends");
+            expect(::close(fd) == 0, "close captured socket peer");
+        });
+        expect(client->request("SOCKET\n") == "OK\n", "captured socket mode succeeds");
+        socket_peer.join();
+    }
+    std::promise<void> consumed;
+    std::thread shared_peer([&] {
+        const int fd = ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+        expect(fd >= 0, "accept captured shared client");
+        SocketLineReader reader(fd);
+        std::string line;
+        expect(
+            reader.read_line(line, 2000) == SocketLineStatus::kLine && line == kSharedControlOpen,
+            "captured shared mode negotiates");
+        expect(::send(fd, kSharedControlReady.data(), kSharedControlReady.size(), MSG_NOSIGNAL) ==
+                   static_cast<ssize_t>(kSharedControlReady.size()),
+               "captured shared peer sends ready");
+        SharedControlChannel channel;
+        expect(channel.create_server({11, 12}) && channel.send_offer(fd, std::chrono::seconds(2)) &&
+                   channel.receive_request(fd, 2000, line) == SharedControlReadStatus::kLine &&
+                   line == "SHARED\n" && channel.publish_response("OK\n"),
+               "captured shared mode sends on the shared channel");
+        consumed.get_future().wait();
+        expect(::close(fd) == 0, "close captured shared peer");
+    });
+    VersionedControlTiming timing;
+    expect(shared.request("SHARED\n", &timing) == "OK\n" && timing.used_shared_memory,
+           "shared-memory environment selects and measures shared transport");
+    consumed.set_value();
+    shared_peer.join();
 }
 
 void test_auto_reconnect_identity(int listener, const std::string& path,
@@ -436,6 +530,7 @@ int main() {
     test_explicit_fallback(listener, path, "GLIMMER_TASK_V1 ERROR UNSUPPORTED_VERSION\n");
     test_strict_shared_rejects_unsupported(listener, path);
     test_socket_mode_and_invalid_selection(listener, path);
+    test_environment_selection(listener, path);
     test_pinned_auto_cannot_downgrade(listener, path);
     test_auto_reconnect_identity(listener, path, {7, 8});
     test_auto_reconnect_identity(listener, path, {7, 9});

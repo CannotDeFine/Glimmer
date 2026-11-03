@@ -8,7 +8,18 @@
 
 namespace glimmer::control {
 
-enum class VersionedControlTransport : std::uint8_t { kSocket = 0, kSharedMemory = 1, kAuto = 2 };
+enum class VersionedControlTransport : std::uint8_t {
+    kSocket = 0,
+    kSharedMemory = 1,
+    kAuto = 2,
+    kEnvironment = 3,
+    kInvalid = 4
+};
+
+struct VersionedControlTiming {
+    std::uint64_t elapsed_nanoseconds = 0;
+    bool used_shared_memory = false;
+};
 
 // A separate process-local session for explicit transport selection. In auto
 // mode socket fallback is allowed only after an exact unsupported response,
@@ -20,6 +31,10 @@ enum class VersionedControlTransport : std::uint8_t { kSocket = 0, kSharedMemory
 // resource state must quarantine themselves. Fork children must not use or
 // destroy the inherited object and must promptly exec or _exit. All request
 // calls must finish before destruction. The socket directory must be trusted.
+// Environment mode captures GLIMMER_CONTROL_TRANSPORT at construction; unset
+// selects socket, and unsupported values reject before connecting. Construct
+// before any concurrent mutation of the process environment.
+// Concurrent requests must not share a timing output object.
 class VersionedTaskControlClient final {
    public:
     explicit VersionedTaskControlClient(std::string socket_path,
@@ -32,6 +47,8 @@ class VersionedTaskControlClient final {
     VersionedTaskControlClient& operator=(VersionedTaskControlClient&&) = delete;
 
     [[nodiscard]] std::optional<std::string> request(std::string_view line) noexcept;
+    [[nodiscard]] std::optional<std::string> request(std::string_view line,
+                                                     VersionedControlTiming* timing) noexcept;
 
    private:
     struct Impl;

@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <mutex>
@@ -99,6 +100,41 @@ constexpr std::uint32_t kMaxTimeoutMs = 60'000;
     }
     return true;
 }
+
+[[nodiscard]] VersionedControlTransport select_transport(VersionedControlTransport transport) {
+    if (transport != VersionedControlTransport::kEnvironment) return transport;
+    const char* setting = std::getenv("GLIMMER_CONTROL_TRANSPORT");
+    if (setting == nullptr || std::string_view(setting) == "socket")
+        return VersionedControlTransport::kSocket;
+    if (std::string_view(setting) == "shared_memory")
+        return VersionedControlTransport::kSharedMemory;
+    if (std::string_view(setting) == "auto") return VersionedControlTransport::kAuto;
+    return VersionedControlTransport::kInvalid;
+}
+
+class VersionedTimingScope final {
+   public:
+    explicit VersionedTimingScope(VersionedControlTiming* result) noexcept
+        : timing_(result),
+          started_(result ? std::chrono::steady_clock::now()
+                          : std::chrono::steady_clock::time_point{}) {
+        if (timing_) *timing_ = {};
+    }
+    ~VersionedTimingScope() {
+        if (timing_) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now() - started_)
+                                     .count();
+            timing_->elapsed_nanoseconds = elapsed > 0 ? static_cast<std::uint64_t>(elapsed) : 0;
+        }
+    }
+    VersionedTimingScope(const VersionedTimingScope&) = delete;
+    VersionedTimingScope& operator=(const VersionedTimingScope&) = delete;
+
+   private:
+    VersionedControlTiming* timing_;
+    std::chrono::steady_clock::time_point started_;
+};
 
 }  // namespace
 
@@ -197,7 +233,7 @@ std::optional<std::string> SharedTaskControlClient::request(std::string_view lin
 struct VersionedTaskControlClient::Impl {
     Impl(std::string path, VersionedControlTransport mode, std::uint32_t timeout)
         : socket_path(std::move(path)),
-          transport(mode),
+          transport(select_transport(mode)),
           io_timeout_ms(timeout),
           process_id(::getpid()) {}
     ~Impl() {
@@ -277,6 +313,12 @@ VersionedTaskControlClient::VersionedTaskControlClient(std::string socket_path,
 VersionedTaskControlClient::~VersionedTaskControlClient() = default;
 
 std::optional<std::string> VersionedTaskControlClient::request(std::string_view line) noexcept {
+    return request(line, nullptr);
+}
+
+std::optional<std::string> VersionedTaskControlClient::request(
+    std::string_view line, VersionedControlTiming* timing) noexcept {
+    const VersionedTimingScope timing_scope(timing);
     if (::getpid() != impl_->process_id || impl_->io_timeout_ms == 0 ||
         impl_->io_timeout_ms > kMaxTimeoutMs || line.empty() || line.back() != '\n' ||
         line.size() > kTaskProtocolMaxLineBytes || line.find('\n') != line.size() - 1 ||
@@ -286,6 +328,7 @@ std::optional<std::string> VersionedTaskControlClient::request(std::string_view 
         std::scoped_lock lock(impl_->mutex);
         try {
             if (!impl_->connect()) return std::nullopt;
+            if (timing) timing->used_shared_memory = !impl_->socket_selected;
             std::string response;
             const bool success =
                 impl_->socket_selected
