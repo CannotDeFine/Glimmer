@@ -1,3 +1,10 @@
+add_executable(glimmer_control_execution_graph_protocol_test
+    control/execution_graph_protocol_test.cc)
+target_link_libraries(glimmer_control_execution_graph_protocol_test PRIVATE Glimmer::control Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_control_execution_graph_protocol_test)
+add_test(NAME glimmer_control_execution_graph_protocol_test COMMAND glimmer_control_execution_graph_protocol_test)
+set_tests_properties(glimmer_control_execution_graph_protocol_test PROPERTIES TIMEOUT 30)
+
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
     add_test(NAME glimmer_check_script_test

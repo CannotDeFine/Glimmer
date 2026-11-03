@@ -1,5 +1,6 @@
 add_library(glimmer_control
     execution_protocol.cc
+    execution_graph_protocol.cc
     composite_quota.cc
     device_capacity_quota.cc
     internal/socket_line_reader.cc
