@@ -44,6 +44,10 @@ concrete responsibility and a testable interface.
 | `interceptor` | `src/interceptor/` and `src/interceptor/internal/` | Provides ABI-compatible wrappers for covered CUDA Driver, PTDS stream-ordered Driver, CUDA kernel and graph launches, Runtime, memory-pool, IPC, external-memory, array, graphics, and graph-memory APIs, routes supported symbol lookups, and owns process-local allocation metadata while using `control` for quota decisions. Accounted allocations update the ledger; APIs whose ownership or byte lifetime cannot be reconstructed are explicitly fail-closed under quota and delegated when quota is disabled. Observe mode forwards launches and emits a sampled boundary diagnostic; enforce mode admits covered launches through a process-local `control::LaunchGate`, or an opt-in authenticated Unix-socket launch lease, and releases the slot after an internal CUDA event completes. Neither path provides kernel preemption. The `internal/` headers are private implementation interfaces and are not public project headers. |
 | `examples` | `examples/` | Contains independent real-GPU CUDA workload harnesses, optional framework workload programs, and the opt-in `cuda_task_backend/` demonstration. Each directory owns its source and generated artifacts; examples do not modify transparent interception behavior or define scheduler policy. |
 
+The control execution-wire codec validates bounded message framing and payload
+shapes. Opcode definitions alone do not establish support for an operation; the
+consumer owns authentication, resource validation, execution and completion.
+
 The backend submission queue retains accepted command data until trusted
 proof of no native issue or final physical stop; its receipt remains until
 reply acknowledgement. It owns neither CUDA calls nor scheduling policy.
