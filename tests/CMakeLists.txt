@@ -1,3 +1,18 @@
+add_library(glimmer_control_abi_v1_consumer OBJECT control/abi_v1/consumer.cc)
+target_include_directories(glimmer_control_abi_v1_consumer BEFORE PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/control/abi_v1/include"
+    "${PROJECT_SOURCE_DIR}/include")
+target_link_libraries(glimmer_control_abi_v1_consumer PRIVATE Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_control_abi_v1_consumer)
+add_executable(glimmer_control_abi_v1_test control/abi_v1/provider.cc
+    $<TARGET_OBJECTS:glimmer_control_abi_v1_consumer>)
+set_target_properties(glimmer_control_abi_v1_consumer glimmer_control_abi_v1_test
+    PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_link_libraries(glimmer_control_abi_v1_test PRIVATE Glimmer::control Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_control_abi_v1_test)
+add_test(NAME glimmer_control_abi_v1_test COMMAND glimmer_control_abi_v1_test)
+set_tests_properties(glimmer_control_abi_v1_test PROPERTIES TIMEOUT 30)
+
 add_executable(glimmer_control_native_epoch_protocol_test
     control/native_epoch_protocol_test.cc)
 target_link_libraries(glimmer_control_native_epoch_protocol_test PRIVATE
