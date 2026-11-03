@@ -71,6 +71,12 @@ destruction; destroying the service does not stop a GPU or fence a context.
 Cooperative admission is marked before publication; ordinary task operations
 cannot claim it, and a generation grant is issued at most once per dispatch.
 
+The execution endpoint owns its admission service and routes each complete line
+by its exact protocol envelope. A response that cannot be built before publication
+retires newly issued cooperative or native work and rolls back its resource binding
+only when non-issue is known. An uncertain transport delivery is not retried or
+treated as proof of non-issue. Completion observers are not resource ownership.
+
 The backend submission queue retains accepted command data until trusted
 proof of no native issue or final physical stop; its receipt remains until
 reply acknowledgement. It owns neither CUDA calls nor scheduling policy.

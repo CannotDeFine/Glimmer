@@ -1,3 +1,17 @@
+add_executable(glimmer_control_task_execution_endpoint_test
+    control/task_execution_endpoint_test.cc
+    "${PROJECT_SOURCE_DIR}/src/control/task_execution_endpoint.cc")
+target_include_directories(glimmer_control_task_execution_endpoint_test PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/control")
+target_compile_definitions(glimmer_control_task_execution_endpoint_test PRIVATE
+    GLIMMER_ENDPOINT_TESTING)
+target_link_libraries(glimmer_control_task_execution_endpoint_test PRIVATE
+    Glimmer::control Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_control_task_execution_endpoint_test)
+add_test(NAME glimmer_control_task_execution_endpoint_test
+    COMMAND glimmer_control_task_execution_endpoint_test)
+set_tests_properties(glimmer_control_task_execution_endpoint_test PROPERTIES TIMEOUT 30)
+
 add_executable(glimmer_control_task_execution_admission_test
     control/task_execution_admission_test.cc)
 target_include_directories(glimmer_control_task_execution_admission_test PRIVATE

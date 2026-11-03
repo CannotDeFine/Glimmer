@@ -19,6 +19,7 @@ add_library(glimmer_control
     native_epoch_protocol.cc
     task_execution_protocol.cc
     task_execution_admission.cc
+    task_execution_endpoint.cc
     internal/execution_admission_state.cc
     internal/execution_cooperative_admission.cc
     internal/execution_native_epoch_admission.cc
