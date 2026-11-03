@@ -308,3 +308,18 @@ add_executable(glimmer_core_execution_priority_test core/execution_priority_test
 target_link_libraries(glimmer_core_execution_priority_test PRIVATE Glimmer::core Glimmer::project_options)
 glimmer_enable_clang_tidy(glimmer_core_execution_priority_test)
 add_test(NAME glimmer_core_execution_priority_test COMMAND glimmer_core_execution_priority_test)
+
+add_executable(glimmer_backend_execution_submission_queue_test
+    backend/execution_submission_queue_test.cc
+)
+target_include_directories(glimmer_backend_execution_submission_queue_test
+    PRIVATE "${PROJECT_SOURCE_DIR}/src/backend"
+)
+target_link_libraries(glimmer_backend_execution_submission_queue_test
+    PRIVATE Glimmer::backend
+)
+glimmer_enable_clang_tidy(glimmer_backend_execution_submission_queue_test)
+add_test(NAME glimmer_backend_execution_submission_queue_test
+    COMMAND glimmer_backend_execution_submission_queue_test
+)
+set_tests_properties(glimmer_backend_execution_submission_queue_test PROPERTIES TIMEOUT 30)

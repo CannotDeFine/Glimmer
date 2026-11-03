@@ -1,4 +1,5 @@
 add_library(glimmer_backend
+    execution_submission_queue.cc
     simulated_backend.cc
     task_executor.cc
 )
@@ -15,6 +16,8 @@ target_link_libraries(glimmer_backend
     PUBLIC
         Glimmer::core
         Glimmer::project_options
+    PRIVATE
+        spdlog::spdlog
 )
 
 glimmer_enable_clang_tidy(glimmer_backend)
