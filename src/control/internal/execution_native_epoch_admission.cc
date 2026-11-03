@@ -41,13 +41,8 @@ std::optional<NativeEpochGrant> ExecutionAdmissionState::claim_native_epoch(
     std::unique_lock lock(admission_mutex_);
     const auto active = active_leases_.find(task_id);
     if (active != active_leases_.end()) {
-        const auto task = scheduler_.find(task_id);
-        if (!task || !active->second.native_epoch.has_value() ||
-            !native_epoch_owner_matches({task_id, task->dispatch_sequence}, peer)) {
-            return std::nullopt;
-        }
-        return grant_from(*task, active->second.native_epoch.value_or(NativeEpochExtent{}),
-                          active->second.acceptance_deadline_nanoseconds);
+        // A repeated claim cannot authorize issuing the same native work twice.
+        return std::nullopt;
     }
     const auto pending = pending_leases_.find(task_id);
     if (pending == pending_leases_.end() || !pending->second.native_epoch ||

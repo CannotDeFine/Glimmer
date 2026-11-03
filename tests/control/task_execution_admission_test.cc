@@ -133,6 +133,8 @@ void test_native_epoch() {
            "native grant is owner-bound");
     const auto grant = service.claim_native_epoch(submitted.task_id, kOwner);
     expect(grant.has_value() && grant->extent == extent, "native extent granted");
+    expect(!service.claim_native_epoch(submitted.task_id, kOwner),
+           "a repeated native claim is not a second issue grant");
     const auto execution = grant.value_or(NativeEpochGrant{}).execution;
     expect(!service.cancel(execution.task_id) &&
                !service.finish_native_epoch(execution, 5, false, kOwner) &&
@@ -233,6 +235,37 @@ void test_native_acceptance_deadline() {
     expect(service.finish_native_epoch(execution, 0, true, kOwner) &&
                service.stats().quota.used_bytes() == 0,
            "physical failure releases native quota once");
+}
+
+void test_competing_native_claims() {
+    constexpr NativeEpochExtent allowed{4, 2, 2, 1000000};
+    TaskExecutionAdmissionService service(100, {}, 0ms, true, nullptr, nullptr, nullptr, nullptr,
+                                          allowed);
+    const TaskAdmissionRequest request{.tenant_id = "tenant", .memory_bytes = 20, .work_units = 4};
+    const auto pending =
+        service.submit_native_epoch(request, allowed, accept_resource, nullptr, kOwner);
+    std::array<std::optional<NativeEpochGrant>, 2> claims;
+    std::barrier start(3);
+    std::thread first([&] {
+        start.arrive_and_wait();
+        claims[0] = service.claim_native_epoch(pending.task_id, kOwner);
+    });
+    std::thread second([&] {
+        start.arrive_and_wait();
+        claims[1] = service.claim_native_epoch(pending.task_id, kOwner);
+    });
+    start.arrive_and_wait();
+    first.join();
+    second.join();
+    expect(claims[0].has_value() != claims[1].has_value(), "only one native issue grant wins");
+    expect(!service.pending_native_epoch_extent(pending.task_id, kOwner) &&
+               service.stats().quota.used_bytes() == 20,
+           "the losing claim cannot reclassify or release an active epoch");
+    const auto winner = claims[0].has_value() ? claims[0] : claims[1];
+    expect(service.finish_native_epoch(winner.value_or(NativeEpochGrant{}).execution, 4, false,
+                                       kOwner) &&
+               service.stats().quota.used_bytes() == 0,
+           "winning native grant is retired");
 }
 
 struct ObservationCounts {
@@ -448,6 +481,7 @@ int main() {
     test_priority_and_continuation();
     test_pending_expiry_and_native_policy();
     test_native_acceptance_deadline();
+    test_competing_native_claims();
     test_cooperative_admission_kind();
     test_pending_claim_cancel_race();
     test_competing_cooperative_claims();

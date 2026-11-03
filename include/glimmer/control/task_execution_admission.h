@@ -97,6 +97,8 @@ class TaskExecutionAdmissionService final {
                                                          TaskResourceRegistrar registrar,
                                                          void* registrar_context,
                                                          std::optional<TaskPeerIdentity> peer);
+    // A native grant is issued once. A lost reply is not safe to retry: the
+    // owner must retain the lease until it proves non-issue or physical stop.
     [[nodiscard]] std::optional<NativeEpochGrant> claim_native_epoch(
         core::TaskId task_id, std::optional<TaskPeerIdentity> peer);
     [[nodiscard]] std::optional<NativeEpochExtent> pending_native_epoch_extent(
