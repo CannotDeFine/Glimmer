@@ -1,5 +1,10 @@
 #include "internal/owned_control_exchange.h"
 
+#include "glimmer/control/task_execution_endpoint.h"
+#include "glimmer/control/task_execution_protocol.h"
+#include "glimmer/control/unix_socket_task_execution_server.h"
+#include "internal/process_identity.h"
+
 #include <array>
 #include <barrier>
 #include <cerrno>
@@ -8,6 +13,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <iostream>
+#include <memory>
 #include <poll.h>
 #include <string>
 #include <sys/socket.h>
@@ -448,6 +454,157 @@ void test_changed_incarnation_rejects_before_publication() {
     }
 }
 
+bool register_task(void*, glimmer::core::TaskId) noexcept {
+    return true;
+}
+
+void rollback_task(void*, glimmer::core::TaskId) noexcept {}
+
+class RealService final {
+   public:
+    explicit RealService(const std::string& path)
+        : endpoint_(std::make_unique<TaskExecutionAdmissionService>(
+                        1024, glimmer::core::SchedulerOptions{}, 0ms, true),
+                    register_task, rollback_task, nullptr),
+          server_(endpoint_, {.socket_path = path}) {
+        require(server_.start(), "real authenticated service must start");
+    }
+    OwnedExchangeColdStatus connect(OwnedControlExchange& exchange, const std::string& path) {
+        std::thread accept([&] {
+            require(server_.serve_one_for(1000) == UnixSocketServeStatus::kServed,
+                    "real server must accept");
+        });
+        const auto result = exchange.initialize({path, 1000ms});
+        accept.join();
+        return result;
+    }
+    void stop() {
+        server_.stop();
+    }
+    void shutdown_empty() {
+        require(endpoint_.begin_shutdown(), "endpoint stops admission before destruction");
+        const auto status = endpoint_.lease_status();
+        require(status.has_value(), "shutdown status is available");
+        const auto state = status.value_or(TaskExecutionLeaseStatus{});
+        require(state.queued_tasks == 0 && state.running_tasks == 0 && state.pending_legacy == 0 &&
+                    state.pending_cooperative == 0 && state.pending_native == 0 &&
+                    state.active_legacy == 0 && state.active_cooperative == 0 &&
+                    state.active_native == 0 && state.reaping == 0,
+                "all CPU fixture ownership is retired before destruction");
+    }
+    std::size_t running() const {
+        const auto status = endpoint_.lease_status();
+        require(status.has_value(), "real endpoint status is available");
+        return status.value_or(TaskExecutionLeaseStatus{}).running_tasks;
+    }
+    void retire_stopped_cpu_task(glimmer::core::TaskId id, std::uint64_t generation) {
+        const auto peer = current_process_identity();
+        require(peer.has_value(), "test owner identity is available");
+        const auto response =
+            endpoint_.handle("GLIMMER_TASK_EXEC_V1 EXEC_COMPLETE " + std::to_string(id) + " " +
+                                 std::to_string(generation) + "\n",
+                             peer);
+        const auto parsed = parse_task_execution_protocol_response(response.value_or(""));
+        require(
+            parsed.parsed() && parsed.response.value_or(TaskExecutionProtocolResponse{}).state ==
+                                   TaskProtocolState::kCompleted,
+            "test retires its physically stopped CPU fixture");
+    }
+
+   private:
+    TaskExecutionEndpoint endpoint_;
+    UnixSocketTaskExecutionServer server_;
+};
+
+TaskExecutionProtocolResponse request(OwnedControlExchange& exchange,
+                                      const TaskExecutionProtocolRequest& request) {
+    const auto wire = format_task_execution_protocol_request(request);
+    require(wire.has_value(), "canonical request must format");
+    const auto operation = exchange.begin(wire.value_or(""));
+    require(operation.status == SharedControlPublication::kPublished,
+            "real operation must publish");
+    const auto deadline = Clock::now() + 2s;
+    std::string line;
+    auto result = OwnedExchangeProgress::kPending;
+    while (result == OwnedExchangeProgress::kPending && Clock::now() < deadline) {
+        result = exchange.poll(operation.ticket, line);
+        if (result == OwnedExchangeProgress::kPending) {
+            const auto wait = exchange.wait_state(operation.ticket);
+            require(wait.has_value(), "real pending operation must retain wait state");
+            pollfd reply{.fd = wait.value_or(OwnedExchangeWait{}).descriptor,
+                         .events = POLLIN,
+                         .revents = 0};
+            require(::poll(&reply, 1, 1000) > 0, "actual reply must wake descriptor wait");
+        }
+    }
+    const auto parsed = parse_task_execution_protocol_response(line);
+    require(result == OwnedExchangeProgress::kResponse && parsed.parsed(),
+            "real endpoint must return actual canonical response");
+    return parsed.response.value_or(TaskExecutionProtocolResponse{});
+}
+
+void test_real_service_restart() {
+    Directory directory;
+    ServiceIncarnationBinding retained;
+    OwnedControlExchange old{retained};
+    RealService original{directory.path()};
+    require(original.connect(old, directory.path()) == OwnedExchangeColdStatus::kReady,
+            "real cold service must bind");
+    TaskExecutionProtocolRequest acquire{};
+    acquire.operation = TaskExecutionProtocolOperation::kExecutionAcquire;
+    acquire.admission.tenant_id = "owned-exchange";
+    acquire.admission.memory_bytes = 1;
+    const auto first = request(old, acquire);
+    require(first.kind == TaskExecutionProtocolResponseKind::kExecutionLease &&
+                first.task_id == 1 && first.generation == 1,
+            "first service must issue actual execution 1/1");
+    require(old.close_idle(), "transport idle is distinct from running domain lease");
+    original.stop();
+    require(original.running() == 1,
+            "transport cleanup cannot release physically unproven old ownership");
+    RealService replacement{directory.path()};
+    ServiceIncarnationBinding fresh;
+    OwnedControlExchange current{fresh};
+    require(replacement.connect(current, directory.path()) == OwnedExchangeColdStatus::kReady,
+            "fresh logical session can use replacement service");
+    const auto second = request(current, acquire);
+    require(second.kind == TaskExecutionProtocolResponseKind::kExecutionLease &&
+                second.task_id == 1 && second.generation == 1,
+            "replacement deliberately reissues colliding execution 1/1");
+    require(replacement.connect(old, directory.path()) == OwnedExchangeColdStatus::kRejected,
+            "retained logical session rejects restart before publication");
+    for (const auto operation : {TaskExecutionProtocolOperation::kExecutionComplete,
+                                 TaskExecutionProtocolOperation::kExecutionHeartbeat,
+                                 TaskExecutionProtocolOperation::kExecutionAcquire}) {
+        TaskExecutionProtocolRequest obsolete{};
+        obsolete.operation = operation;
+        obsolete.admission.tenant_id = "old-session";
+        obsolete.admission.memory_bytes = 1;
+        if (operation != TaskExecutionProtocolOperation::kExecutionAcquire) {
+            obsolete.task_id = first.task_id;
+            obsolete.generation = first.generation;
+        }
+        const auto wire = format_task_execution_protocol_request(obsolete);
+        require(wire && old.begin(wire.value_or("")).status == SharedControlPublication::kRejected,
+                "old terminal, heartbeat and admission cannot reach replacement");
+    }
+    require(replacement.running() == 1, "restart rejection leaves new running lease untouched");
+    TaskExecutionProtocolRequest complete{};
+    complete.operation = TaskExecutionProtocolOperation::kExecutionComplete;
+    complete.task_id = second.task_id;
+    complete.generation = second.generation;
+    const auto completed = request(current, complete);
+    require(completed.kind == TaskExecutionProtocolResponseKind::kState &&
+                completed.task_id == second.task_id &&
+                completed.state == TaskProtocolState::kCompleted,
+            "fresh session completes its own CPU-declared task");
+    require(current.close_idle(), "fresh CPU endpoint must close");
+    replacement.stop();
+    original.retire_stopped_cpu_task(first.task_id, first.generation);
+    original.shutdown_empty();
+    replacement.shutdown_empty();
+}
+
 std::size_t descriptor_count() {
     DIR* directory = ::opendir("/proc/self/fd");
     require(directory != nullptr, "descriptor inventory must open");
@@ -470,5 +627,7 @@ int main() {
     test_fork();
     test_cold_rejection();
     test_changed_incarnation_rejects_before_publication();
-    require(descriptor_count() == descriptors, "all descriptors must release");
+    test_real_service_restart();
+    require(descriptor_count() == descriptors,
+            "all success/error/startup descriptors must release");
 }
