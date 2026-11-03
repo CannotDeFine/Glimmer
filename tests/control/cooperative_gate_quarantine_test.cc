@@ -62,13 +62,15 @@ void release_registrar(Resources& resources) {
     resources.blocked.notify_all();
 }
 
-void exercise(bool acquire) {
+void exercise(bool acquire, bool native) {
     char directory[] = "/tmp/glimmer-gate-quarantine-XXXXXX";
     expect(::mkdtemp(directory) != nullptr, "create private directory");
     const std::string path = std::string(directory) + "/server.sock";
+    constexpr NativeEpochExtent extent{2, 1, 1, 1000000};
     Resources resources;
     auto admission = std::make_unique<TaskExecutionAdmissionService>(
-        100, glimmer::core::SchedulerOptions{}, std::chrono::milliseconds::zero(), true);
+        100, glimmer::core::SchedulerOptions{}, std::chrono::milliseconds::zero(), true, nullptr,
+        nullptr, nullptr, nullptr, extent);
     TaskExecutionEndpoint endpoint(std::move(admission), register_resource, rollback_resource,
                                    &resources);
     UnixSocketTaskExecutionServer server(endpoint, {.socket_path = path, .io_timeout_ms = 2000});
@@ -80,7 +82,7 @@ void exercise(bool acquire) {
         }
     });
     {
-        CooperativeLaunchGate gate({.control_socket = path});
+        CooperativeLaunchGate gate({.control_socket = path}, extent);
         const auto normal = gate.submit_and_claim();
         expect(normal.claim.status == CooperativeClaimStatus::kGranted &&
                    gate.complete(normal.claim.execution),
@@ -94,11 +96,15 @@ void exercise(bool acquire) {
         resources.blocked.store(true);
         resources.entered.store(false);
         auto result = std::async(std::launch::async, [&] {
-            return acquire ? gate.submit_and_claim().task_id : gate.submit().value_or(0);
+            if (native) {
+                return gate.acquire_native_epoch({.extent = extent}).status ==
+                       NativeEpochClaimStatus::kUncertain;
+            }
+            return acquire ? gate.submit_and_claim().task_id == 0 : !gate.submit();
         });
         wait_for_registrar(resources);
         expect(result.wait_for(std::chrono::seconds{4}) == std::future_status::ready &&
-                   result.get() == 0 && gate.remote_outcome_uncertain(),
+                   result.get() && gate.remote_outcome_uncertain(),
                "lost reply is quarantined, not treated as clean rejection");
         release_registrar(resources);
         // Wait for the server-side operation to publish before inspecting it.
@@ -111,9 +117,11 @@ void exercise(bool acquire) {
         expect(before && before->queued_tasks + before->running_tasks == 1 &&
                    resources.registered.load() == 3 && resources.rolled_back.load() == 0,
                "server retains the one possibly published task and its resource");
-        expect(!gate.submit() && gate.submit_and_claim().task_id == 0 &&
-                   resources.registered.load() == 3,
+        expect(!gate.submit() && gate.submit_and_claim().task_id == 0,
                "quarantined gate cannot submit or replay");
+        static_cast<void>(gate.acquire_native_epoch({.extent = extent}));
+        expect(resources.registered.load() == 3,
+               "quarantine prevents subsequent native and ordinary publication");
         expect(endpoint.begin_shutdown(), "begin shutdown");
         const auto remaining = endpoint.lease_status();
         expect(remaining && remaining->queued_tasks + remaining->running_tasks == 1,
@@ -184,8 +192,9 @@ void native_bad_reply_quarantines_concurrent_submit(bool error_reply) {
 }  // namespace
 
 int main() {
-    exercise(false);
-    exercise(true);
+    exercise(false, false);
+    exercise(true, false);
+    exercise(true, true);
     native_bad_reply_quarantines_concurrent_submit(false);
     native_bad_reply_quarantines_concurrent_submit(true);
 }

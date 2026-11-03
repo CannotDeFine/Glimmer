@@ -28,6 +28,61 @@ void require(bool value, const char* message) {
         throw std::runtime_error(message);
     }
 }
+void native_and_cooperative_share_capacity() {
+    constexpr NativeEpochExtent extent{8, 4, 2, 1'000'000};
+    CooperativeLaunchGate disabled;
+    require(disabled.acquire_native_epoch({extent}).status == NativeEpochClaimStatus::kRejected &&
+                checked(disabled.local_stats()).total_task_count == 0,
+            "disabled native policy rejects before admission");
+    CooperativeLaunchGate gate(
+        {.scheduling_policy = glimmer::core::SchedulingPolicy::kPriority, .control_socket = {}},
+        extent);
+    auto excessive = extent;
+    ++excessive.max_pending_prefixes;
+    require(gate.acquire_native_epoch({excessive}).status == NativeEpochClaimStatus::kRejected,
+            "native policy bound rejects before admission");
+    const auto native = gate.acquire_native_epoch({extent, 1});
+    require(
+        native.status == NativeEpochClaimStatus::kGranted && !gate.complete(native.grant.execution),
+        "native ownership cannot be released by a cooperative report");
+    const auto ordinary = gate.submit_and_claim({.relative_priority = 9});
+    require(ordinary.claim.status == CooperativeClaimStatus::kPending &&
+                gate.retreat_native_epoch(native.grant) == true,
+            "higher priority cooperative work waits for native physical stop");
+    auto stale = native.grant;
+    ++stale.execution.generation;
+    require(!gate.finish_native_epoch(stale, 1, false) &&
+                !gate.finish_native_epoch(native.grant, 9, false) &&
+                gate.heartbeat_native_epoch(native.grant),
+            "stale or excessive reports cannot release native ownership");
+    require(gate.finish_native_epoch(native.grant, 3, false) &&
+                !gate.finish_native_epoch(native.grant, 3, false),
+            "native terminal report releases ownership exactly once");
+    const auto running = gate.claim(ordinary.task_id);
+    require(running.status == CooperativeClaimStatus::kGranted,
+            "ordinary work claims only after native completion");
+    auto wrong_kind = native.grant;
+    wrong_kind.execution = running.execution;
+    require(!gate.finish_native_epoch(wrong_kind, 0, false),
+            "native reports cannot release cooperative ownership");
+    const auto cancelled = gate.acquire_native_epoch({extent});
+    require(cancelled.status == NativeEpochClaimStatus::kPending &&
+                !gate.cancel_pending(cancelled.grant.execution.task_id) &&
+                gate.cancel_native_epoch(cancelled.grant) &&
+                !gate.cancel_native_epoch(cancelled.grant),
+            "pending native ownership requires its own exactly-once cancellation");
+    const auto pending = gate.acquire_native_epoch({extent, 10});
+    require(pending.status == NativeEpochClaimStatus::kPending && gate.complete(running.execution),
+            "pending native work waits for cooperative completion");
+    const auto claimed = gate.claim_native_epoch(pending.grant);
+    require(claimed.status == NativeEpochClaimStatus::kGranted &&
+                claimed.grant.execution.task_id == pending.grant.execution.task_id &&
+                gate.finish_native_epoch(claimed.grant, 0, true),
+            "pending native identity is preserved through claim and failure");
+    require(checked(gate.local_stats()).total_task_count == 0,
+            "cross-kind ownership is fully retired");
+}
+
 void handoff(CooperativeLaunchGate& gate) {
     const auto acquired = gate.submit_and_claim();
     require(acquired.task_id != 0 && acquired.claim.status == CooperativeClaimStatus::kGranted &&
@@ -137,13 +192,15 @@ class RemoteService final {
     std::string socket;
     UnixSocketTaskExecutionServer server;
     std::jthread acceptor;
-    explicit RemoteService(bool is_bound = true, bool should_block_registration = false)
+    explicit RemoteService(bool is_bound = true, bool should_block_registration = false,
+                           std::optional<NativeEpochExtent> native_policy = std::nullopt)
         : is_registration_blocked(should_block_registration),
           endpoint(std::make_unique<TaskExecutionAdmissionService>(
                        64,
                        glimmer::core::SchedulerOptions{
                            .scheduling_policy = glimmer::core::SchedulingPolicy::kPriority},
-                       std::chrono::milliseconds{0}, is_bound),
+                       std::chrono::milliseconds{0}, is_bound, nullptr, nullptr, nullptr, nullptr,
+                       native_policy),
                    registered, rollback, this),
           directory(make_directory()),
           socket(directory + "/control.sock"),
@@ -290,6 +347,35 @@ void delayed_remote_mailbox() {
             "accepted asynchronous cancellation must drain during shutdown");
 }
 
+void delayed_mixed_mailbox() {
+    constexpr NativeEpochExtent extent{2, 1, 1, 1'000'000};
+    RemoteService service(true, true, extent);
+    AsyncCooperativeLaunchGate gate({.control_socket = service.socket}, 1, extent);
+    auto native = gate.acquire_native_epoch({.extent = extent});
+    require(native.valid() && service.wait_for_registration(),
+            "native admission reaches the blocked registrar");
+    auto ordinary = gate.submit_and_claim();
+    auto overflow = gate.heartbeat_native_epoch({});
+    const bool bounded =
+        ordinary.valid() && !overflow.valid() &&
+        native.wait_for(std::chrono::milliseconds::zero()) == std::future_status::timeout &&
+        ordinary.wait_for(std::chrono::milliseconds::zero()) == std::future_status::timeout;
+    service.release_registration();
+    const auto first = native.get();
+    const auto second = ordinary.get();
+    require(bounded && first.status == NativeEpochClaimStatus::kGranted && second.task_id != 0 &&
+                second.claim.status == CooperativeClaimStatus::kPending,
+            "bounded mixed mailbox preserves native-before-ordinary ordering");
+    require(gate.finish_native_epoch(first.grant, 0, false).get(),
+            "the actual native grant must retire before pending work");
+    auto cancel = gate.cancel_pending(second.task_id);
+    gate.shutdown();
+    const auto remaining = service.endpoint.lease_status();
+    require(cancel.valid() && cancel.get() && remaining && remaining->queued_tasks == 0 &&
+                remaining->running_tasks == 0,
+            "shutdown drains the accepted mixed-workload cancellation");
+}
+
 void progress_notifications() {
     AsyncCooperativeLaunchGate::ProgressSignal signal;
     const auto immediate = std::chrono::milliseconds::zero();
@@ -348,6 +434,7 @@ void progress_notifications() {
 
 int main() {
     try {
+        native_and_cooperative_share_capacity();
         LaunchGateOptions local_options;
         local_options.scheduling_policy = glimmer::core::SchedulingPolicy::kPriority;
         CooperativeLaunchGate gate(local_options);
@@ -405,6 +492,7 @@ int main() {
         async_handoff();
         measured_claims_preserve_results();
         delayed_remote_mailbox();
+        delayed_mixed_mailbox();
         progress_notifications();
         std::cout << "Cooperative launch gate checks passed\n";
         return EXIT_SUCCESS;

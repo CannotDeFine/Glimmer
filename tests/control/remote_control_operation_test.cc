@@ -375,6 +375,30 @@ void test_native_replies() {
                              RemoteControlStep::kUncertain)),
                 "foreign native ACK cannot release ownership");
     }
+    reply.kind = NativeEpochResponseKind::kAcknowledged;
+    reply.operation = NativeEpochOperation::kComplete;
+    reply.grant = kGrant;
+    reply.issued_calls = 2;
+    const RemoteNativeCommand complete{
+        .operation = NativeEpochOperation::kComplete, .grant = kGrant, .issued_calls = 2};
+    reply.grant.execution.generation++;
+    require(!std::get<bool>(scripted(complete, reply, RemoteControlStep::kUncertain)),
+            "stale native generation cannot acknowledge completion");
+    reply.grant = kGrant;
+    reply.operation = NativeEpochOperation::kFail;
+    require(!std::get<bool>(scripted(complete, reply, RemoteControlStep::kUncertain)),
+            "a different terminal operation cannot acknowledge completion");
+    reply.operation = NativeEpochOperation::kComplete;
+    reply.issued_calls = 3;
+    require(!std::get<bool>(scripted(complete, reply, RemoteControlStep::kUncertain)),
+            "a different issued count cannot acknowledge completion");
+    reply.kind = NativeEpochResponseKind::kRetreat;
+    reply.operation = NativeEpochOperation::kRetreat;
+    reply.grant = kGrant;
+    reply.grant.execution.generation++;
+    require(!std::get<std::optional<bool>>(scripted({NativeEpochOperation::kRetreat, kGrant}, reply,
+                                                    RemoteControlStep::kUncertain)),
+            "stale native generation cannot acknowledge retreat");
     reply.kind = NativeEpochResponseKind::kError;
     reply.error = TaskProtocolErrorCode::kQuotaExceeded;
     require(std::get<NativeEpochClaim>(scripted(acquire, reply, RemoteControlStep::kUncertain))
