@@ -27,7 +27,7 @@ struct UnixSocketTaskExecutionConfig {
 // serve_one_for(), stop(), and destruction require external serialization.
 // stop() shuts down connections and joins all workers before returning; it
 // does not cancel tasks, release external resources, or prove GPU completion.
-// Only negotiated shared-channel requests reach the endpoint. Keep the socket
+// Only negotiated V2 or reply-hint V3 shared-channel requests reach the endpoint. Keep the socket
 // path in a directory trusted against replacement by other same-UID actors.
 // If start binds but cannot identify the pathname, it leaves a possible stale
 // entry rather than risk deleting an unrelated file. No domain work is accepted.

@@ -5,6 +5,7 @@
 #include "glimmer/control/task_execution_protocol.h"
 #include "glimmer/control/unix_socket_task_execution_server.h"
 #include "internal/task_execution_endpoint_test_hooks.h"
+#include "internal/owned_control_exchange.h"
 #include "internal/task_recovery_endpoint.h"
 #include "internal/task_recovery_client.h"
 #include "internal/task_recovery_transport_test_hooks.h"
@@ -18,6 +19,7 @@
 #include <future>
 #include <iostream>
 #include <memory>
+#include <poll.h>
 #include <string>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -164,6 +166,69 @@ void test_uncertain_dispatch_is_not_replayed() {
     // The test registrar owns no external resources and no backend work exists.
     // The non-reusable, poisoned accounting is destroyed only after joining.
     expect(::rmdir(directory) == 0, "remove private uncertain-dispatch directory");
+}
+
+void test_owner_reply_hint_channel() {
+    using namespace glimmer::control::internal;
+    char directory[] = "/tmp/glimmer-exec-owner-XXXXXX";
+    expect(::mkdtemp(directory) != nullptr, "create private owner-channel directory");
+    const std::string path = std::string(directory) + "/server.sock";
+    Resources resources;
+    auto admission = std::make_unique<TaskExecutionAdmissionService>(
+        100, glimmer::core::SchedulerOptions{}, std::chrono::milliseconds::zero(), true);
+    TaskExecutionEndpoint endpoint(std::move(admission), register_resource, rollback_resource,
+                                   &resources);
+    UnixSocketTaskExecutionServer server(endpoint, {.socket_path = path, .io_timeout_ms = 1000});
+    expect(server.start(), "start owner-channel server");
+    std::atomic<bool> running{true};
+    std::thread acceptor([&] {
+        while (running.load()) {
+            expect(server.serve_one_for(20) != UnixSocketServeStatus::kError,
+                   "serve owner-channel client");
+        }
+    });
+    {
+        ServiceIncarnationBinding binding;
+        OwnedControlExchange client(binding);
+        expect(client.initialize({path, std::chrono::milliseconds(1000)}) ==
+                   OwnedExchangeColdStatus::kReady,
+               "owner channel negotiates authenticated V3");
+        const auto exchange = [&](std::string_view request) {
+            const auto publication = client.begin(request);
+            expect(publication.status == SharedControlPublication::kPublished,
+                   "owner channel publishes exactly once");
+            std::string response;
+            for (;;) {
+                const auto result = client.poll(publication.ticket, response);
+                if (result == OwnedExchangeProgress::kResponse) return response;
+                expect(result == OwnedExchangeProgress::kPending, "owner response remains valid");
+                const auto wait = client.wait_state(publication.ticket);
+                expect(wait.has_value(), "pending owner response exposes a wait descriptor");
+                pollfd descriptor{.fd = wait->descriptor, .events = POLLIN, .revents = 0};
+                expect(::poll(&descriptor, 1, 1000) > 0, "owner response hint arrives");
+            }
+        };
+        const auto lease = parse_task_execution_protocol_response(
+            exchange("GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n"));
+        expect(lease.parsed() &&
+                   lease.response->kind == TaskExecutionProtocolResponseKind::kExecutionLease,
+               "owner channel receives a cooperative grant");
+        const auto done = "GLIMMER_TASK_EXEC_V1 EXEC_COMPLETE " +
+                          std::to_string(lease.response->task_id) + " " +
+                          std::to_string(lease.response->generation) + "\n";
+        const auto completed = parse_task_execution_protocol_response(exchange(done));
+        expect(completed.parsed() && completed.response->state == TaskProtocolState::kCompleted,
+               "owner channel receives a terminal acknowledgment");
+        expect(client.close_idle(), "close idle owner channel");
+    }
+    expect(endpoint.begin_shutdown(), "stop owner-channel admission");
+    running.store(false);
+    acceptor.join();
+    server.stop();
+    const auto status = endpoint.lease_status();
+    expect(status && status->queued_tasks == 0 && status->running_tasks == 0,
+           "owner-channel tasks retire before teardown");
+    expect(::rmdir(directory) == 0, "remove private owner-channel directory");
 }
 
 void test_recovery_after_lost_replies() {
@@ -392,6 +457,7 @@ int main(int argc, char** argv) {
         return foreign.request(argv[3]).has_value() ? EXIT_FAILURE : EXIT_SUCCESS;
     }
     test_uncertain_dispatch_is_not_replayed();
+    test_owner_reply_hint_channel();
     char directory[] = "/tmp/glimmer-exec-server-XXXXXX";
     expect(::mkdtemp(directory) != nullptr, "create private socket directory");
     const std::string path = std::string(directory) + "/server.sock";

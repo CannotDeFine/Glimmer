@@ -38,8 +38,8 @@ namespace {
 constexpr std::uint32_t kMaxTimeoutMs = 60'000;
 constexpr std::size_t kMaxClients = 256;
 
-[[nodiscard]] bool send_ready(int fd, std::chrono::milliseconds timeout) noexcept {
-    std::string_view remaining = internal::kSharedControlReady;
+[[nodiscard]] bool send_ready(int fd, std::chrono::milliseconds timeout,
+                              std::string_view remaining) noexcept {
     while (!remaining.empty()) {
         pollfd descriptor{.fd = fd, .events = POLLOUT, .revents = 0};
         const int result = ::poll(&descriptor, 1, static_cast<int>(timeout.count()));
@@ -148,15 +148,24 @@ struct UnixSocketTaskExecutionServer::Impl {
         std::string request;
         if (reader.read_line(request, config.io_timeout_ms, &stopping) !=
                 internal::SocketLineStatus::kLine ||
-            request != internal::kSharedControlOpen) {
+            (request != internal::kSharedControlOpen && request != internal::kOwnerControlOpen)) {
             return;
         }
+        const bool has_reply_hints = request == internal::kOwnerControlOpen;
+        const auto mode = has_reply_hints ? internal::SharedControlMode::kReplyHintV3
+                                          : internal::SharedControlMode::kV2;
         internal::SharedControlChannel channel;
-        if (!channel.create_server(incarnation) ||
-            !send_ready(fd, std::chrono::milliseconds(config.io_timeout_ms)) ||
+        if (!channel.create_server(incarnation, mode) ||
+            !send_ready(
+                fd, std::chrono::milliseconds(config.io_timeout_ms),
+                has_reply_hints ? internal::kOwnerControlReady : internal::kSharedControlReady) ||
             !channel.send_offer(fd, std::chrono::milliseconds(config.io_timeout_ms))) {
             return;
         }
+        const auto publish = [&](std::string_view response) {
+            return has_reply_hints ? channel.publish_response_with_hint(fd, response)
+                                   : channel.publish_response(response);
+        };
         while (!stopping.load(std::memory_order_acquire)) {
             const auto status = channel.receive_request(fd, config.io_timeout_ms, request);
             if (status == internal::SharedControlReadStatus::kIdle) {
@@ -168,13 +177,13 @@ struct UnixSocketTaskExecutionServer::Impl {
             bool published = false;
             if (endpoint != nullptr) {
                 const auto response = endpoint->handle(request, peer);
-                published = response && channel.publish_response(*response);
+                published = response && publish(*response);
             } else if (recovery_endpoint != nullptr) {
                 const auto response = recovery_endpoint->handle(request, *peer);
 #if defined(GLIMMER_ENABLE_TEST_HOOKS)
                 if (response && testing::drop_recovery_response.exchange(false)) break;
 #endif
-                published = response && channel.publish_response(response->view());
+                published = response && publish(response->view());
             }
             if (!published) {
                 // The result may already be published; never cancel or replay.
