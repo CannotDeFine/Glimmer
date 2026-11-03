@@ -37,9 +37,14 @@ endif()
 
 function(glimmer_enable_clang_tidy target)
     if(GLIMMER_ENABLE_CLANG_TIDY)
+        # Anchor diagnostics to this checkout, including paths with regex characters.
+        set(header_filter_root "${PROJECT_SOURCE_DIR}")
+        foreach(regex_character IN ITEMS "\\" "." "^" "$" "|" "?" "*" "+" "(" ")" "[" "]" "{" "}")
+            string(REPLACE "${regex_character}" "\\${regex_character}" header_filter_root "${header_filter_root}")
+        endforeach()
         set_property(TARGET ${target} PROPERTY
             CXX_CLANG_TIDY
-            "${GLIMMER_CLANG_TIDY};--config-file=${PROJECT_SOURCE_DIR}/.clang-tidy"
+            "${GLIMMER_CLANG_TIDY};--config-file=${PROJECT_SOURCE_DIR}/.clang-tidy;--header-filter=^${header_filter_root}/(include|src)/"
         )
     endif()
 endfunction()

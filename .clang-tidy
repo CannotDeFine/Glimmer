@@ -7,7 +7,7 @@ Checks: >
   modernize-use-override,
   readability-identifier-naming
 WarningsAsErrors: '*'
-HeaderFilterRegex: '^/home/.*/Glimmer/(include|src)/'
+HeaderFilterRegex: '(^|/)(include/glimmer|src)/'
 CheckOptions:
   - key: readability-identifier-naming.FunctionCase
     value: lower_case

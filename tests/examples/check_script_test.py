@@ -552,6 +552,48 @@ add_executable(scope_probe probe.cc)
             self.assertEqual((build / "compile_commands.json").exists(), expected)
 
 
+    @unittest.skipUnless(shutil.which("clang-tidy") and shutil.which("cmake") and shutil.which("c++"),
+                         "clang-tidy, cmake and a C++ compiler are required")
+    def test_clang_tidy_checks_project_headers_in_a_different_checkout_path(self):
+        source = self.root / "project (checkout).v1"
+        source.mkdir()
+        (source / "src").mkdir()
+        (source / "src/code").mkdir()
+        vendor = source / "3rdparty/vendor/src"
+        vendor.mkdir(parents=True)
+        shutil.copyfile(PROJECT / ".clang-tidy", source / ".clang-tidy")
+        (source / "src/probe.h").write_text("inline int BadName() { return 0; }\n")
+        (vendor / "vendor.h").write_text("inline int VendorBadName() { return 0; }\n")
+        (source / "src/code/probe.cc").write_text(
+            '#include "../probe.h"\n#include <vendor.h>\n'
+            'int main() { return BadName() + VendorBadName(); }\n')
+        (source / "CMakeLists.txt").write_text(f'''
+cmake_minimum_required(VERSION 3.20)
+project(TidyScope LANGUAGES CXX)
+include("{(PROJECT / "cmake/ProjectOptions.cmake").as_posix()}")
+add_executable(scope_probe src/code/probe.cc)
+target_include_directories(scope_probe PRIVATE "{vendor.as_posix()}")
+glimmer_enable_clang_tidy(scope_probe)
+''')
+        cmake, tidy = shutil.which("cmake"), shutil.which("clang-tidy")
+        build = self.root / "tidy-build"
+        configured = subprocess.run([cmake, "-S", str(source), "-B", str(build),
+                                    "-DGLIMMER_ENABLE_CLANG_TIDY=ON",
+                                    "-DGLIMMER_CLANG_TIDY=" + tidy],
+                                   env=self.environment, capture_output=True, text=True, timeout=30)
+        self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+        command = [cmake, "--build", str(build), "-j1"]
+        failing = subprocess.run(command, env=self.environment, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(failing.returncode, 0, failing.stdout + failing.stderr)
+        self.assertIn("BadName", failing.stdout + failing.stderr)
+        self.assertNotIn("VendorBadName", failing.stdout + failing.stderr)
+        (source / "src/probe.h").write_text("inline int bad_name() { return 0; }\n")
+        (source / "src/code/probe.cc").write_text(
+            '#include "../probe.h"\n#include <vendor.h>\n'
+            'int main() { return bad_name() + VendorBadName(); }\n')
+        passing = subprocess.run(command, env=self.environment, capture_output=True, text=True, timeout=30)
+        self.assertEqual(passing.returncode, 0, passing.stdout + passing.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
