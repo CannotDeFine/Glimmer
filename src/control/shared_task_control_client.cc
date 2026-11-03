@@ -4,7 +4,11 @@
 #include "glimmer/control/task_protocol.h"
 #include "internal/shared_control_channel.h"
 #include "internal/socket_line_reader.h"
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+#include "internal/versioned_control_test_hooks.h"
+#endif
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -91,6 +95,17 @@ constexpr std::uint32_t kMaxTimeoutMs = 60'000;
 
 [[nodiscard]] bool send_line(int fd, std::string_view remaining,
                              std::uint32_t timeout_ms) noexcept {
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+    if (internal::testing::versioned_control_faults & internal::testing::kSocketBeforeWrite)
+        return false;
+    if (internal::testing::versioned_control_faults & internal::testing::kSocketAfterPartialWrite) {
+        const auto size = std::min<std::size_t>(3, remaining.size());
+        if (size != 0 && wait_writable(fd, std::chrono::milliseconds(timeout_ms))) {
+            static_cast<void>(::send(fd, remaining.data(), size, MSG_NOSIGNAL));
+        }
+        return false;
+    }
+#endif
     while (!remaining.empty()) {
         if (!wait_writable(fd, std::chrono::milliseconds(timeout_ms))) return false;
         const auto sent = ::send(fd, remaining.data(), remaining.size(), MSG_NOSIGNAL);
@@ -318,18 +333,32 @@ std::optional<std::string> VersionedTaskControlClient::request(std::string_view 
 
 std::optional<std::string> VersionedTaskControlClient::request(
     std::string_view line, VersionedControlTiming* timing) noexcept {
+    return request_detailed(line, timing).response;
+}
+
+VersionedExchangeResult VersionedTaskControlClient::request_detailed(
+    std::string_view line, VersionedControlTiming* timing) noexcept {
     const VersionedTimingScope timing_scope(timing);
     if (::getpid() != impl_->process_id || impl_->io_timeout_ms == 0 ||
         impl_->io_timeout_ms > kMaxTimeoutMs || line.empty() || line.back() != '\n' ||
         line.size() > kTaskProtocolMaxLineBytes || line.find('\n') != line.size() - 1 ||
         line.find('\0') != std::string_view::npos)
-        return std::nullopt;
+        return {};
     try {
         std::scoped_lock lock(impl_->mutex);
+        bool attempted = false;
         try {
-            if (!impl_->connect()) return std::nullopt;
+            if (!impl_->connect()) return {};
             if (timing) timing->used_shared_memory = !impl_->socket_selected;
             std::string response;
+            attempted = true;
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+            if (!impl_->socket_selected && (internal::testing::versioned_control_faults &
+                                            internal::testing::kSharedBeforePublish)) {
+                impl_->reset();
+                return {VersionedExchangeStatus::kUncertain, std::nullopt};
+            }
+#endif
             const bool success =
                 impl_->socket_selected
                     ? send_line(impl_->socket_fd, line, impl_->io_timeout_ms) &&
@@ -338,20 +367,22 @@ std::optional<std::string> VersionedTaskControlClient::request(
                     : impl_->channel.publish_request(line) &&
                           impl_->channel.receive_response(impl_->socket_fd, impl_->io_timeout_ms,
                                                           response);
-            if (success) return response;
+            if (success) return {VersionedExchangeStatus::kResponse, std::move(response)};
         } catch (...) {
             // The outcome of an attempted request may be unknown.
             if (impl_->socket_selected) impl_->socket_retired = true;
             impl_->reset();
-            return std::nullopt;
+            return {attempted ? VersionedExchangeStatus::kUncertain
+                              : VersionedExchangeStatus::kNotPublished,
+                    std::nullopt};
         }
         if (impl_->socket_selected) impl_->socket_retired = true;
         impl_->reset();
+        return {VersionedExchangeStatus::kUncertain, std::nullopt};
     } catch (...) {
         // Lock acquisition failed before touching the connection.
-        return std::nullopt;
+        return {};
     }
-    return std::nullopt;
 }
 
 }  // namespace glimmer::control

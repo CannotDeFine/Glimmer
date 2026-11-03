@@ -1,6 +1,9 @@
 #include "shared_control_channel.h"
 
 #include "glimmer/control/task_protocol.h"
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+#include "versioned_control_test_hooks.h"
+#endif
 
 #include <atomic>
 #include <algorithm>
@@ -220,6 +223,9 @@ void relax_cpu() noexcept {
     }
     slot.length.store(static_cast<std::uint32_t>(line.size()), std::memory_order_relaxed);
     slot.sequence.store(static_cast<std::uint32_t>(sequence), std::memory_order_release);
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+    if (testing::versioned_control_faults & testing::kSharedAfterPublication) return false;
+#endif
     return notify(slot.sequence);
 }
 

@@ -21,6 +21,17 @@ struct VersionedControlTiming {
     bool used_shared_memory = false;
 };
 
+enum class VersionedExchangeStatus : std::uint8_t {
+    kNotPublished = 0,
+    kResponse = 1,
+    kUncertain = 2
+};
+
+struct VersionedExchangeResult {
+    VersionedExchangeStatus status = VersionedExchangeStatus::kNotPublished;
+    std::optional<std::string> response;
+};
+
 // A separate process-local session for explicit transport selection. In auto
 // mode socket fallback is allowed only after an exact unsupported response,
 // before any domain request, on the same connection. Once a shared service is
@@ -49,6 +60,11 @@ class VersionedTaskControlClient final {
     [[nodiscard]] std::optional<std::string> request(std::string_view line) noexcept;
     [[nodiscard]] std::optional<std::string> request(std::string_view line,
                                                      VersionedControlTiming* timing) noexcept;
+    // kNotPublished proves this invocation did not attempt a domain request;
+    // kUncertain does not establish whether it reached the service.
+    // kResponse is transport-level only; callers must validate its contents.
+    [[nodiscard]] VersionedExchangeResult request_detailed(
+        std::string_view line, VersionedControlTiming* timing = nullptr) noexcept;
 
    private:
     struct Impl;

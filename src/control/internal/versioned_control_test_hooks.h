@@ -1,0 +1,11 @@
+#pragma once
+
+namespace glimmer::control::internal::testing {
+
+inline constexpr unsigned kSocketBeforeWrite = 1U;
+inline constexpr unsigned kSocketAfterPartialWrite = 2U;
+inline constexpr unsigned kSharedBeforePublish = 4U;
+inline constexpr unsigned kSharedAfterPublication = 8U;
+inline thread_local unsigned versioned_control_faults = 0;
+
+}  // namespace glimmer::control::internal::testing

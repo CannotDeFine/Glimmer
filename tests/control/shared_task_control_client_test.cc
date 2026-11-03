@@ -2,6 +2,7 @@
 #include "glimmer/control/versioned_task_control_client.h"
 #include "internal/shared_control_channel.h"
 #include "internal/socket_line_reader.h"
+#include "internal/versioned_control_test_hooks.h"
 
 #include <chrono>
 #include <array>
@@ -152,8 +153,9 @@ void test_explicit_fallback(int listener, const std::string& path, std::string_v
     });
     VersionedTaskControlClient client(path, VersionedControlTransport::kAuto, 1000);
     VersionedControlTiming timing;
-    expect(client.request("FIRST\n", &timing) == "OK\n" && !timing.used_shared_memory &&
-               timing.elapsed_nanoseconds > 0,
+    const auto first = client.request_detailed("FIRST\n", &timing);
+    expect(first.status == VersionedExchangeStatus::kResponse && first.response == "OK\n" &&
+               !timing.used_shared_memory && timing.elapsed_nanoseconds > 0,
            "explicit unsupported enables timed socket fallback");
     const pid_t child = ::fork();
     expect(child >= 0, "fork fallback client");
@@ -163,8 +165,9 @@ void test_explicit_fallback(int listener, const std::string& path, std::string_v
     int status = 0;
     expect(::waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
            "fork child rejects inherited fallback client");
-    expect(!client.request("LOST\n") && !client.request("AFTER\n"),
-           "lost socket response retires session without replay or reconnect");
+    expect(client.request_detailed("LOST\n").status == VersionedExchangeStatus::kUncertain &&
+               client.request_detailed("AFTER\n").status == VersionedExchangeStatus::kNotPublished,
+           "lost socket response is uncertain and retires the session before later publication");
     peer.join();
     pollfd pending{.fd = listener, .events = POLLIN, .revents = 0};
     expect(::poll(&pending, 1, 0) == 0, "retired fallback session never reconnects");
@@ -188,7 +191,9 @@ void test_strict_shared_rejects_unsupported(int listener, const std::string& pat
     });
     VersionedTaskControlClient client(path, VersionedControlTransport::kSharedMemory, 1000);
     VersionedControlTiming timing{42, true};
-    expect(!client.request("NEVER\n", &timing) && !timing.used_shared_memory,
+    expect(client.request_detailed("NEVER\n", &timing).status ==
+                   VersionedExchangeStatus::kNotPublished &&
+               !timing.used_shared_memory,
            "strict shared mode cannot fall back or report an unestablished channel");
     peer.join();
 }
@@ -196,7 +201,9 @@ void test_strict_shared_rejects_unsupported(int listener, const std::string& pat
 void test_socket_mode_and_invalid_selection(int listener, const std::string& path) {
     VersionedTaskControlClient invalid(path, static_cast<VersionedControlTransport>(255), 1000);
     VersionedControlTiming timing{42, true};
-    expect(!invalid.request("NEVER\n", &timing) && !timing.used_shared_memory,
+    expect(invalid.request_detailed("NEVER\n", &timing).status ==
+                   VersionedExchangeStatus::kNotPublished &&
+               !timing.used_shared_memory,
            "invalid mode is rejected before connecting and resets timing");
     pollfd pending{.fd = listener, .events = POLLIN, .revents = 0};
     expect(::poll(&pending, 1, 0) == 0, "invalid mode never contacts service");
@@ -264,8 +271,10 @@ void test_pinned_auto_cannot_downgrade(int listener, const std::string& path) {
            "auto client establishes and measures shared identity");
     consumed.set_value();
     disconnected.get_future().wait();
-    expect(!client.request("LOST\n"), "disconnected request fails without retry");
-    expect(!client.request("NEVER\n"), "pinned client rejects unsupported downgrade");
+    expect(client.request_detailed("LOST\n").status == VersionedExchangeStatus::kUncertain,
+           "disconnected request remains uncertain without retry");
+    expect(client.request_detailed("NEVER\n").status == VersionedExchangeStatus::kNotPublished,
+           "pinned client rejects unsupported downgrade before publication");
     peer.join();
 }
 
@@ -403,9 +412,12 @@ void test_auto_reconnect_identity(int listener, const std::string& path,
     expect(client.request("FIRST\n") == "OK\n", "auto pins initial shared identity");
     consumed.set_value();
     disconnected.get_future().wait();
-    expect(!client.request("LOST\n"), "lost shared request is not replayed");
-    const auto response = client.request("SECOND\n");
-    expect(same ? response == "SAME\n" : !response,
+    expect(client.request_detailed("LOST\n").status == VersionedExchangeStatus::kUncertain,
+           "lost shared request is uncertain and not replayed");
+    const auto response = client.request_detailed("SECOND\n");
+    expect(same ? response.status == VersionedExchangeStatus::kResponse &&
+                      response.response == "SAME\n"
+                : response.status == VersionedExchangeStatus::kNotPublished,
            "reconnect accepts only the same pair of identity words");
     second_consumed.set_value();
     peer.join();
@@ -466,6 +478,73 @@ void test_concurrent_auto_fallback(int listener, const std::string& path, bool l
     peer.join();
     pollfd pending{.fd = listener, .events = POLLIN, .revents = 0};
     expect(::poll(&pending, 1, 0) == 0, "concurrent failure does not reconnect or replay");
+}
+
+void test_socket_publication_fault(int listener, const std::string& path, bool partial) {
+    std::thread peer([&] {
+        const int fd = ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+        expect(fd >= 0, "accept socket publication fault fixture");
+        std::string bytes;
+        char buffer[16];
+        for (;;) {
+            pollfd ready{.fd = fd, .events = POLLIN, .revents = 0};
+            expect(::poll(&ready, 1, 2000) > 0, "faulted socket closes before deadline");
+            const auto size = ::recv(fd, buffer, sizeof(buffer), 0);
+            expect(size >= 0, "read socket fault fixture");
+            if (size == 0) break;
+            bytes.append(buffer, static_cast<std::size_t>(size));
+        }
+        expect(bytes == (partial ? "FAU" : ""), "fixture observes exact partial publication");
+        expect(::close(fd) == 0, "close socket fault fixture");
+    });
+    VersionedTaskControlClient client(path, VersionedControlTransport::kSocket, 1000);
+    testing::versioned_control_faults =
+        partial ? testing::kSocketAfterPartialWrite : testing::kSocketBeforeWrite;
+    const auto result = client.request_detailed("FAULT\n");
+    testing::versioned_control_faults = 0;
+    expect(result.status == VersionedExchangeStatus::kUncertain && !result.response &&
+               client.request_detailed("AFTER\n").status == VersionedExchangeStatus::kNotPublished,
+           "socket write failure is conservatively uncertain and retires the session");
+    peer.join();
+    pollfd pending{.fd = listener, .events = POLLIN, .revents = 0};
+    expect(::poll(&pending, 1, 0) == 0, "faulted socket session does not reconnect");
+}
+
+void test_shared_publication_fault(int listener, const std::string& path, bool after_publication,
+                                   bool legacy_api) {
+    std::thread peer([&] {
+        const int fd = ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+        expect(fd >= 0, "accept shared publication fault fixture");
+        SocketLineReader reader(fd);
+        std::string line;
+        expect(
+            reader.read_line(line, 2000) == SocketLineStatus::kLine && line == kSharedControlOpen,
+            "faulted shared fixture negotiates");
+        expect(::send(fd, kSharedControlReady.data(), kSharedControlReady.size(), MSG_NOSIGNAL) ==
+                   static_cast<ssize_t>(kSharedControlReady.size()),
+               "faulted shared fixture sends ready");
+        SharedControlChannel channel;
+        expect(channel.create_server({13, 14}) && channel.send_offer(fd, std::chrono::seconds(2)),
+               "faulted shared fixture offers channel");
+        line.clear();
+        const auto received = channel.receive_request(fd, 2000, line);
+        expect(after_publication ? received == SharedControlReadStatus::kLine && line == "FAULT\n"
+                                 : received == SharedControlReadStatus::kError && line.empty(),
+               "shared fixture distinguishes unpublished and sequence-published fault");
+        expect(::close(fd) == 0, "close shared fault fixture");
+    });
+    VersionedTaskControlClient client(path, VersionedControlTransport::kSharedMemory, 1000);
+    testing::versioned_control_faults =
+        after_publication ? testing::kSharedAfterPublication : testing::kSharedBeforePublish;
+    if (legacy_api) {
+        expect(!client.request("FAULT\n"), "simple API maps failed publication to no reply");
+    } else {
+        const auto result = client.request_detailed("FAULT\n");
+        expect(result.status == VersionedExchangeStatus::kUncertain && !result.response,
+               "shared publication failure is conservatively uncertain");
+    }
+    testing::versioned_control_faults = 0;
+    peer.join();
 }
 
 }  // namespace
@@ -537,6 +616,12 @@ int main() {
     test_auto_reconnect_identity(listener, path, {9, 8});
     test_concurrent_auto_fallback(listener, path, false);
     test_concurrent_auto_fallback(listener, path, true);
+    test_socket_publication_fault(listener, path, false);
+    test_socket_publication_fault(listener, path, true);
+    test_shared_publication_fault(listener, path, false, false);
+    test_shared_publication_fault(listener, path, true, false);
+    test_shared_publication_fault(listener, path, false, true);
+    test_shared_publication_fault(listener, path, true, true);
     static_cast<void>(::close(listener));
     expect(::unlink(path.c_str()) == 0 && ::rmdir(directory) == 0, "remove private socket");
     return EXIT_SUCCESS;
