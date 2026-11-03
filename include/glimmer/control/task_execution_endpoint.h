@@ -24,7 +24,12 @@ using TaskResourceRollback = void (*)(void* context, core::TaskId task_id) noexc
 // owner-checked when process binding is enabled. QUERY/STATS/METRICS are not owner-filtered; the
 // transport must restrict who can reach them. Before destruction the owner must stop admission and
 // all callers, stop and join backend work, retire every lease, and release registered external
-// resources. Endpoint destruction does not prove GPU completion or fence a CUDA context.
+// resources. If poisoned accounting cannot be retired individually, the owner
+// may destroy the entire non-reusable endpoint only after joining all callers
+// and backend work, proving physical stop, and independently retiring every
+// external resource. A timeout or missing reply does not establish those
+// conditions. Endpoint destruction does not prove GPU completion or fence a
+// CUDA context.
 class TaskExecutionEndpoint final {
    public:
     explicit TaskExecutionEndpoint(std::unique_ptr<TaskExecutionAdmissionService> service,
@@ -37,6 +42,9 @@ class TaskExecutionEndpoint final {
     TaskExecutionEndpoint(TaskExecutionEndpoint&&) = delete;
     TaskExecutionEndpoint& operator=(TaskExecutionEndpoint&&) = delete;
 
+    // A missing reply does not prove rejection or retirement; ownership can
+    // remain uncertain. An accepted task's registered resource remains its
+    // owner's responsibility even when a later grant reply cannot be delivered.
     [[nodiscard]] std::optional<std::string> handle(
         std::string_view line, std::optional<TaskPeerIdentity> peer = std::nullopt) noexcept;
 

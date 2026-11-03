@@ -3,6 +3,7 @@
 #include "glimmer/control/task_execution_endpoint.h"
 #include "glimmer/control/task_execution_protocol.h"
 #include "internal/task_execution_endpoint_test_hooks.h"
+#include "../../src/core/dispatch_test_hooks.h"
 
 #include <array>
 #include <atomic>
@@ -217,8 +218,10 @@ void test_unpublished_rollback() {
     expect(
         !service->handle(
             "GLIMMER_TASK_EXEC_V1 EXEC_CLAIM " + std::to_string(pending.task_id) + "\n", kOwner) &&
-            used(*service) == 0 && resources.rolled_back.load() == 5,
-        "unpublished claim retires previously accepted task");
+            used(*service) == 0 && resources.rolled_back.load() == 4 &&
+            legacy(*service, "GLIMMER_TASK_V1 QUERY " + std::to_string(pending.task_id) + "\n")
+                    .state == TaskProtocolState::kFailed,
+        "unpublished grant retires accepted work without rolling back its published resource");
     const auto old = exec(*service, "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n");
     expect(old.kind == TaskExecutionProtocolResponseKind::kExecutionLease, "handoff fixture runs");
     const TaskExecutionIdentity execution{old.task_id, old.generation};
@@ -227,10 +230,124 @@ void test_unpublished_rollback() {
     const auto request = handoff.substr(0, handoff.size() - 1) + " tenant 20 1 1\n";
     expect(
         !service->handle(request, kOwner) && used(*service) == 0 &&
-            resources.rolled_back.load() == 6 &&
+            resources.rolled_back.load() == 5 &&
             legacy(*service, "GLIMMER_TASK_V1 QUERY " + std::to_string(old.task_id) + "\n").state ==
                 TaskProtocolState::kCompleted,
         "handoff failure keeps old completion and rolls back only new work");
+}
+
+void test_dispatch_failures_preserve_ownership() {
+    namespace faults = glimmer::core::internal;
+    for (const bool uncertain : {false, true}) {
+        for (const auto* operation_name : {"acquire", "claim", "handoff"}) {
+            Resources resources;
+            auto service = endpoint(resources);
+            std::string request = "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n";
+            if (std::string_view(operation_name) == "claim") {
+                const auto pending = exec(*service, "GLIMMER_TASK_EXEC_V1 SUBMIT tenant 20 1 1\n");
+                request =
+                    "GLIMMER_TASK_EXEC_V1 EXEC_CLAIM " + std::to_string(pending.task_id) + "\n";
+            } else if (std::string_view(operation_name) == "handoff") {
+                const auto old =
+                    exec(*service, "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n");
+                const auto handoff =
+                    operation("EXEC_COMPLETE_ACQUIRE", {old.task_id, old.generation});
+                request = handoff.substr(0, handoff.size() - 1) + " tenant 20 1 1\n";
+            }
+            faults::dispatch_test_faults =
+                faults::kDispatchFailSnapshot | (uncertain ? faults::kDispatchFailCancel : 0U);
+            const auto response = service->handle(request, kOwner);
+            faults::dispatch_test_faults = 0;
+            const auto status = service->lease_status();
+            expect(status.has_value(), "fault fixture status available");
+            if (uncertain) {
+                expect(!response && status->pending_cooperative == 1 && status->reaping == 1 &&
+                           resources.rolled_back.load() == 0,
+                       "uncertain dispatch cannot be published as pending or released");
+            } else {
+                const bool was_published = std::string_view(operation_name) == "claim";
+                expect(response && status->pending_cooperative == 0 && used(*service) == 0 &&
+                           resources.rolled_back.load() == (was_published ? 0U : 1U),
+                       "clean failure rolls back only an unpublished resource");
+                const auto decoded = parse_task_execution_protocol_response(*response);
+                expect(decoded.parsed(), "clean failure response parses");
+                const auto value = *decoded.response;
+                if (std::string_view(operation_name) == "acquire") {
+                    expect(value.kind == TaskExecutionProtocolResponseKind::kError,
+                           "clean acquire failure is not accepted");
+                } else if (std::string_view(operation_name) == "claim") {
+                    expect(value.kind == TaskExecutionProtocolResponseKind::kState &&
+                               value.state == TaskProtocolState::kFailed,
+                           "clean claim failure reports terminal state");
+                } else {
+                    expect(value.kind == TaskExecutionProtocolResponseKind::kExecutionHandoff &&
+                               value.task_id == 0,
+                           "handoff retains old completion without accepting failed work");
+                }
+            }
+        }
+    }
+    for (const bool uncertain : {false, true}) {
+        Resources resources;
+        auto service = endpoint(resources);
+        const auto grant = exec(*service, "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n");
+        const TaskExecutionIdentity execution{grant.task_id, grant.generation};
+        expect(exec(*service, operation("SUSPEND", execution)).state == TaskProtocolState::kQueued,
+               "continuation is stopped before reclaim");
+        faults::dispatch_test_faults =
+            faults::kDispatchFailSnapshot | (uncertain ? faults::kDispatchFailRelease : 0U);
+        const auto reply = service->handle(
+            "GLIMMER_TASK_EXEC_V1 EXEC_CLAIM " + std::to_string(grant.task_id) + "\n", kOwner);
+        faults::dispatch_test_faults = 0;
+        const auto status = service->lease_status();
+        expect(status && resources.rolled_back.load() == 0,
+               "published continuation resource never uses unpublished rollback");
+        if (uncertain) {
+            expect(!reply && status->pending_cooperative == 1 && status->reaping == 1,
+                   "uncertain continuation retains ownership");
+        } else {
+            const auto decoded = reply ? parse_task_execution_protocol_response(*reply)
+                                       : TaskExecutionProtocolResponseParseResult{};
+            expect(decoded.parsed() && decoded.response->state == TaskProtocolState::kFailed &&
+                       used(*service) == 0,
+                   "clean continuation failure reports terminal without releasing owner resource");
+        }
+    }
+}
+
+void test_published_native_claim_format_failure() {
+    for (const bool should_throw : {false, true}) {
+        Resources resources;
+        auto service = endpoint(resources);
+        const auto holder = exec(*service, "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n");
+        NativeEpochRequest request;
+        request.request_sequence = 1;
+        request.admission = {.tenant_id = "tenant", .memory_bytes = 20, .work_units = 4};
+        request.extent = kExtent;
+        const auto pending = epoch(*service, request);
+        expect(pending.kind == NativeEpochResponseKind::kPending,
+               "native resource is published as pending");
+        expect(
+            exec(*service, operation("EXEC_COMPLETE", {holder.task_id, holder.generation})).state ==
+                TaskProtocolState::kCompleted,
+            "release capacity for the published native claim");
+        request.operation = NativeEpochOperation::kClaim;
+        request.execution = pending.grant.execution;
+        request.request_sequence = 2;
+        const auto wire = format_native_epoch_request(request);
+        expect(wire.has_value(), "format native pending claim");
+        if (should_throw) {
+            testing::throw_next_endpoint_response_format();
+        } else {
+            testing::fail_next_endpoint_response_format();
+        }
+        expect(!service->handle(*wire, kOwner) && resources.rolled_back.load() == 0 &&
+                   legacy(*service, "GLIMMER_TASK_V1 QUERY " +
+                                        std::to_string(pending.grant.execution.task_id) + "\n")
+                           .state == TaskProtocolState::kFailed &&
+                   used(*service) == 0,
+               "unpublished native grant does not roll back an already published resource");
+    }
 }
 
 void test_existing_pending_not_rolled_back() {
@@ -425,6 +542,8 @@ int main() {
     test_routing_and_ownership();
     test_native_routing();
     test_unpublished_rollback();
+    test_dispatch_failures_preserve_ownership();
+    test_published_native_claim_format_failure();
     test_existing_pending_not_rolled_back();
     test_concurrent_claims();
     test_shutdown_and_status();

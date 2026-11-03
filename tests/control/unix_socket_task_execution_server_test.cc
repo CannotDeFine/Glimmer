@@ -8,6 +8,7 @@
 #include "internal/task_recovery_endpoint.h"
 #include "internal/task_recovery_client.h"
 #include "internal/task_recovery_transport_test_hooks.h"
+#include "../../src/core/dispatch_test_hooks.h"
 
 #include <atomic>
 #include <cerrno>
@@ -80,6 +81,7 @@ struct Resources {
     std::atomic<unsigned> registered{0};
     std::atomic<unsigned> rolled_back{0};
     std::atomic<bool> fail_next_format{false};
+    std::atomic<bool> fail_next_dispatch{false};
 };
 
 bool register_resource(void* context, glimmer::core::TaskId) noexcept {
@@ -87,6 +89,11 @@ bool register_resource(void* context, glimmer::core::TaskId) noexcept {
     resources->registered.fetch_add(1);
     if (resources->fail_next_format.exchange(false)) {
         testing::fail_next_endpoint_response_format();
+    }
+    if (resources->fail_next_dispatch.exchange(false)) {
+        glimmer::core::internal::dispatch_test_faults =
+            glimmer::core::internal::kDispatchFailSnapshot |
+            glimmer::core::internal::kDispatchFailCancel;
     }
     return true;
 }
@@ -120,6 +127,43 @@ void reject_raw(const std::string& path, std::string_view line) {
     char byte{};
     expect(::recv(fd, &byte, 1, 0) <= 0, "raw domain request receives no response");
     static_cast<void>(::close(fd));
+}
+
+void test_uncertain_dispatch_is_not_replayed() {
+    char directory[] = "/tmp/glimmer-exec-uncertain-XXXXXX";
+    expect(::mkdtemp(directory) != nullptr, "create private uncertain-dispatch directory");
+    const std::string path = std::string(directory) + "/server.sock";
+    Resources resources;
+    auto admission = std::make_unique<TaskExecutionAdmissionService>(
+        100, glimmer::core::SchedulerOptions{}, std::chrono::milliseconds::zero(), true);
+    TaskExecutionEndpoint endpoint(std::move(admission), register_resource, rollback_resource,
+                                   &resources);
+    UnixSocketTaskExecutionServer server(endpoint, {.socket_path = path, .io_timeout_ms = 1000});
+    expect(server.start(), "start uncertain-dispatch server");
+    std::atomic<bool> running{true};
+    std::thread acceptor([&] {
+        while (running.load()) {
+            expect(server.serve_one_for(20) != UnixSocketServeStatus::kError,
+                   "serve uncertain-dispatch client");
+        }
+    });
+    {
+        SharedTaskControlClient client(path);
+        resources.fail_next_dispatch.store(true);
+        expect(!client.request("GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n"),
+               "uncertain dispatch returns a lost response");
+        const auto status = endpoint.lease_status();
+        expect(status && status->pending_cooperative == 1 && status->reaping == 1 &&
+                   resources.registered.load() == 1 && resources.rolled_back.load() == 0,
+               "client does not replay or release uncertain ownership");
+    }
+    expect(endpoint.begin_shutdown(), "stop admission before teardown");
+    running.store(false);
+    acceptor.join();
+    server.stop();
+    // The test registrar owns no external resources and no backend work exists.
+    // The non-reusable, poisoned accounting is destroyed only after joining.
+    expect(::rmdir(directory) == 0, "remove private uncertain-dispatch directory");
 }
 
 void test_recovery_after_lost_replies() {
@@ -347,6 +391,7 @@ int main(int argc, char** argv) {
         SharedTaskControlClient foreign(argv[2]);
         return foreign.request(argv[3]).has_value() ? EXIT_FAILURE : EXIT_SUCCESS;
     }
+    test_uncertain_dispatch_is_not_replayed();
     char directory[] = "/tmp/glimmer-exec-server-XXXXXX";
     expect(::mkdtemp(directory) != nullptr, "create private socket directory");
     const std::string path = std::string(directory) + "/server.sock";

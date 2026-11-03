@@ -296,8 +296,10 @@ class UnpublishedTask final {
         kLegacyPending,
         kCooperativePending,
         kCooperativeActive,
+        kPublishedCooperativeActive,
         kNativePending,
-        kNativeActive
+        kNativeActive,
+        kPublishedNativeActive
     };
 
     UnpublishedTask(TaskExecutionAdmissionService& service, TaskResourceRollback rollback,
@@ -319,16 +321,19 @@ class UnpublishedTask final {
                     retired = service_.cancel_pending_cooperative(execution_.task_id, peer_);
                     break;
                 case Kind::kCooperativeActive:
+                case Kind::kPublishedCooperativeActive:
                     retired = service_.fail_execution(execution_, peer_);
                     break;
                 case Kind::kNativePending:
                     retired = service_.cancel_pending_native_epoch(execution_.task_id, peer_);
                     break;
                 case Kind::kNativeActive:
+                case Kind::kPublishedNativeActive:
                     retired = service_.finish_native_epoch(execution_, 0, true, peer_);
                     break;
             }
-            if (retired) {
+            if (retired && kind_ != Kind::kPublishedCooperativeActive &&
+                kind_ != Kind::kPublishedNativeActive) {
                 rollback_(context_, execution_.task_id);
             }
         } catch (...) {
@@ -528,18 +533,32 @@ std::optional<std::string> TaskExecutionEndpoint::Impl::handle(std::string_view 
                     return format_response(error_response(admission_error(result.status)));
                 }
                 unpublished.arm(UnpublishedTask::Kind::kCooperativePending, {result.task_id, 0});
-                const auto snapshot = admission_service_->claim_execution(result.task_id, peer);
-                if (!snapshot) {
-                    // Preserve accepted ownership; denial is not cancellation authority.
+                const auto dispatch =
+                    admission_service_->claim_execution_detailed(result.task_id, peer);
+                if (dispatch.status == core::TaskDispatchStatus::kResourceUncertain) {
+                    unpublished.publish();
+                    return std::nullopt;
+                }
+                if (dispatch.status == core::TaskDispatchStatus::kTerminalClean) {
+                    unpublished.publish();
+                    rollback_(registrar_context_, result.task_id);
+                    return format_response(error_response(TaskProtocolErrorCode::kInternalError));
+                }
+                if (dispatch.status == core::TaskDispatchStatus::kQueued) {
                     auto encoded = format_response(accepted_response(result.task_id));
                     if (encoded) unpublished.publish();
                     return encoded;
                 }
+                if (!dispatch.task) {
+                    unpublished.publish();
+                    return std::nullopt;
+                }
+                const auto& snapshot = *dispatch.task;
                 unpublished.arm(UnpublishedTask::Kind::kCooperativeActive,
-                                {result.task_id, snapshot->dispatch_sequence});
-                auto response = lease_response(*snapshot);
+                                {result.task_id, snapshot.dispatch_sequence});
+                auto response = lease_response(snapshot);
                 response.kind = TaskExecutionProtocolResponseKind::kExecutionLease;
-                response.generation = snapshot->dispatch_sequence;
+                response.generation = snapshot.dispatch_sequence;
                 auto encoded = format_response(response);
                 if (encoded) unpublished.publish();
                 return encoded;
@@ -563,11 +582,24 @@ std::optional<std::string> TaskExecutionEndpoint::Impl::handle(std::string_view 
                     response.task_id = result.task_id;
                     unpublished.arm(UnpublishedTask::Kind::kCooperativePending,
                                     {result.task_id, 0});
-                    const auto snapshot = admission_service_->claim_execution(result.task_id, peer);
-                    if (snapshot) {
-                        response.generation = snapshot->dispatch_sequence;
+                    const auto dispatch =
+                        admission_service_->claim_execution_detailed(result.task_id, peer);
+                    if (dispatch.status == core::TaskDispatchStatus::kResourceUncertain) {
+                        unpublished.publish();
+                        return std::nullopt;
+                    }
+                    if (dispatch.status == core::TaskDispatchStatus::kTerminalClean) {
+                        unpublished.publish();
+                        rollback_(registrar_context_, result.task_id);
+                        response.task_id = 0;
+                    } else if (dispatch.status == core::TaskDispatchStatus::kGranted &&
+                               dispatch.task) {
+                        response.generation = dispatch.task->dispatch_sequence;
                         unpublished.arm(UnpublishedTask::Kind::kCooperativeActive,
-                                        {result.task_id, snapshot->dispatch_sequence});
+                                        {result.task_id, dispatch.task->dispatch_sequence});
+                    } else if (dispatch.status != core::TaskDispatchStatus::kQueued) {
+                        unpublished.publish();
+                        return std::nullopt;
                     }
                 }
                 auto encoded = format_response(response);
@@ -629,19 +661,31 @@ std::optional<std::string> TaskExecutionEndpoint::Impl::handle(std::string_view 
                 if (!admission_service_->find(request.task_id).has_value()) {
                     return format_response(error_response(TaskProtocolErrorCode::kUnknownTask));
                 }
-                const auto snapshot = admission_service_->claim_execution(request.task_id, peer);
-                if (!snapshot.has_value()) {
+                const auto dispatch =
+                    admission_service_->claim_execution_detailed(request.task_id, peer);
+                if (dispatch.status == core::TaskDispatchStatus::kResourceUncertain) {
+                    return std::nullopt;
+                }
+                if (dispatch.status == core::TaskDispatchStatus::kTerminalClean) {
+                    // The admission was already published. Its external resource
+                    // remains the owner's responsibility, not unpublished rollback.
+                    return format_response(
+                        state_response(request.task_id, core::TaskState::kFailed));
+                }
+                if (dispatch.status == core::TaskDispatchStatus::kQueued) {
                     TaskExecutionProtocolResponse response;
                     response.kind = TaskExecutionProtocolResponseKind::kEmpty;
                     return format_response(response);
                 }
+                if (!dispatch.task) return std::nullopt;
+                const auto& snapshot = *dispatch.task;
                 UnpublishedTask unpublished(*admission_service_, rollback_, registrar_context_,
                                             peer);
-                unpublished.arm(UnpublishedTask::Kind::kCooperativeActive,
-                                {snapshot->task_id, snapshot->dispatch_sequence});
-                auto response = lease_response(*snapshot);
+                unpublished.arm(UnpublishedTask::Kind::kPublishedCooperativeActive,
+                                {snapshot.task_id, snapshot.dispatch_sequence});
+                auto response = lease_response(snapshot);
                 response.kind = TaskExecutionProtocolResponseKind::kExecutionLease;
-                response.generation = snapshot->dispatch_sequence;
+                response.generation = snapshot.dispatch_sequence;
                 auto encoded = format_response(response);
                 if (encoded) unpublished.publish();
                 return encoded;
@@ -820,7 +864,10 @@ std::optional<std::string> TaskExecutionEndpoint::Impl::handle_native_epoch(
             if (granted) {
                 response.kind = NativeEpochResponseKind::kGranted;
                 response.grant = *granted;
-                unpublished.arm(UnpublishedTask::Kind::kNativeActive, granted->execution);
+                unpublished.arm(request->operation == NativeEpochOperation::kAcquire
+                                    ? UnpublishedTask::Kind::kNativeActive
+                                    : UnpublishedTask::Kind::kPublishedNativeActive,
+                                granted->execution);
                 break;
             }
             const auto pending = admission_service_->pending_native_epoch_extent(task_id, peer);
