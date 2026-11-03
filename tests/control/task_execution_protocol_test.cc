@@ -55,8 +55,18 @@ void test_execution_requests() {
            "execution acquire preserves admission");
     const auto parsed_acquire = parse_task_execution_protocol_request(acquire_wire.value_or(""));
     expect(parsed_acquire.parsed() && parsed_acquire.request.has_value() &&
-               parsed_acquire.request->admission.priority == 9,
+               parsed_acquire.request->admission.priority == 9 &&
+               parsed_acquire.request->admission.work_units == 3,
            "execution acquire round trips");
+    acquire.admission.work_units = 0;
+    expect(
+        !format_task_execution_protocol_request(acquire) &&
+            !parse_task_execution_protocol_request("GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 1 1 0")
+                 .parsed() &&
+            !parse_task_execution_protocol_request("GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 1 1")
+                 .parsed(),
+        "invalid combined acquisition cannot enter admission");
+    acquire.admission.work_units = 3;
     acquire.operation = TaskExecutionProtocolOperation::kExecutionCompleteAcquire;
     acquire.task_id = 42;
     acquire.generation = 7;
@@ -65,8 +75,14 @@ void test_execution_requests() {
            "handoff preserves both identities and admission");
     const auto parsed_handoff = parse_task_execution_protocol_request(handoff.value_or(""));
     expect(parsed_handoff.parsed() && parsed_handoff.request.has_value() &&
-               parsed_handoff.request->task_id == 42 && parsed_handoff.request->generation == 7,
-           "handoff identity round trips");
+               parsed_handoff.request->task_id == 42 && parsed_handoff.request->generation == 7 &&
+               parsed_handoff.request->admission.tenant_id == "tenant" &&
+               parsed_handoff.request->admission.memory_bytes == 1 &&
+               parsed_handoff.request->admission.weight == 2 &&
+               parsed_handoff.request->admission.work_units == 3 &&
+               parsed_handoff.request->admission.priority == 9 &&
+               format_task_execution_protocol_request(*parsed_handoff.request) == handoff,
+           "handoff identity and full admission round trip");
     acquire.operation = TaskExecutionProtocolOperation::kExecutionAcquire;
     expect(!format_task_execution_protocol_request(acquire),
            "acquire cannot silently drop a task identity or generation");
@@ -78,8 +94,11 @@ void test_execution_requests() {
          {"GLIMMER_TASK_V1 EXEC_CLAIM 42", "GLIMMER_TASK_EXEC_V1 EXEC_CLAIM",
           "GLIMMER_TASK_EXEC_V1 EXEC_CLAIM 42 7", "GLIMMER_TASK_EXEC_V1 RETREAT 42 0",
           "GLIMMER_TASK_EXEC_V1 RETREAT 42 7 extra",
+          "GLIMMER_TASK_EXEC_V1 EXEC_COMPLETE_ACQUIRE 0 7 tenant 1 2 3",
           "GLIMMER_TASK_EXEC_V1 EXEC_COMPLETE_ACQUIRE 42 0 tenant 1 2 3",
           "GLIMMER_TASK_EXEC_V1 EXEC_COMPLETE_ACQUIRE 42 7 tenant 1 2 0",
+          "GLIMMER_TASK_EXEC_V1 EXEC_COMPLETE_ACQUIRE 42 7 tenant 1 2",
+          "GLIMMER_TASK_EXEC_V1 EXEC_COMPLETE_ACQUIRE 42 7 tenant 1 2 3 9 extra",
           "GLIMMER_TASK_EXEC_V1 EXEC_COMPLETE_ACQUIRE 42 18446744073709551616 tenant 1 2 3",
           "GLIMMER_TASK_EXEC_V1 UNKNOWN 42"}) {
         expect(!parse_task_execution_protocol_request(text).parsed(), "invalid request rejected");
@@ -121,19 +140,33 @@ void test_execution_responses() {
                "execution response round trips exactly");
         expect(!parse_task_protocol_response(text).parsed(), "legacy codec rejects new response");
     }
-    for (const auto* text : {"GLIMMER_TASK_V1 EMPTY", "GLIMMER_TASK_EXEC_V1 EXEC_HANDOFF 0 7 43 8",
-                             "GLIMMER_TASK_EXEC_V1 EXEC_HANDOFF 42 0 43 8",
-                             "GLIMMER_TASK_EXEC_V1 EXEC_HANDOFF 42 7 42 8",
-                             "GLIMMER_TASK_EXEC_V1 EXEC_HANDOFF 42 7 0 8",
-                             "GLIMMER_TASK_EXEC_V1 EXEC_LEASE 42 tenant 1 2 3 0",
-                             "GLIMMER_TASK_EXEC_V1 RETREAT 42 7 2",
-                             "GLIMMER_TASK_EXEC_V1 METRICS 0 0 0 0 0 0 1 0 0 1 0",
-                             "GLIMMER_TASK_EXEC_V1 STATS 0 0 0 0 0 0 1 0 0 1 0 0 0 0 0"}) {
+    for (const auto* text :
+         {"GLIMMER_TASK_V1 EMPTY", "GLIMMER_TASK_EXEC_V1 EXEC_HANDOFF 0 7 43 8",
+          "GLIMMER_TASK_EXEC_V1 EXEC_HANDOFF 42 0 43 8",
+          "GLIMMER_TASK_EXEC_V1 EXEC_HANDOFF 42 7 42 8",
+          "GLIMMER_TASK_EXEC_V1 EXEC_HANDOFF 42 7 0 8", "GLIMMER_TASK_EXEC_V1 EXEC_HANDOFF 42 7 43",
+          "GLIMMER_TASK_EXEC_V1 EXEC_HANDOFF 42 7 43 8 extra",
+          "GLIMMER_TASK_EXEC_V1 EXEC_HANDOFF 42 7 43 18446744073709551616",
+          "GLIMMER_TASK_EXEC_V1 EXEC_LEASE 42 tenant 1 2 3 0",
+          "GLIMMER_TASK_EXEC_V1 RETREAT 42 7 2",
+          "GLIMMER_TASK_EXEC_V1 METRICS 0 0 0 0 0 0 1 0 0 1 0",
+          "GLIMMER_TASK_EXEC_V1 STATS 0 0 0 0 0 0 1 0 0 1 0 0 0 0 0"}) {
         expect(!parse_task_execution_protocol_response(text).parsed(), "invalid response rejected");
     }
     TaskExecutionProtocolResponse invalid;
     invalid.kind = static_cast<TaskExecutionProtocolResponseKind>(255);
     expect(!format_task_execution_protocol_response(invalid), "unknown kind cannot format");
+    invalid = {};
+    invalid.kind = TaskExecutionProtocolResponseKind::kExecutionHandoff;
+    expect(!format_task_execution_protocol_response(invalid),
+           "handoff cannot omit its completed identity");
+    invalid.completed_execution = {42, 7};
+    invalid.generation = 8;
+    expect(!format_task_execution_protocol_response(invalid),
+           "handoff generation cannot exist without a new task");
+    invalid.task_id = 42;
+    expect(!format_task_execution_protocol_response(invalid),
+           "handoff cannot reuse its completed task identity");
     invalid = {.kind = TaskExecutionProtocolResponseKind::kLease,
                .task_id = 42,
                .tenant_id = "tenant",

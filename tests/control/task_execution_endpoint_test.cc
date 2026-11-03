@@ -128,9 +128,16 @@ void test_handoff_preserves_completion_on_registration_failure() {
     const TaskExecutionIdentity execution{running.task_id, running.generation};
     const auto prefix = operation("EXEC_COMPLETE_ACQUIRE", execution);
     const auto request = prefix.substr(0, prefix.size() - 1) + " tenant 20 1 1\n";
+    const auto missing_owner = service->handle(request);
+    const auto parsed_missing = parse_task_execution_protocol_response(missing_owner.value_or(""));
     expect(exec(*service, request, kForeign).kind == TaskExecutionProtocolResponseKind::kError &&
+               parsed_missing.parsed() &&
+               parsed_missing.response.value_or(TaskExecutionProtocolResponse{}).kind ==
+                   TaskExecutionProtocolResponseKind::kError &&
+               exec(*service, prefix.substr(0, prefix.size() - 1) + " tenant 20 1 0\n").kind ==
+                   TaskExecutionProtocolResponseKind::kError &&
                resources.registered.load() == 1 && used(*service) == 20,
-           "foreign handoff cannot retire or admit work");
+           "foreign, missing-owner and malformed handoffs cannot retire or admit work");
     resources.reject_registration.store(true);
     const auto rejected = exec(*service, request);
     expect(rejected.kind == TaskExecutionProtocolResponseKind::kExecutionHandoff &&
@@ -139,9 +146,58 @@ void test_handoff_preserves_completion_on_registration_failure() {
                rejected.task_id == 0 && rejected.generation == 0 &&
                resources.registered.load() == 2 && used(*service) == 0,
            "failed successor registration retains the completed generation acknowledgement");
+    const auto failed_stats = legacy(*service, "GLIMMER_TASK_V1 STATS\n").stats;
+    expect(failed_stats.total_task_count == 2 && failed_stats.completed_task_count == 1 &&
+               failed_stats.cancelled_task_count == 1 && failed_stats.running_task_count == 0 &&
+               failed_stats.queued_task_count == 0,
+           "failed successor has one completed predecessor and one cancelled admission");
     expect(exec(*service, request).kind == TaskExecutionProtocolResponseKind::kError &&
-               resources.registered.load() == 2,
+               resources.registered.load() == 2 &&
+               legacy(*service, "GLIMMER_TASK_V1 STATS\n").stats.total_task_count == 2,
            "replayed handoff cannot register a successor");
+    auto unbound = endpoint(resources, false);
+    expect(exec(*unbound, request).kind == TaskExecutionProtocolResponseKind::kError &&
+               resources.registered.load() == 2 && used(*unbound) == 0,
+           "an unbound endpoint cannot perform cooperative handoff");
+}
+
+void test_queued_combined_acquire() {
+    Resources resources;
+    auto service = endpoint(resources);
+    const auto no_owner = service->handle("GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n");
+    const auto parsed = parse_task_execution_protocol_response(no_owner.value_or(""));
+    auto unbound = endpoint(resources, false);
+    expect(parsed.parsed() &&
+               parsed.response.value_or(TaskExecutionProtocolResponse{}).kind ==
+                   TaskExecutionProtocolResponseKind::kError &&
+               exec(*unbound, "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n").kind ==
+                   TaskExecutionProtocolResponseKind::kError &&
+               resources.registered.load() == 0,
+           "missing owner or process binding rejects before registration");
+    const auto first = exec(*service, "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 2\n");
+    const auto queued = exec(*service, "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n");
+    expect(first.kind == TaskExecutionProtocolResponseKind::kExecutionLease &&
+               first.work_units == 2 &&
+               queued.kind == TaskExecutionProtocolResponseKind::kAccepted &&
+               queued.task_id != first.task_id && used(*service) == 40,
+           "combined acquire retains its queued identity when capacity is full");
+    expect(exec(*service, operation("EXEC_COMPLETE", {first.task_id, first.generation})).state ==
+               TaskProtocolState::kCompleted,
+           "first generation is completed by its owner");
+    const auto later =
+        exec(*service, "GLIMMER_TASK_EXEC_V1 EXEC_CLAIM " + std::to_string(queued.task_id) + "\n");
+    expect(later.kind == TaskExecutionProtocolResponseKind::kExecutionLease &&
+               later.task_id == queued.task_id && later.generation != 0 &&
+               exec(*service, operation("EXEC_FAIL", {later.task_id, later.generation})).state ==
+                   TaskProtocolState::kFailed &&
+               used(*service) == 0,
+           "queued combined acquire later grants and retires the same identity");
+    resources.reject_registration.store(true);
+    const auto rejected = exec(*service, "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n");
+    const auto status = service->lease_status();
+    expect(rejected.kind == TaskExecutionProtocolResponseKind::kError && status &&
+               status->queued_tasks == 0 && status->running_tasks == 0 && used(*service) == 0,
+           "standalone rejected registration leaves no queued or running work");
 }
 
 void test_routing_and_ownership() {
@@ -627,6 +683,7 @@ void test_reservation_shutdown_race() {
 }  // namespace
 
 int main() {
+    test_queued_combined_acquire();
     test_reservation_shutdown_race();
     test_legacy_golden();
     test_handoff_preserves_completion_on_registration_failure();
