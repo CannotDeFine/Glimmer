@@ -264,7 +264,7 @@ int run_worker(const Options& options) {
         return EXIT_FAILURE;
     }
     ContextGuard context;
-    if (!check_cuda(cuCtxCreate(&context.handle, nullptr, 0, device), "cuCtxCreate")) {
+    if (!check_cuda(cuCtxCreate(&context.handle, 0, device), "cuCtxCreate")) {
         return EXIT_FAILURE;
     }
     ModuleGuard module;

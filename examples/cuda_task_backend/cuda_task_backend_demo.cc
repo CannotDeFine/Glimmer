@@ -139,7 +139,7 @@ bool run_demo(const Options& options) {
     }
 
     ContextGuard context;
-    if (!check(cuCtxCreate(&context.handle, nullptr, 0, device), "cuCtxCreate")) {
+    if (!check(cuCtxCreate(&context.handle, 0, device), "cuCtxCreate")) {
         return false;
     }
 
