@@ -21,6 +21,7 @@ add_library(glimmer_control
     task_execution_admission.cc
     task_execution_endpoint.cc
     shared_task_control_client.cc
+    unix_socket_task_execution_server.cc
     internal/execution_admission_state.cc
     internal/execution_cooperative_admission.cc
     internal/execution_native_epoch_admission.cc
