@@ -10,6 +10,9 @@
 namespace glimmer::control::internal {
 
 // Private opt-in path. It never replaces the frozen V1 LaunchGate layout.
+// The authenticated service must not expire or reclaim a running lease
+// without independent proof that its physical work stopped. This protocol
+// cannot negotiate or verify that service configuration; the owner must.
 // All returned tasks remain owned until an exact terminal reply is observed.
 // Before normal destruction all operations must be joined and every task must
 // have an exact terminal acknowledgement. After quarantine, stop and join
