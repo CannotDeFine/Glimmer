@@ -1,6 +1,7 @@
 #include "glimmer/control/unix_socket_server.h"
 
 #include "internal/socket_line_reader.h"
+#include "internal/socket_path.h"
 
 #include <charconv>
 #include <cerrno>
@@ -42,20 +43,6 @@ enum class PollResult : std::uint8_t { kReady, kTimedOut, kError };
             return PollResult::kError;
         }
     }
-}
-
-[[nodiscard]] bool stat_socket_path(const std::string& path, std::uint64_t* device,
-                                    std::uint64_t* inode) noexcept {
-    if (device == nullptr || inode == nullptr) {
-        return false;
-    }
-    struct stat path_stat {};
-    if (::lstat(path.c_str(), &path_stat) != 0) {
-        return false;
-    }
-    *device = static_cast<std::uint64_t>(path_stat.st_dev);
-    *inode = static_cast<std::uint64_t>(path_stat.st_ino);
-    return true;
 }
 
 [[nodiscard]] bool read_process_start_time(std::uint32_t pid,
@@ -110,16 +97,6 @@ enum class PollResult : std::uint8_t { kReady, kTimedOut, kError };
     return false;
 }
 
-void unlink_socket_path_if_owned(int socket_fd, const std::string& path) noexcept {
-    struct stat socket_stat {};
-    struct stat path_stat {};
-    if (::fstat(socket_fd, &socket_stat) != 0 || ::lstat(path.c_str(), &path_stat) != 0 ||
-        socket_stat.st_dev != path_stat.st_dev || socket_stat.st_ino != path_stat.st_ino) {
-        return;
-    }
-    static_cast<void>(::unlink(path.c_str()));
-}
-
 }  // namespace
 
 UnixSocketControlServer::UnixSocketControlServer(TaskControlEndpoint& endpoint,
@@ -156,15 +133,15 @@ bool UnixSocketControlServer::start() noexcept {
     if (::bind(socket_fd, reinterpret_cast<const sockaddr*>(&address), address_length) != 0 ||
         ::listen(socket_fd, 16) != 0) {
         const int failure_errno = errno;
-        unlink_socket_path_if_owned(socket_fd, config_.socket_path);
+        internal::unlink_socket_path_if_owned(socket_fd, config_.socket_path);
         static_cast<void>(::close(socket_fd));
         errno = failure_errno;
         return false;
     }
 
-    if (!stat_socket_path(config_.socket_path, &socket_device_, &socket_inode_)) {
+    if (!internal::stat_socket_path(config_.socket_path, &socket_device_, &socket_inode_)) {
         const int failure_errno = errno;
-        unlink_socket_path_if_owned(socket_fd, config_.socket_path);
+        internal::unlink_socket_path_if_owned(socket_fd, config_.socket_path);
         static_cast<void>(::close(socket_fd));
         socket_device_ = 0;
         socket_inode_ = 0;
@@ -253,7 +230,7 @@ void UnixSocketControlServer::stop() noexcept {
     if (socket_device_ != 0 || socket_inode_ != 0) {
         std::uint64_t current_device = 0;
         std::uint64_t current_inode = 0;
-        if (stat_socket_path(config_.socket_path, &current_device, &current_inode) &&
+        if (internal::stat_socket_path(config_.socket_path, &current_device, &current_inode) &&
             current_device == socket_device_ && current_inode == socket_inode_) {
             static_cast<void>(::unlink(config_.socket_path.c_str()));
         }
