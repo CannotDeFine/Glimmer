@@ -163,7 +163,9 @@ struct CooperativeLaunchGate::Implementation {
         const auto response = client->request(*encoded);
         const auto parsed = response ? parse_native_epoch_response(*response) : std::nullopt;
         if (!parsed || parsed->request_sequence != correlated.request_sequence ||
-            parsed->operation != correlated.operation ||
+            ((parsed->kind == NativeEpochResponseKind::kAcknowledged ||
+              parsed->kind == NativeEpochResponseKind::kRetreat) &&
+             parsed->operation != correlated.operation) ||
             !valid_epoch_reply(correlated, expected, *parsed)) {
             remote_uncertain.store(true);
             return std::nullopt;

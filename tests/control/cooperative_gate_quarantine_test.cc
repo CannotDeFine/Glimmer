@@ -148,9 +148,15 @@ void native_bad_reply_quarantines_concurrent_submit(bool error_reply) {
     {
         CooperativeLaunchGate gate({.control_socket = path}, extent);
         const auto first = gate.acquire_native_epoch({.extent = extent});
+        const auto waiting = gate.acquire_native_epoch({.extent = extent});
         expect(first.status == NativeEpochClaimStatus::kGranted &&
+                   waiting.status == NativeEpochClaimStatus::kPending &&
                    gate.finish_native_epoch(first.grant, 0, false),
-               "native grant and completion round trip");
+               "native grant and pending admission round trip");
+        const auto next = gate.claim_native_epoch(waiting.grant);
+        expect(next.status == NativeEpochClaimStatus::kGranted &&
+                   gate.finish_native_epoch(next.grant, 0, false),
+               "pending native admission can claim and complete");
         resources.blocked.store(true);
         resources.entered.store(false);
         resources.mismatch_epoch.store(!error_reply);
@@ -163,7 +169,7 @@ void native_bad_reply_quarantines_concurrent_submit(bool error_reply) {
         expect(native.get().status == NativeEpochClaimStatus::kUncertain && !concurrent.get() &&
                    gate.remote_outcome_uncertain(),
                "mismatched native reply quarantines a concurrent ordinary request");
-        expect(resources.registered.load() == 2 && resources.rolled_back.load() == 0,
+        expect(resources.registered.load() == 3 && resources.rolled_back.load() == 0,
                "mismatch preserves the sole accepted resource");
         const auto status = endpoint.lease_status();
         expect(status && status->active_native == 1, "native ownership remains active");
