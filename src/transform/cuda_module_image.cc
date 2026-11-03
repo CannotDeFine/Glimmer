@@ -658,20 +658,23 @@ std::optional<std::size_t> cuda_module_image_extent(std::span<const std::byte> t
         return data && range(16, data, limits.image_bytes) ? std::optional<std::size_t>{16 + data}
                                                            : std::nullopt;
     }
-    const auto header = *elf_header(tables, limits);
+    const auto header = elf_header(tables, limits);
+    if (!header) return std::nullopt;
     std::size_t extent = *table_bytes;
-    for (std::size_t index = 0; index < header.e_shnum; ++index) {
+    for (std::size_t index = 0; index < header->e_shnum; ++index) {
         const auto section =
-            *record<Elf64_Shdr>(tables, header.e_shoff + index * sizeof(Elf64_Shdr));
-        if (section.sh_type == SHT_NOBITS) continue;
-        if (!range(section.sh_offset, section.sh_size, limits.image_bytes)) return std::nullopt;
-        extent = std::max<std::size_t>(extent, section.sh_offset + section.sh_size);
+            record<Elf64_Shdr>(tables, header->e_shoff + index * sizeof(Elf64_Shdr));
+        if (!section) return std::nullopt;
+        if (section->sh_type == SHT_NOBITS) continue;
+        if (!range(section->sh_offset, section->sh_size, limits.image_bytes)) return std::nullopt;
+        extent = std::max<std::size_t>(extent, section->sh_offset + section->sh_size);
     }
-    for (std::size_t index = 0; index < header.e_phnum; ++index) {
+    for (std::size_t index = 0; index < header->e_phnum; ++index) {
         const auto program =
-            *record<Elf64_Phdr>(tables, header.e_phoff + index * sizeof(Elf64_Phdr));
-        if (!range(program.p_offset, program.p_filesz, limits.image_bytes)) return std::nullopt;
-        extent = std::max<std::size_t>(extent, program.p_offset + program.p_filesz);
+            record<Elf64_Phdr>(tables, header->e_phoff + index * sizeof(Elf64_Phdr));
+        if (!program || !range(program->p_offset, program->p_filesz, limits.image_bytes))
+            return std::nullopt;
+        extent = std::max<std::size_t>(extent, program->p_offset + program->p_filesz);
     }
     return extent;
 }

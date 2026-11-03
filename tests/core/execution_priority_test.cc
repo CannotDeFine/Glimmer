@@ -405,7 +405,9 @@ void priority_space_share_keeps_native_work_and_exact_authority() {
                    "one uncertain member quarantines every original issue");
         peer.has_unknown_state = false;
     }
-    peers[0].command->control_epoch = 0;
+    auto& command = peers[0].command;
+    if (!command) throw std::runtime_error("missing command fixture");
+    command->control_epoch = 0;
     expect(!plan_execution_priority(peers, mode).is_valid,
            "space sharing cannot bypass exact ordinary command validation");
     peers[0].command.reset();
@@ -612,7 +614,9 @@ void arrival_checkpoint_is_stop_only() {
     expect(plan.is_valid && plan.decisions[3].action == ExecutionPriorityAction::kExecuteProgress &&
                plan.decisions[3].progress == peers[3].progress && !plan.decisions[3].command,
            "closing ordinary admission preserves exact existing native dependency progress");
-    peers[0].physical->generation = 0;
+    auto& physical = peers[0].physical;
+    if (!physical) throw std::runtime_error("missing physical fixture");
+    physical->generation = 0;
     expect(!plan_execution_priority(peers).is_valid,
            "ordinary physical observations need positive generations");
 }

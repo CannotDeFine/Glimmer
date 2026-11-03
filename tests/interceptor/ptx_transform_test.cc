@@ -148,6 +148,7 @@ bool test_transform_limits() {
         ".version 7.0 .target sm_70 .address_size 64 .entry kernel ( ) { ret ; }";
     constexpr auto kind = PtxExecutionKind::kPreemptive;
     const auto baseline = transform_persistent_ptx(source, kind);
+    if (!baseline) return expect(false, "bounded-policy fixture must transform");
     if (!expect(baseline && baseline->kernels.size() == 1,
                 "bounded-policy fixture has one independently specified zero-arity entry"))
         return false;
@@ -208,6 +209,7 @@ bool test_transform_limits() {
 
 bool test_transform() {
     const auto transformed = transform_persistent_ptx(kPersistentTestPtx);
+    if (!transformed) return expect(false, "ordinary PTX must transform");
     if (!expect(transformed.has_value(), "ordinary one-dimensional PTX must be transformed")) {
         return false;
     }
@@ -268,6 +270,7 @@ bool test_transparent_selection() {
     using glimmer::interceptor::PtxExecutionKind;
     using glimmer::interceptor::transform_transparent_ptx;
     const auto mixed = transform_transparent_ptx(kPersistentTestPtx);
+    if (!mixed) return expect(false, "transparent selection must transform");
     if (!expect(mixed.has_value() && mixed->kernels.size() == 2,
                 "transparent selection must include independent and safe barrier entries")) {
         return false;

@@ -32,7 +32,8 @@ struct PtxTransformLimits {
            limits.token_count && limits.token_count <= kMaxPtxTransformTokens;
 }
 
-enum class PtxExecutionKind {
+// Keep the existing underlying type for callers compiled against this interface.
+enum class PtxExecutionKind {  // NOLINT(performance-enum-size)
     kStatic,
     kBlockStatic,
     kDynamic,

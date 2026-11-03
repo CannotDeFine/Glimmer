@@ -56,14 +56,16 @@ jobs:
         run: ctest --preset asan-ubsan --output-on-failure --no-tests=error -LE '^no-instrumented-code$'
 
   static-analysis:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Initialize spdlog
         run: git submodule update --init --recursive -- 3rdparty/spdlog
       - name: Install clang-tidy
-        run: sudo apt-get update && sudo apt-get install --yes clang-tidy
+        run: sudo apt-get update && sudo apt-get install --yes clang-tidy-18
       - name: Configure
-        run: cmake --preset lint -DGLIMMER_WARNINGS_AS_ERRORS=ON
+        run: >-
+          cmake --preset lint -DGLIMMER_WARNINGS_AS_ERRORS=ON
+          -DGLIMMER_CLANG_TIDY=/usr/bin/clang-tidy-18
       - name: Run clang-tidy
         run: cmake --build --preset lint

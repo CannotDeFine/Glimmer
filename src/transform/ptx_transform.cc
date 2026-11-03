@@ -137,12 +137,14 @@ bool skip_location(const std::vector<Token>& tokens, std::size_t& index, std::si
     ++index;
     if (!coordinates()) return false;
     if (index < end && tokens[index].text == ",") {
-        if (index + 2 >= end || tokens[++index].text != "function_name" ||
-            !is_identifier(tokens[++index].text))
+        if (index + 2 >= end || tokens[index + 1].text != "function_name" ||
+            !is_identifier(tokens[index + 2].text))
             return false;
-        ++index;
+        index += 3;
         if (index < end && tokens[index].text == "+") {
-            if (++index == end || !parse_unsigned(tokens[index++].text)) return false;
+            ++index;
+            if (index == end || !parse_unsigned(tokens[index].text)) return false;
+            ++index;
         }
         if (index + 1 >= end || tokens[index++].text != "," ||
             tokens[index++].text != "inlined_at" || !coordinates())
@@ -1698,7 +1700,7 @@ std::optional<PersistentPtx> transform_persistent_ptx(std::string_view ptx, PtxE
     }
     // The source inventory is now immutable. Resolve complete call graphs
     // before appending any generated entry; recursion and unknown callees reject.
-    enum class Visit { kNew, kVisiting, kRejected, kReady };
+    enum class Visit : std::uint8_t { kNew, kVisiting, kRejected, kReady };
     std::vector<Visit> visits(functions.size());
     std::vector<std::optional<PreparedFunction>> helpers(functions.size());
     bool depth_overflow{};

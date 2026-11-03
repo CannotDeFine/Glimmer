@@ -74,6 +74,7 @@ void independent_preparation_budgets() {
     limits.work_bytes = std::size_t{1024} * 1024;
     limits.compact_ptx_arities = true;
     const auto result = inspect_cuda_module(image, 70, limits);
+    if (!result) throw std::runtime_error("expected bounded compressed module metadata");
     const auto expected = std::string(prefix) + std::string(expanded - prefix.size(), ' ');
     expect(image.size() < expanded && result && result->ptx == expected &&
                result->kernels.size() == 1 && result->kernels[0].arguments.empty() &&
@@ -147,6 +148,7 @@ void padded_source_retention() {
                "tiny retained quota cannot authorize moved decoded capacity hidden after NUL");
         limits.retained_bytes = expanded * 3;
         const auto result = inspect_cuda_module(image, 70, limits);
+        if (!result || !result->ptx) throw std::runtime_error("expected retained PTX metadata");
         expect(result && result->is_ptx_selected && result->ptx == source &&
                    result->validation_ptx.size() == (compact ? 0 : 1) &&
                    result->ptx_arities.size() == (compact ? 1 : 0),
@@ -196,12 +198,14 @@ void compact_arity_facts() {
     image_store(fallback, 44, std::uint32_t{50});
     append_members(image, fallback);
     const auto legacy = inspect_cuda_module(image, 70);
+    if (!legacy) throw std::runtime_error("expected legacy module metadata");
     expect(legacy && legacy->validation_ptx.size() == 3 && legacy->ptx_arities.empty() &&
                legacy->ptx == selected,
            "default inspection preserves all legacy validation sources without compact facts");
     auto limits = CudaImageLimits{};
     limits.compact_ptx_arities = true;
     const auto compact = inspect_cuda_module(image, 70, limits);
+    if (!compact) throw std::runtime_error("expected compact module metadata");
     expect(compact && compact->validation_ptx.empty() && compact->ptx == selected &&
                compact->ptx_arities.size() == 7 &&
                compact->retained_bytes < legacy->retained_bytes && compact->kernels.size() == 1 &&
@@ -259,6 +263,7 @@ void symbol_metadata() {
     const std::array<CudaImageVariable, 2> variables{{{"state", 16}, {"bias", 4}}};
     const auto image = cuda_test_cubin(arguments, 0, variables);
     const auto metadata = inspect_cuda_module(image, 70);
+    if (!metadata) throw std::runtime_error("expected native module metadata");
     expect(metadata && metadata->has_complete_kernel_metadata &&
                metadata->variables == std::vector(variables.begin(), variables.end()) &&
                metadata->static_storage_bytes == 20,
@@ -303,6 +308,7 @@ void symbol_metadata() {
     merged.insert(merged.end(), duplicate.begin() + 16, duplicate.end());
     image_store(merged, 8, std::uint64_t{merged.size() - 16});
     const auto compatible = inspect_cuda_module(merged, 70);
+    if (!compatible) throw std::runtime_error("expected compatible module metadata");
     expect(compatible && compatible->variables == metadata->variables,
            "matching selected members deduplicate identical named objects");
     expect(compatible->static_storage_bytes == 40,
@@ -555,6 +561,7 @@ void compiler(const char* filename) {
     expect(static_cast<bool>(stream.read(reinterpret_cast<char*>(bytes.data()), count)),
            "read full compiler image");
     const auto result = inspect_cuda_module(bytes, 70);
+    if (!result) throw std::runtime_error("expected compiler module metadata");
     expect(result && result->kernels.size() == 3, "parse actual nvcc ELF and compressed fatbinary");
     const auto found =
         std::ranges::find(result->kernels, std::string{"binary_add"}, &CudaImageKernel::name);

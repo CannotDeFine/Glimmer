@@ -35,7 +35,7 @@ SocketLineStatus SocketLineReader::read_line(std::string& line, std::uint32_t ti
                 const std::size_t count =
                     std::min(newline == std::string_view::npos ? pending.size() : newline + 1,
                              kTaskProtocolMaxLineBytes + 1 - line.size());
-                line.append(pending.data(), count);
+                line.append(pending.substr(0, count));
                 begin_ += count;
                 if (line.size() > kTaskProtocolMaxLineBytes) {
                     return SocketLineStatus::kTooLong;

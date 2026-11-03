@@ -144,10 +144,12 @@ ExecutionPairPlan plan_execution_pair(std::span<const ExecutionPriorityPeer> pee
         const auto& selected = proposal.legs[leg];
         const auto found =
             std::ranges::find(peers, selected.session, &ExecutionPriorityPeer::session);
-        if (found == peers.end() || found->command != selected.command || !found->pair_context ||
-            !selected.catalog_generation ||
-            selected.catalog_generation != found->pair_context->catalog_generation ||
-            selected.workers != found->pair_context->workers ||
+        if (found == peers.end() || found->command != selected.command) return {};
+        const auto context = found->pair_context;
+        if (!context) return {};
+        if (!selected.catalog_generation ||
+            selected.catalog_generation != context->catalog_generation ||
+            selected.workers != context->workers ||
             selected.workers > static_cast<unsigned int>(INT32_MAX) ||
             (selected.command.is_resume && !selected.workers) ||
             (proposal.is_shared && !selected.workers))

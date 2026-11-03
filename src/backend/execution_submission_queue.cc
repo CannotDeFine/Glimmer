@@ -197,7 +197,7 @@ ExecutionSubmissionQueue::ExecutionSubmissionQueue(ExecutionSessionIdentity iden
 ExecutionSubmissionQueue::~ExecutionSubmissionQueue() {
     if (!implementation_->is_same_process()) {
         // Never lock inherited state or release parent-owned leases after fork.
-        (void)implementation_.release();
+        (void)implementation_.release();  // NOLINT(bugprone-unused-return-value)
         return;
     }
     if (!shutdown()) {
@@ -205,7 +205,7 @@ ExecutionSubmissionQueue::~ExecutionSubmissionQueue() {
         try {
             spdlog::critical("Retaining unfinished execution queue: client={}, incarnation={}",
                              retained->session.client_id, retained->session.server_incarnation);
-        } catch (...) {
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
             // Diagnostic failure cannot release potentially live GPU inputs.
         }
     }
@@ -545,9 +545,11 @@ bool ExecutionSubmissionQueue::pause_after_physical_stop(
     const std::lock_guard lock(state.mutex);
     const auto entry = state.find_issue(token);
     if (!state.is_executor() || !entry || entry->phase != Implementation::Phase::kHostReturned ||
-        entry->is_physically_stopped || !entry->reply || entry->reply->status != 0 ||
-        entry->reply->origin != ExecutionReplyOrigin::kNativeSdk)
+        entry->is_physically_stopped)
         return false;
+    const auto reply = entry->reply;
+    if (!reply) return false;
+    if (reply->status != 0 || reply->origin != ExecutionReplyOrigin::kNativeSdk) return false;
     entry->phase = Implementation::Phase::kPaused;
     return true;
 }

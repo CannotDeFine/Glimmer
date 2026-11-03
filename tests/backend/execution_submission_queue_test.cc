@@ -36,6 +36,7 @@ ExecutionRequest request(std::span<const std::byte> bytes,
 ExecutionIssue take(ExecutionSubmissionQueue& queue) {
     auto issue = queue.take_next();
     expect(issue.has_value(), "a queued command must become issuable");
+    if (!issue) throw std::runtime_error("missing queued command");
     return *issue;
 }
 
@@ -263,6 +264,7 @@ void private_parameter_patches_require_live_issue_authority() {
     expect(resumed && !queue.patch_issue_parameters(issue.token, 0, update) &&
                queue.patch_issue_parameters(resumed->token, 0, update),
            "closed drain permits only the fresh continuation generation");
+    if (!resumed) throw std::runtime_error("missing continuation");
     queue.quarantine();
     expect(!queue.patch_issue_parameters(resumed->token, 0, update) &&
                queue.finish_continuation_issue(resumed->token) &&
@@ -339,6 +341,7 @@ void incomplete_epochs_retain_one_logical_command() {
                    resumed->parameters.data() == current.parameters.data() &&
                    resumed->parameters[3] == bytes[3],
                "continuation retains one exact command and immutable owned ABI");
+        if (!resumed) throw std::runtime_error("missing continuation");
         current = *resumed;
         expect(queue.snapshot().issuing == 1 && queue.snapshot().paused == 0 &&
                    !queue.publish_host_result(current.token, 71) &&
@@ -416,6 +419,7 @@ void continuation_capabilities_and_uncertainty() {
     expect(resumed && !queue.take_next() && !queue.complete_after_physical_stop(resumed->token) &&
                queue.fail_uncertain_issue(resumed->token, -19),
            "uncertain continuation preserves owned inputs and quarantines issue");
+    if (!resumed) throw std::runtime_error("missing uncertain continuation");
     const auto original = queue.host_result(accepted.receipt);
     expect(original && original->status == 0 &&
                original->origin == ExecutionReplyOrigin::kNativeSdk &&
@@ -440,10 +444,12 @@ void exact_executor_selection_preserves_capabilities() {
     expect(selected && selected->token.sequence() == 2 && !queue.take_next(first.receipt) &&
                !queue.take_next(second.receipt),
            "trusted ready selection may pass blocked work, never a still-issuing host call");
+    if (!selected) throw std::runtime_error("missing selected command");
     settle(queue, *selected);
     expect(!queue.take_next(second.receipt), "a retired selection cannot be revived");
     const auto remaining = queue.take_next(first.receipt);
     expect(remaining && remaining->token.sequence() == 1, "preserve the skipped exact command");
+    if (!remaining) throw std::runtime_error("missing remaining command");
     settle(queue, *remaining);
     expect(foreign.reject_unissued(other.receipt, 1) && foreign.acknowledge_result(other.receipt) &&
                queue.shutdown() && foreign.shutdown(),
