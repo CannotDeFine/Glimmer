@@ -34,3 +34,13 @@ This is a workflow safeguard, not a filesystem lock. CMake may create or update
 its cache before the check runs, so do not invoke it on a frozen directory.
 The guard does not measure or enforce a build storage budget, remove files, or
 make historical build contents disposable.
+
+The `scripts/build.sh` and `scripts/check.sh` entry points inspect selected
+build slots before invoking CMake. They reject symlinked or frozen slots,
+nonempty slots without a regular cache, and a non-symlink root compilation
+database. The check script also refuses to reconfigure a selected slot with GPU
+tests enabled. Both scripts stop further steps when allocated `build/` usage is
+at or above 10,000,000,000 bytes or cannot be measured. These checks cannot
+predict peak usage, interrupt a running build, or protect against concurrent
+filesystem changes; they do not delete files. Direct CMake invocations do not
+enforce this storage budget.

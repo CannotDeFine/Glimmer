@@ -44,4 +44,6 @@ function(glimmer_enable_clang_tidy target)
     endif()
 endfunction()
 
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+if(NOT DEFINED CMAKE_EXPORT_COMPILE_COMMANDS OR CMAKE_EXPORT_COMPILE_COMMANDS STREQUAL "")
+    set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()

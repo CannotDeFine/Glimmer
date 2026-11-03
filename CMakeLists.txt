@@ -21,10 +21,10 @@ find_package(Threads REQUIRED)
 
 if(CMAKE_EXPORT_COMPILE_COMMANDS)
     add_custom_target(glimmer_compile_commands ALL
-        COMMAND ${CMAKE_COMMAND} -E rm -f "${PROJECT_SOURCE_DIR}/compile_commands.json"
-        COMMAND ${CMAKE_COMMAND} -E create_symlink
-            "${CMAKE_BINARY_DIR}/compile_commands.json"
-            "${PROJECT_SOURCE_DIR}/compile_commands.json"
+        COMMAND ${CMAKE_COMMAND}
+            "-DGLIMMER_COMPILE_DATABASE=${CMAKE_BINARY_DIR}/compile_commands.json"
+            "-DGLIMMER_COMPILE_LINK=${PROJECT_SOURCE_DIR}/compile_commands.json"
+            -P "${PROJECT_SOURCE_DIR}/cmake/UpdateCompileCommands.cmake"
         COMMENT "Updating root compile_commands.json link"
         VERBATIM
     )

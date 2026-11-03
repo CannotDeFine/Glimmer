@@ -1,5 +1,9 @@
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME glimmer_check_script_test
+        COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/examples/check_script_test.py
+    )
+    set_tests_properties(glimmer_check_script_test PROPERTIES TIMEOUT 120)
     add_test(NAME glimmer_artifact_paths_test
         COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/build/artifact_paths_test.py
     )
