@@ -1,5 +1,6 @@
 add_library(glimmer_control
     execution_protocol.cc
+    internal/shared_control_channel.cc
     execution_socket.cc
     internal/process_identity.cc
     execution_dnn_legacy_protocol.cc
