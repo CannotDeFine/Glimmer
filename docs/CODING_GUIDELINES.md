@@ -1,5 +1,7 @@
 # Coding Guidelines
 
+[Project home](../README.md) / [Documentation](../docs/README.md) / Coding guidelines
+
 These guidelines keep Glimmer small, predictable, and maintainable as it grows
 from a prototype into a shared-GPU scheduler.
 
@@ -8,20 +10,42 @@ from a prototype into a shared-GPU scheduler.
 - Write source code, comments, documentation, and identifiers in English.
 - Target Linux and C++20 only.
 - Format C++ and CUDA source with the repository `.clang-format` file. Run
-  `cmake --build --preset debug --target format-check` before committing.
+  `cmake --build --preset debug --target format-check` before committing. The
+  target checks headers in `include/` and C++/CUDA sources and headers in
+  `src/`, `examples/` and `tests/`; it excludes `build/`, `output/` and `.venv/`
+  directories.
+- The checked-in `.clang-format` and `.clang-tidy` settings are authoritative
+  for Glimmer. They use four-space indentation and other local conventions;
+  do not reformat unrelated code to match an external guide.
 - Prefer clear, conventional C++ over clever or overly generic abstractions.
 - Keep functions short enough that their control flow and ownership rules are
   obvious. Extract a named helper when a function combines unrelated steps.
 
 ## Naming
 
-- Use `PascalCase` for types, `snake_case` for functions and variables, and
-  `kPascalCase` for constants.
+- In C++, use `PascalCase` for types and `snake_case` for functions and
+  variables. Namespace-scope constants use `kPascalCase`; local and class
+  constants and data members use `snake_case`, as configured in `.clang-tidy`.
+- Preserve names required by CUDA and other external APIs at their ABI boundary.
 - Name booleans with `is_`, `has_`, `can_`, or `should_` prefixes.
 - Name units explicitly when ambiguity is possible: `timeout_ms`,
   `memory_bytes`, and `queue_depth`.
 - Avoid unexplained abbreviations and names that encode implementation details
   instead of domain meaning.
+
+## Python and shell
+
+- Use descriptive Python names, small functions, standard-library facilities
+  when sufficient, and a `main()` guard for executable modules. Importing a
+  module should not start workloads or modify the environment.
+- Validate arguments and external failures explicitly; do not use `assert` for
+  required runtime checks. Use context managers or `finally` for owned resources.
+  Catch broad exceptions only at a boundary that records or propagates them.
+- Keep shell scripts focused on command orchestration, quote expansions, check
+  failures, and clean up resources they create. Prefer Python for complex data
+  processing. Run ShellCheck on changed shell scripts when available.
+- Preserve existing local conventions when editing; avoid unrelated rewrites or
+  introducing a new formatter or dependency just to enforce style.
 
 ## Architecture and dependencies
 
@@ -39,12 +63,16 @@ from a prototype into a shared-GPU scheduler.
 
 ## Build quality
 
-- Resolve all compiler warnings in Glimmer-owned code. CI enables warnings as
-  errors for the project targets.
+- Resolve compiler warnings in Glimmer-owned code. CI enables warnings as
+  errors in its host configurations; optional CUDA targets need separate checks.
 - Run the appropriate CMake preset for the requested configuration. Use the
   `asan-ubsan` preset when changing ownership, lifetime, or asynchronous code.
 - Run the `lint` preset when clang-tidy is available and resolve findings in
   Glimmer-owned code before merging.
+- The CMake lint configuration selects header paths beginning with this
+  checkout's `include/` or `src/` directory. A relative include that traverses
+  out of those directories can also select an external header. When invoking
+  clang-tidy directly, supply a `--header-filter` if its default is too broad.
 
 ## Resource ownership and errors
 
@@ -136,9 +164,19 @@ from a prototype into a shared-GPU scheduler.
 
 ## Testing and documentation
 
-- Add or update tests for every behavior change and every corrected defect.
-- Test scheduling logic with a simulated backend and deterministic time source;
-  real GPU tests complement but do not replace these tests.
-- Cover failure and rollback paths, not only successful execution.
-- Update the relevant architecture documentation when changing
+- Follow [TESTING.md](TESTING.md) for behavior changes, deterministic scheduler
+  tests, and applicable failure and rollback coverage.
+- Update the relevant architecture and API documentation when changing
   public APIs, module boundaries, scheduling semantics, or resource isolation.
+- Keep public guides focused on implemented behavior, usage, prerequisites and
+  limitations. Use relative links, keep examples runnable, and avoid credentials
+  or machine-specific paths. Update existing guidance instead of duplicating it.
+
+## References
+
+These are references, not a claim that every Google rule is adopted. Glimmer's
+local settings and the rules above take precedence:
+
+- [Google C++ Style Guide](https://google.github.io/styleguide/cppguide.html)
+- [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html)
+- [Google Shell Style Guide](https://google.github.io/styleguide/shellguide.html)
