@@ -54,6 +54,10 @@ reference has one owner. A fork child must not use the inherited endpoint and mu
 promptly exec or `_exit`. A lost reply leaves delivery uncertain and does not
 authorize replay.
 
+The native epoch codec only encodes and validates bounded, versioned messages;
+it does not authenticate peers, grant execution, retry requests or establish
+GPU completion.
+
 The backend submission queue retains accepted command data until trusted
 proof of no native issue or final physical stop; its receipt remains until
 reply acknowledgement. It owns neither CUDA calls nor scheduling policy.

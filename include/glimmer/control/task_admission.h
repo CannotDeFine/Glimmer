@@ -30,6 +30,32 @@ struct TaskPeerIdentity {
     friend bool operator==(const TaskPeerIdentity&, const TaskPeerIdentity&) = default;
 };
 
+// One logical task plus one physical dispatch. Carry these together so a
+// continuation report cannot accidentally exchange two integer identities.
+struct TaskExecutionIdentity {
+    core::TaskId task_id = 0;
+    std::uint64_t generation = 0;
+};
+
+// Explicit server-approved native-call extent; not an ordinary execution lease.
+struct NativeEpochExtent {
+    std::uint32_t max_calls = 0;
+    std::uint32_t calls_per_prefix = 0;
+    std::uint32_t max_pending_prefixes = 0;
+    std::uint32_t acceptance_microseconds = 0;
+
+    friend bool operator==(const NativeEpochExtent&, const NativeEpochExtent&) = default;
+};
+
+[[nodiscard]] bool valid_native_epoch_extent(const NativeEpochExtent& extent) noexcept;
+
+struct NativeEpochGrant {
+    TaskExecutionIdentity execution;
+    NativeEpochExtent extent;
+    // Same-host Linux steady-clock timestamp. Never renewed by a heartbeat.
+    std::uint64_t acceptance_deadline_nanoseconds = 0;
+};
+
 using TaskResourceRegistrar = bool (*)(void* context, core::TaskId task_id) noexcept;
 
 // Best-effort observation emitted after a task is dispatched through this
