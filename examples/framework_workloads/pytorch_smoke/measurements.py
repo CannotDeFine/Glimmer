@@ -60,7 +60,8 @@ def read_metadata(path: pathlib.Path) -> dict[str, str]:
 
 def validate_scheduler_metrics(text: str) -> None:
     fields = text.split()
-    if (len(fields) != 17 or fields[:2] != ["GLIMMER_TASK_V1", "METRICS"]
+    if (len(fields) != 17 or fields[0] not in ("GLIMMER_TASK_V1", "GLIMMER_TASK_EXEC_V1")
+            or fields[1] != "METRICS"
             or any(not value.isascii() or not value.isdecimal() for value in fields[2:])):
         raise ValueError("malformed scheduler metrics")
     total, queued, running, completed, cancelled, failed, _, reserved, allocated, *_ = map(int, fields[2:])

@@ -22,12 +22,14 @@ class MeasurementTest(unittest.TestCase):
     def test_scheduler_failures_cannot_pass_model_validation(self):
         valid = "GLIMMER_TASK_V1 METRICS 10 0 0 10 0 0 4096 0 0 2 256 100 10 200 20"
         validate_scheduler_metrics(valid)
+        validate_scheduler_metrics(valid.replace("GLIMMER_TASK_V1", "GLIMMER_TASK_EXEC_V1"))
         for index in (3, 4, 6, 7, 9, 10):
             fields = valid.split()
             fields[index] = "1"
             with self.assertRaisesRegex(ValueError, "drained"):
                 validate_scheduler_metrics(" ".join(fields))
         for text in (valid.replace("10 0 0 10", "10 0 0 9"), valid + " extra",
+                     valid.replace("GLIMMER_TASK_V1", "GLIMMER_TASK_EXEC_V2"),
                      valid.replace("METRICS", "STATS"), valid.replace("256", "-1"), ""):
             with self.assertRaises(ValueError):
                 validate_scheduler_metrics(text)
