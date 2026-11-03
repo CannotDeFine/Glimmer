@@ -107,6 +107,18 @@ add_test(NAME glimmer_control_cooperative_remote_process_test
         $<TARGET_FILE:glimmer_task_execution_service>)
 set_tests_properties(glimmer_control_cooperative_remote_process_test PROPERTIES TIMEOUT 20)
 
+add_executable(glimmer_control_versioned_remote_launch_gate_test
+    control/versioned_remote_launch_gate_test.cc)
+target_include_directories(glimmer_control_versioned_remote_launch_gate_test PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/control")
+target_link_libraries(glimmer_control_versioned_remote_launch_gate_test PRIVATE Glimmer::control)
+target_compile_definitions(glimmer_control_versioned_remote_launch_gate_test PRIVATE
+    GLIMMER_ENABLE_TEST_HOOKS)
+glimmer_enable_clang_tidy(glimmer_control_versioned_remote_launch_gate_test)
+add_test(NAME glimmer_control_versioned_remote_launch_gate_test
+    COMMAND glimmer_control_versioned_remote_launch_gate_test)
+set_tests_properties(glimmer_control_versioned_remote_launch_gate_test PROPERTIES TIMEOUT 30)
+
 add_executable(glimmer_control_task_execution_admission_test
     control/task_execution_admission_test.cc)
 target_include_directories(glimmer_control_task_execution_admission_test PRIVATE

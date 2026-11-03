@@ -5,6 +5,9 @@
 #include "internal/socket_line_reader.h"
 #include "internal/socket_path.h"
 #include "internal/task_recovery_endpoint.h"
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+#include "internal/versioned_control_test_hooks.h"
+#endif
 
 #include <atomic>
 #include <cerrno>
@@ -177,6 +180,9 @@ struct UnixSocketTaskExecutionServer::Impl {
             bool published = false;
             if (endpoint != nullptr) {
                 const auto response = endpoint->handle(request, peer);
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+                if (response && internal::testing::drop_next_task_response.exchange(false)) break;
+#endif
                 published = response && publish(*response);
             } else if (recovery_endpoint != nullptr) {
                 const auto response = recovery_endpoint->handle(request, *peer);
