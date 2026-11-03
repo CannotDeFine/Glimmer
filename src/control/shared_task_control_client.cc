@@ -1,4 +1,5 @@
 #include "glimmer/control/shared_task_control_client.h"
+#include "glimmer/control/versioned_task_control_client.h"
 
 #include "glimmer/control/task_protocol.h"
 #include "internal/shared_control_channel.h"
@@ -82,6 +83,18 @@ constexpr std::uint32_t kMaxTimeoutMs = 60'000;
         if (sent <= 0) {
             return false;
         }
+        remaining.remove_prefix(static_cast<std::size_t>(sent));
+    }
+    return true;
+}
+
+[[nodiscard]] bool send_line(int fd, std::string_view remaining,
+                             std::uint32_t timeout_ms) noexcept {
+    while (!remaining.empty()) {
+        if (!wait_writable(fd, std::chrono::milliseconds(timeout_ms))) return false;
+        const auto sent = ::send(fd, remaining.data(), remaining.size(), MSG_NOSIGNAL);
+        if (sent < 0 && errno == EINTR) continue;
+        if (sent <= 0) return false;
         remaining.remove_prefix(static_cast<std::size_t>(sent));
     }
     return true;
@@ -176,6 +189,123 @@ std::optional<std::string> SharedTaskControlClient::request(std::string_view lin
         impl_->reset();
     } catch (...) {
         // A lock failure happens before the channel is accessed.
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+struct VersionedTaskControlClient::Impl {
+    Impl(std::string path, VersionedControlTransport mode, std::uint32_t timeout)
+        : socket_path(std::move(path)),
+          transport(mode),
+          io_timeout_ms(timeout),
+          process_id(::getpid()) {}
+    ~Impl() {
+        reset();
+    }
+
+    void reset() noexcept {
+        channel.reset();
+        reader.reset(-1);
+        if (socket_fd >= 0) {
+            static_cast<void>(::close(socket_fd));
+            socket_fd = -1;
+        }
+    }
+
+    [[nodiscard]] bool connect() {
+        if (socket_fd >= 0) return true;
+        if (socket_retired || (transport != VersionedControlTransport::kSocket &&
+                               transport != VersionedControlTransport::kSharedMemory &&
+                               transport != VersionedControlTransport::kAuto))
+            return false;
+        socket_fd = connect_server(socket_path, io_timeout_ms);
+        if (socket_fd < 0) return false;
+        reader.reset(socket_fd);
+        if (transport == VersionedControlTransport::kSocket) {
+            socket_selected = true;
+            return true;
+        }
+        std::string response;
+        if (!send_open(socket_fd, io_timeout_ms) ||
+            reader.read_line(response, io_timeout_ms) != internal::SocketLineStatus::kLine) {
+            reset();
+            return false;
+        }
+        if (response == internal::kSharedControlReady) {
+            if (!channel.receive_offer(socket_fd, std::chrono::milliseconds(io_timeout_ms))) {
+                reset();
+                return false;
+            }
+            const auto observed = channel.service_incarnation();
+            if (observed[0] == 0 || observed[1] == 0 || (pinned && observed != incarnation)) {
+                reset();
+                return false;
+            }
+            incarnation = observed;
+            pinned = true;
+            return true;
+        }
+        if (transport == VersionedControlTransport::kAuto && !pinned &&
+            (response == internal::kSharedControlUnsupported ||
+             response == "GLIMMER_TASK_V1 ERROR UNSUPPORTED_VERSION\n")) {
+            socket_selected = true;
+            return true;
+        }
+        reset();
+        return false;
+    }
+
+    const std::string socket_path;
+    const VersionedControlTransport transport;
+    const std::uint32_t io_timeout_ms;
+    const pid_t process_id;
+    std::mutex mutex;
+    int socket_fd = -1;
+    internal::SocketLineReader reader;
+    internal::SharedControlChannel channel;
+    internal::ServiceIncarnation incarnation{};
+    bool pinned = false;
+    bool socket_selected = false;
+    bool socket_retired = false;
+};
+
+VersionedTaskControlClient::VersionedTaskControlClient(std::string socket_path,
+                                                       VersionedControlTransport transport,
+                                                       std::uint32_t io_timeout_ms)
+    : impl_(std::make_unique<Impl>(std::move(socket_path), transport, io_timeout_ms)) {}
+VersionedTaskControlClient::~VersionedTaskControlClient() = default;
+
+std::optional<std::string> VersionedTaskControlClient::request(std::string_view line) noexcept {
+    if (::getpid() != impl_->process_id || impl_->io_timeout_ms == 0 ||
+        impl_->io_timeout_ms > kMaxTimeoutMs || line.empty() || line.back() != '\n' ||
+        line.size() > kTaskProtocolMaxLineBytes || line.find('\n') != line.size() - 1 ||
+        line.find('\0') != std::string_view::npos)
+        return std::nullopt;
+    try {
+        std::scoped_lock lock(impl_->mutex);
+        try {
+            if (!impl_->connect()) return std::nullopt;
+            std::string response;
+            const bool success =
+                impl_->socket_selected
+                    ? send_line(impl_->socket_fd, line, impl_->io_timeout_ms) &&
+                          impl_->reader.read_line(response, impl_->io_timeout_ms) ==
+                              internal::SocketLineStatus::kLine
+                    : impl_->channel.publish_request(line) &&
+                          impl_->channel.receive_response(impl_->socket_fd, impl_->io_timeout_ms,
+                                                          response);
+            if (success) return response;
+        } catch (...) {
+            // The outcome of an attempted request may be unknown.
+            if (impl_->socket_selected) impl_->socket_retired = true;
+            impl_->reset();
+            return std::nullopt;
+        }
+        if (impl_->socket_selected) impl_->socket_retired = true;
+        impl_->reset();
+    } catch (...) {
+        // Lock acquisition failed before touching the connection.
         return std::nullopt;
     }
     return std::nullopt;
