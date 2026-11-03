@@ -1,18 +1,27 @@
-# Documentation Guide
+# Documentation
 
-This directory contains the project rules and technical records that define how
-Glimmer is built and maintained. Each document has a specific purpose and
-update trigger.
+[Project home](../README.md) / Documentation
 
-| Document | Purpose | Update when |
-| --- | --- | --- |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Defines module responsibilities, dependency direction, and runtime boundaries. | A module is added, removed, or given a new responsibility. |
-| [CODING_GUIDELINES.md](CODING_GUIDELINES.md) | Defines source, ownership, error-handling, logging, concurrency, and quality rules. | A project-wide coding rule changes. |
-| [CUDA_API_COVERAGE.md](CUDA_API_COVERAGE.md) | Defines planned CUDA Driver API interception coverage, quota semantics, and compatibility tests. | A covered CUDA API, symbol path, quota rule, or compatibility claim changes. |
-| [DEPENDENCY_MANAGEMENT.md](DEPENDENCY_MANAGEMENT.md) | Defines how runtime, build, and development dependencies are selected and updated. | A dependency or its integration method changes. |
-| [DEVELOPMENT_LIFECYCLE.md](DEVELOPMENT_LIFECYCLE.md) | Defines the proposal, design, implementation, verification, review, integration, and release gates. | The development or review workflow changes. |
-| [GIT_GUIDELINES.md](GIT_GUIDELINES.md) | Defines the single-branch workflow and commit-message format. | The contribution workflow changes. |
-| [TESTING.md](TESTING.md) | Defines required test coverage and test levels. | Test policy or infrastructure changes. |
+## Using Glimmer
 
-Documentation describes intended behavior, not guesses. Keep current code and
-documentation aligned; mark a planned component as planned until it exists.
+- [Project overview](../README.md) — Capabilities and application quick start.
+- [Building](BUILDING.md) — Requirements and build configurations.
+- [Usage](USAGE.md) — Scheduling, allocation limits and shutdown.
+- [CUDA compatibility](CUDA_API_COVERAGE.md) — Interception scope and limitations.
+- [Architecture](ARCHITECTURE.md) — Components and their responsibilities.
+
+## Examples
+
+- [Priority demo](../examples/priority_demo/README.md) — Competing CUDA workloads.
+- [CUDA workloads](../examples/cuda_workloads/README.md) — CUDA workload examples.
+- [PyTorch workloads](../examples/framework_workloads/pytorch_smoke/README.md) — Framework workloads.
+- [Explicit task backend](../examples/cuda_task_backend/README.md) — Application-owned tasks.
+
+## Contributing
+
+- [Development lifecycle](DEVELOPMENT_LIFECYCLE.md) — Change and review gates.
+- [Coding guidelines](CODING_GUIDELINES.md) — Source and ownership conventions.
+- [Testing](TESTING.md) — Verification requirements.
+- [Dependency management](DEPENDENCY_MANAGEMENT.md) — Dependency selection and updates.
+- [Git guidelines](GIT_GUIDELINES.md) — Logical changes and commit conventions.
+- [Storage layout](STORAGE_LAYOUT.md) — Build and artifact retention.
