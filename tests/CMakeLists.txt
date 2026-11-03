@@ -1,3 +1,11 @@
+add_executable(glimmer_control_local_wake_coalescing_test control/local_control_wake_coalescing_test.cc)
+target_include_directories(glimmer_control_local_wake_coalescing_test PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
+target_link_libraries(glimmer_control_local_wake_coalescing_test PRIVATE Glimmer::control)
+target_link_options(glimmer_control_local_wake_coalescing_test PRIVATE "LINKER:--wrap=send" "LINKER:--wrap=recv")
+glimmer_enable_clang_tidy(glimmer_control_local_wake_coalescing_test)
+add_test(NAME glimmer_control_local_wake_coalescing_test COMMAND glimmer_control_local_wake_coalescing_test)
+set_tests_properties(glimmer_control_local_wake_coalescing_test PROPERTIES TIMEOUT 30)
+
 add_executable(glimmer_control_owned_control_exchange_test control/owned_control_exchange_test.cc)
 target_include_directories(glimmer_control_owned_control_exchange_test PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
 target_link_libraries(glimmer_control_owned_control_exchange_test PRIVATE Glimmer::control)
