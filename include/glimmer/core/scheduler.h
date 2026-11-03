@@ -87,6 +87,19 @@ struct TaskSnapshot {
     std::uint64_t dispatch_sequence = 0;
 };
 
+// A terminal failure is clean only when quota rollback is confirmed. An
+// uncertain result retains ownership and must not be treated as cancellation.
+enum class TaskDispatchStatus : std::uint8_t {
+    kQueued,
+    kGranted,
+    kTerminalClean,
+    kResourceUncertain
+};
+struct TaskDispatchResult {
+    TaskDispatchStatus status = TaskDispatchStatus::kQueued;
+    std::optional<TaskSnapshot> task;
+};
+
 struct SchedulerStats {
     QuotaUsage quota;
     std::size_t total_task_count = 0;
@@ -123,6 +136,7 @@ class Scheduler {
     [[nodiscard]] std::optional<TaskSnapshot> dispatch_next();
     // Dispatches task_id only when it is next under the configured policy.
     [[nodiscard]] std::optional<TaskSnapshot> dispatch_task(TaskId task_id);
+    [[nodiscard]] TaskDispatchResult dispatch_task_detailed(TaskId task_id);
     // Cooperative backends call suspend only after physical execution has
     // stopped. The task becomes queued again without releasing its memory.
     // Continuations may exceed the new-submission queue limit; existing work
@@ -176,6 +190,7 @@ class Scheduler {
     [[nodiscard]] std::optional<TaskId> peek_deficit_round_robin_task_locked() const;
     [[nodiscard]] std::optional<TaskId> peek_priority_task_locked() const;
     [[nodiscard]] std::optional<TaskSnapshot> dispatch_selected_task_locked(TaskId task_id);
+    [[nodiscard]] TaskDispatchResult dispatch_selected_task_detailed_locked(TaskId task_id);
     [[nodiscard]] TaskSnapshot snapshot_locked(TaskId task_id, const TaskRecord& task) const;
     [[nodiscard]] bool finish_running_task_locked(TaskId task_id, TaskState terminal_state);
     [[nodiscard]] bool cancel_queued_task_locked(TaskId task_id, TaskRecord& task) noexcept;

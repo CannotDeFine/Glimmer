@@ -99,6 +99,11 @@ std::optional<core::TaskSnapshot> TaskExecutionAdmissionService::claim_execution
     return impl_->state.claim_execution(id, peer);
 }
 
+core::TaskDispatchResult TaskExecutionAdmissionService::claim_execution_detailed(
+    core::TaskId id, std::optional<TaskPeerIdentity> peer) {
+    return impl_->state.claim_execution_detailed(id, peer);
+}
+
 bool TaskExecutionAdmissionService::supports_cooperative_execution() const noexcept {
     return impl_->state.supports_cooperative_execution();
 }

@@ -1,10 +1,18 @@
 #include "glimmer/core/scheduler.h"
 
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+#include "dispatch_test_hooks.h"
+#include <new>
+#endif
+
 #include <algorithm>
 #include <limits>
 #include <utility>
 
 namespace glimmer::core {
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+thread_local std::uint32_t internal::dispatch_test_faults = 0;
+#endif
 
 namespace {
 
@@ -173,19 +181,23 @@ std::optional<TaskSnapshot> Scheduler::dispatch_next() {
 }
 
 std::optional<TaskSnapshot> Scheduler::dispatch_task(TaskId task_id) {
+    return dispatch_task_detailed(task_id).task;
+}
+
+TaskDispatchResult Scheduler::dispatch_task_detailed(TaskId task_id) {
     if (task_id == 0) {
-        return std::nullopt;
+        return {};
     }
     std::scoped_lock lock(mutex_);
     if (running_task_ids_.size() >= max_running_tasks) {
-        return std::nullopt;
+        return {};
     }
     if (priority_reservation_blocks_low_dispatch_locked()) {
-        return std::nullopt;
+        return {};
     }
     const auto task_iterator = tasks_.find(task_id);
     if (task_iterator == tasks_.end() || task_iterator->second.state != TaskState::kQueued) {
-        return std::nullopt;
+        return {};
     }
     const auto next_task = peek_next_task_locked();
     if (!next_task.has_value()) {
@@ -194,34 +206,67 @@ std::optional<TaskSnapshot> Scheduler::dispatch_task(TaskId task_id) {
         if (scheduling_policy == SchedulingPolicy::kDeficitRoundRobin) {
             static_cast<void>(select_deficit_round_robin_task_locked());
         }
-        return std::nullopt;
+        return {};
     }
     if (next_task.value() != task_id) {
-        return std::nullopt;
+        return {};
     }
     const auto selected_task = select_next_task_locked();
     if (!selected_task.has_value() || selected_task.value() != task_id) {
-        return std::nullopt;
+        return {};
     }
-    return dispatch_selected_task_locked(task_id);
+    return dispatch_selected_task_detailed_locked(task_id);
 }
 
 std::optional<TaskSnapshot> Scheduler::dispatch_selected_task_locked(TaskId selected_task_id) {
+    return dispatch_selected_task_detailed_locked(selected_task_id).task;
+}
+
+TaskDispatchResult Scheduler::dispatch_selected_task_detailed_locked(TaskId selected_task_id) {
     const auto task_iterator = tasks_.find(selected_task_id);
     if (task_iterator == tasks_.end() || task_iterator->second.state != TaskState::kQueued) {
-        return std::nullopt;
+        return {};
     }
     std::optional<QuotaReservation>& reservation = task_iterator->second.reservation;
     if (!reservation.has_value()) {
         task_iterator->second.state = TaskState::kFailed;
-        return std::nullopt;
+        return {.status = TaskDispatchStatus::kResourceUncertain, .task = std::nullopt};
     }
     // Only a previously dispatched task can return to the queue. Its quota
     // was committed on that first dispatch and remains owned while suspended.
     const bool is_continuation = task_iterator->second.dispatch_sequence != 0;
 
+    const auto fail_before_issue = [&]() -> TaskDispatchResult {
+        bool released = false;
+        if (is_continuation) {
+            try {
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+                if ((internal::dispatch_test_faults & internal::kDispatchFailRelease) != 0)
+                    throw std::bad_alloc();
+#endif
+                released = quota_ledger_.release(task_iterator->second.spec.memory_bytes);
+            } catch (...) {
+                released = false;
+            }
+        } else {
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+            if ((internal::dispatch_test_faults & internal::kDispatchFailCancel) == 0)
+#endif
+                reservation->cancel();
+            released = !reservation->is_active();
+        }
+        task_iterator->second.state = TaskState::kFailed;
+        return {.status = released ? TaskDispatchStatus::kTerminalClean
+                                   : TaskDispatchStatus::kResourceUncertain,
+                .task = std::nullopt};
+    };
+
     TaskSnapshot dispatched_snapshot;
     try {
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+        if ((internal::dispatch_test_faults & internal::kDispatchFailSnapshot) != 0)
+            throw std::bad_alloc();
+#endif
         // Build the return value before committing the reservation. A task
         // snapshot owns tenant metadata and can therefore allocate; keeping
         // that work before the state transition prevents an exception from
@@ -229,44 +274,26 @@ std::optional<TaskSnapshot> Scheduler::dispatch_selected_task_locked(TaskId sele
         dispatched_snapshot = snapshot_locked(selected_task_id, task_iterator->second);
         dispatched_snapshot.state = TaskState::kRunning;
     } catch (...) {
-        if (is_continuation) {
-            if (!quota_ledger_.release(task_iterator->second.spec.memory_bytes)) {
-                task_iterator->second.state = TaskState::kFailed;
-                return std::nullopt;
-            }
-        } else {
-            reservation->cancel();
-        }
-        task_iterator->second.state = TaskState::kFailed;
-        return std::nullopt;
+        return fail_before_issue();
     }
 
     try {
         running_task_ids_.push_back(selected_task_id);
     } catch (...) {
-        if (is_continuation) {
-            if (!quota_ledger_.release(task_iterator->second.spec.memory_bytes)) {
-                task_iterator->second.state = TaskState::kFailed;
-                return std::nullopt;
-            }
-        } else {
-            reservation->cancel();
-        }
-        task_iterator->second.state = TaskState::kFailed;
-        return std::nullopt;
+        return fail_before_issue();
     }
 
     bool committed = false;
     try {
         committed = is_continuation || reservation.value().commit();
     } catch (...) {
-        committed = false;
-    }
-    if (!committed) {
-        reservation->cancel();
         running_task_ids_.pop_back();
         task_iterator->second.state = TaskState::kFailed;
-        return std::nullopt;
+        return {.status = TaskDispatchStatus::kResourceUncertain, .task = std::nullopt};
+    }
+    if (!committed) {
+        running_task_ids_.pop_back();
+        return fail_before_issue();
     }
     task_iterator->second.state = TaskState::kRunning;
     task_iterator->second.dispatch_sequence = next_dispatch_sequence_;
@@ -281,7 +308,7 @@ std::optional<TaskSnapshot> Scheduler::dispatch_selected_task_locked(TaskId sele
         queue_wait.count() < 0 ? std::uint64_t{0} : static_cast<std::uint64_t>(queue_wait.count());
     saturating_add(queue_wait_us, &total_queue_wait_microseconds_);
     max_queue_wait_microseconds_ = std::max(max_queue_wait_microseconds_, queue_wait_us);
-    return dispatched_snapshot;
+    return {.status = TaskDispatchStatus::kGranted, .task = std::move(dispatched_snapshot)};
 }
 
 bool Scheduler::suspend(TaskId task_id) {

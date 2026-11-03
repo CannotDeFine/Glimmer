@@ -7,6 +7,10 @@ add_library(glimmer_core
 )
 add_library(Glimmer::core ALIAS glimmer_core)
 
+if(BUILD_TESTING)
+    target_compile_definitions(glimmer_core PRIVATE GLIMMER_ENABLE_TEST_HOOKS)
+endif()
+
 set_target_properties(glimmer_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(glimmer_core

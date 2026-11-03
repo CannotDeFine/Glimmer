@@ -1,38 +1,98 @@
 #include "execution_admission_state.h"
 
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+#include "dispatch_test_hooks.h"
+#include <new>
+#endif
+#include <limits>
+
 namespace glimmer::control {
 
 std::optional<core::TaskSnapshot> ExecutionAdmissionState::claim_execution(
     core::TaskId task_id, std::optional<TaskPeerIdentity> peer) {
-    if (!bind_leases_to_process_) {
-        return std::nullopt;
-    }
+    return claim_execution_detailed(task_id, peer).task;
+}
+
+core::TaskDispatchResult ExecutionAdmissionState::claim_execution_detailed(
+    core::TaskId task_id, std::optional<TaskPeerIdentity> peer) {
+    if (!bind_leases_to_process_) return {};
     std::unique_lock lock(admission_mutex_);
     const auto pending = pending_leases_.find(task_id);
     if (pending == pending_leases_.end() || !pending->second.is_cooperative ||
-        pending->second.native_epoch.has_value() || pending->second.reaping) {
-        return std::nullopt;
+        pending->second.native_epoch.has_value() || pending->second.reaping ||
+        !owner_matches(pending->second, peer)) {
+        return {};
     }
-    auto current = scheduler_.find(task_id);
-    if (!current.has_value()) {
-        return std::nullopt;
+    const auto current = scheduler_.find(task_id);
+    if (!current || current->state != core::TaskState::kQueued) {
+        return {.status = core::TaskDispatchStatus::kResourceUncertain, .task = std::nullopt};
     }
-    if (current->state != core::TaskState::kQueued || !pending_owner_matches(task_id, peer)) {
-        return std::nullopt;
+    // Allocate the active record before the scheduler can issue a grant.
+    decltype(active_leases_)::iterator active;
+    try {
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+        if ((core::internal::dispatch_test_faults & core::internal::kDispatchFailActiveRecord) != 0)
+            throw std::bad_alloc();
+#endif
+        const auto inserted = active_leases_.emplace(task_id, pending->second);
+        if (!inserted.second)
+            return {.status = core::TaskDispatchStatus::kResourceUncertain, .task = std::nullopt};
+        active = inserted.first;
+    } catch (...) {
+        return {};
     }
-    auto snapshot = record_lease(scheduler_.dispatch_task(task_id), peer);
-    if (!snapshot.has_value()) {
-        return std::nullopt;
+    core::TaskDispatchResult result;
+    try {
+        result = scheduler_.dispatch_task_detailed(task_id);
+    } catch (...) {
+        pending->second.reaping = true;
+        active->second.reaping = true;
+        return {.status = core::TaskDispatchStatus::kResourceUncertain, .task = std::nullopt};
     }
-    const auto lease = active_leases_.find(task_id);
-    if (lease == active_leases_.end()) {
-        return std::nullopt;
+    if (result.status == core::TaskDispatchStatus::kQueued) {
+        active_leases_.erase(active);
+        return result;
     }
-    lease->second.is_cooperative = true;
+    if (result.status == core::TaskDispatchStatus::kResourceUncertain) {
+        pending->second.reaping = true;
+        active_leases_.erase(active);
+        return result;
+    }
+    if (result.status == core::TaskDispatchStatus::kTerminalClean) {
+        const auto record = pending->second;
+        active_leases_.erase(active);
+        pending_leases_.erase(pending);
+        lock.unlock();
+        observe_completion(*current, core::TaskState::kFailed, record);
+        notify_state_change();
+        return result;
+    }
+    if (!result.task || result.task->dispatch_sequence == 0) {
+        pending->second.reaping = true;
+        active->second.reaping = true;
+        return {.status = core::TaskDispatchStatus::kResourceUncertain, .task = std::nullopt};
+    }
+    auto& lease = active->second;
+    const auto now = Clock::now();
+    const auto queued_at =
+        lease.queued_at == Clock::time_point{} ? lease.submitted_at : lease.queued_at;
+    if (queued_at != Clock::time_point{} && now > queued_at) {
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(now - queued_at).count();
+        const auto duration = elapsed <= 0 ? std::uint64_t{0} : static_cast<std::uint64_t>(elapsed);
+        lease.queue_wait_microseconds =
+            duration > std::numeric_limits<std::uint64_t>::max() - lease.queue_wait_microseconds
+                ? std::numeric_limits<std::uint64_t>::max()
+                : lease.queue_wait_microseconds + duration;
+    }
+    lease.started_at = now;
+    lease.deadline = lease_timeout_ == std::chrono::milliseconds::zero() ? Clock::time_point::max()
+                                                                         : now + lease_timeout_;
+    pending_leases_.erase(pending);
     lock.unlock();
-    observe_dispatch(*snapshot);
+    observe_dispatch(*result.task);
     notify_state_change();
-    return snapshot;
+    return result;
 }
 
 bool ExecutionAdmissionState::cancel_pending_cooperative(core::TaskId task_id,

@@ -63,6 +63,8 @@ class ExecutionAdmissionState final {
     // physical kernel has stopped; CUDA handles never enter this service.
     [[nodiscard]] std::optional<core::TaskSnapshot> claim_execution(
         core::TaskId task_id, std::optional<TaskPeerIdentity> peer);
+    [[nodiscard]] core::TaskDispatchResult claim_execution_detailed(
+        core::TaskId task_id, std::optional<TaskPeerIdentity> peer);
     [[nodiscard]] bool supports_cooperative_execution() const noexcept {
         return bind_leases_to_process_;
     }

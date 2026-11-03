@@ -30,6 +30,8 @@ add_library(glimmer_control
     internal/socket_line_reader.cc
     internal/socket_path.cc
     internal/task_recovery_journal.cc
+    internal/task_recovery_client.cc
+    internal/task_recovery_endpoint.cc
     internal/task_recovery_protocol.cc
     launch_gate.cc
     process_memory_quota.cc
@@ -41,6 +43,11 @@ add_library(glimmer_control
     unix_socket_server.cc
 )
 add_library(Glimmer::control ALIAS glimmer_control)
+
+if(BUILD_TESTING)
+    target_compile_definitions(glimmer_control PRIVATE GLIMMER_ENABLE_TEST_HOOKS)
+    target_include_directories(glimmer_control PRIVATE "${PROJECT_SOURCE_DIR}/src/core")
+endif()
 
 set_target_properties(glimmer_control PROPERTIES POSITION_INDEPENDENT_CODE ON)
 

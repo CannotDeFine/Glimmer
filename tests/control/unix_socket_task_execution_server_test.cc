@@ -5,6 +5,9 @@
 #include "glimmer/control/task_execution_protocol.h"
 #include "glimmer/control/unix_socket_task_execution_server.h"
 #include "internal/task_execution_endpoint_test_hooks.h"
+#include "internal/task_recovery_endpoint.h"
+#include "internal/task_recovery_client.h"
+#include "internal/task_recovery_transport_test_hooks.h"
 
 #include <atomic>
 #include <cerrno>
@@ -18,6 +21,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 
@@ -25,6 +29,7 @@ namespace {
 std::atomic<int> fail_path_stat_after{0};
 std::atomic<bool> replace_path_at_stat{false};
 std::atomic<bool> fail_listen{false};
+std::atomic<bool> fail_next_entropy{false};
 const char* replacement_path = nullptr;
 const char* socket_path = nullptr;
 }  // namespace
@@ -33,6 +38,14 @@ const char* socket_path = nullptr;
 // NOLINTBEGIN(bugprone-reserved-identifier,readability-identifier-naming)
 extern "C" int __real_lstat(const char*, struct stat*);
 extern "C" int __real_listen(int, int);
+extern "C" ssize_t __real_getrandom(void*, size_t, unsigned int);
+extern "C" ssize_t __wrap_getrandom(void* buffer, size_t length, unsigned int flags) {
+    if (fail_next_entropy.exchange(false)) {
+        errno = EAGAIN;
+        return -1;
+    }
+    return __real_getrandom(buffer, length, flags);
+}
 extern "C" int __wrap_lstat(const char* path, struct stat* status) {
     if (fail_path_stat_after.load() > 0 && fail_path_stat_after.fetch_sub(1) == 1) {
         if (replace_path_at_stat.exchange(false)) {
@@ -109,9 +122,231 @@ void reject_raw(const std::string& path, std::string_view line) {
     static_cast<void>(::close(fd));
 }
 
+void test_recovery_after_lost_replies() {
+    using namespace glimmer::control::internal;
+    char directory[] = "/tmp/glimmer-recovery-server-XXXXXX";
+    expect(::mkdtemp(directory) != nullptr, "create recovery socket directory");
+    const std::string path = std::string(directory) + "/server.sock";
+    TaskRecoveryEndpoint endpoint({91, 92}, 100);
+    UnixSocketTaskExecutionServer server(endpoint, {.socket_path = path, .io_timeout_ms = 1000});
+    expect(server.start(), "start recovery server");
+    std::atomic<bool> serving{true};
+    std::atomic<unsigned> accepted_connections{0};
+    std::thread acceptor([&] {
+        while (serving.load()) {
+            const auto result = server.serve_one_for(20);
+            expect(result != UnixSocketServeStatus::kError, "serve recovery clients");
+            if (result == UnixSocketServeStatus::kServed) accepted_connections.fetch_add(1);
+        }
+    });
+    fail_next_entropy.store(true);
+    TaskRecoveryClient no_entropy(path);
+    expect(!no_entropy.open() && accepted_connections.load() == 0,
+           "entropy failure never sends OPEN");
+    SharedTaskControlClient client(path);
+    auto exchange = [&](const TaskRecoveryRequest& request) -> std::optional<std::string> {
+        const auto wire = format_task_recovery_request(request);
+        expect(wire.has_value(), "format recovery request");
+        const auto line = wire.value_or(TaskRecoveryLine{});
+        return client.request(line.view());
+    };
+    auto decode = [&](const TaskRecoveryRequest& request) -> TaskRecoveryResponse {
+        const auto reply = exchange(request);
+        expect(reply.has_value(), "receive recovery response");
+        const auto parsed = parse_task_recovery_response(reply.value_or(""));
+        expect(parsed.has_value(), "decode recovery response");
+        return parsed.value_or(TaskRecoveryResponse{});
+    };
+    TaskRecoveryRequest request;
+    request.nonce = {10, 11};
+    testing::drop_next_recovery_response();
+    expect(!exchange(request), "opened session reply is lost");
+    const auto opened = decode(request);
+    expect(opened.kind == TaskRecoveryResultKind::kOpened,
+           "same recovery session opens after reconnect");
+    request.command = TaskRecoveryCommand::kExecute;
+    request.incarnation = opened.incarnation;
+    request.session_id = opened.session_id;
+    request.operation_id = 1;
+    request.operation = TaskRecoveryOperation::kSubmit;
+    request.tenant = "worker";
+    request.memory_bytes = 10;
+    request.weight = 1;
+    request.work_units = 1;
+    testing::drop_next_recovery_response();
+    expect(!exchange(request), "committed submit reply is lost");
+    const auto accepted = decode(request);
+    expect(accepted.kind == TaskRecoveryResultKind::kAccepted, "submit recovered after reconnect");
+    request.operation_id = 2;
+    request.acknowledged_through = 1;
+    request.operation = TaskRecoveryOperation::kClaim;
+    request.tenant = {};
+    request.memory_bytes = 0;
+    request.weight = 0;
+    request.work_units = 0;
+    request.execution.task_id = accepted.execution.task_id;
+    const auto foreign_request = format_task_recovery_request(request);
+    expect(foreign_request.has_value(), "format foreign process probe");
+    const std::string foreign_line(foreign_request.value_or(TaskRecoveryLine{}).view());
+    const pid_t child = ::fork();
+    expect(child >= 0, "start separate process probe");
+    if (child == 0) {
+        ::execl("/proc/self/exe", "glimmer-recovery-probe", "--recovery-peer-probe", path.c_str(),
+                foreign_line.c_str(), static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    int child_status = 0;
+    expect(::waitpid(child, &child_status, 0) == child && WIFEXITED(child_status) &&
+               WEXITSTATUS(child_status) == 0,
+           "different process cannot take over an existing session");
+    testing::drop_next_recovery_response();
+    expect(!exchange(request), "committed grant reply is lost");
+    const auto grant = decode(request);
+    expect(grant.kind == TaskRecoveryResultKind::kGranted, "same grant recovered after reconnect");
+    request.operation_id = 3;
+    request.acknowledged_through = 2;
+    expect(decode(request).kind == TaskRecoveryResultKind::kRejected,
+           "new operation cannot obtain a second grant");
+    request.operation_id = 4;
+    request.acknowledged_through = 3;
+    request.operation = TaskRecoveryOperation::kComplete;
+    request.execution = grant.execution;
+    expect(decode(request).kind == TaskRecoveryResultKind::kAcknowledged,
+           "complete recovered work");
+    request.operation_id = 5;
+    request.acknowledged_through = 4;
+    request.operation = TaskRecoveryOperation::kForget;
+    request.execution.generation = 0;
+    expect(decode(request).kind == TaskRecoveryResultKind::kAcknowledged, "forget terminal task");
+    request.command = TaskRecoveryCommand::kAcknowledge;
+    request.operation = TaskRecoveryOperation::kStatus;
+    request.operation_id = 0;
+    request.acknowledged_through = 5;
+    request.execution = {};
+    expect(decode(request).kind == TaskRecoveryResultKind::kAcknowledged, "acknowledge results");
+    request.command = TaskRecoveryCommand::kClose;
+    request.acknowledged_through = 0;
+    testing::drop_next_recovery_response();
+    expect(!exchange(request), "close reply is lost");
+    expect(decode(request).kind == TaskRecoveryResultKind::kClosed,
+           "close recovered after reconnect");
+
+    TaskRecoveryClient guarded(path);
+    expect(guarded.open(), "guarded client opens a separate session");
+    TaskRecoveryRequest operation;
+    operation.operation = TaskRecoveryOperation::kSubmit;
+    operation.tenant = "guarded";
+    operation.memory_bytes = 10;
+    operation.weight = 1;
+    operation.work_units = 1;
+    testing::drop_next_recovery_response();
+    expect(!guarded.execute(operation), "guarded submit sees lost response");
+    auto changed = operation;
+    changed.memory_bytes = 11;
+    expect(!guarded.execute(changed), "ambiguous operation cannot change payload");
+    const auto guarded_accepted = guarded.execute(operation);
+    expect(guarded_accepted && guarded_accepted->kind == TaskRecoveryResultKind::kAccepted,
+           "guarded submit recovers original result");
+    expect(!guarded.execute(operation), "delivered result is not returned twice");
+    testing::drop_next_recovery_response();
+    expect(!guarded.acknowledge() && guarded.acknowledge(), "lost ACK is idempotently retried");
+    operation = {};
+    operation.operation = TaskRecoveryOperation::kClaim;
+    operation.execution.task_id =
+        guarded_accepted.value_or(TaskRecoveryResponse{}).execution.task_id;
+    testing::drop_next_recovery_response();
+    expect(!guarded.execute(operation), "guarded grant sees lost response");
+    const auto guarded_grant = guarded.execute(operation);
+    expect(guarded_grant && guarded_grant->kind == TaskRecoveryResultKind::kGranted &&
+               !guarded.execute(operation),
+           "grant is delivered once after reconnect");
+    expect(guarded.acknowledge(), "acknowledge accepted grant");
+    operation.operation = TaskRecoveryOperation::kComplete;
+    operation.execution = guarded_grant.value_or(TaskRecoveryResponse{}).execution;
+    expect(guarded.execute(operation).has_value() && guarded.acknowledge(),
+           "complete guarded work");
+    operation.operation = TaskRecoveryOperation::kForget;
+    operation.execution.generation = 0;
+    expect(guarded.execute(operation).has_value() && guarded.acknowledge(), "forget guarded work");
+    testing::drop_next_recovery_response();
+    expect(!guarded.close() && guarded.close(), "guarded close recovers its lost reply");
+
+    TaskRecoveryClient first_instance(path);
+    TaskRecoveryClient second_instance(path);
+    expect(first_instance.open() && second_instance.open(),
+           "client instances open distinct sessions");
+    operation = {};
+    operation.operation = TaskRecoveryOperation::kSubmit;
+    operation.tenant = "separate";
+    operation.memory_bytes = 10;
+    operation.weight = 1;
+    operation.work_units = 1;
+    const auto first_task = first_instance.execute(operation);
+    const auto second_task = second_instance.execute(operation);
+    expect(first_task && second_task &&
+               first_task.value_or(TaskRecoveryResponse{}).execution.task_id !=
+                   second_task.value_or(TaskRecoveryResponse{}).execution.task_id,
+           "client instances never share the same task grant");
+    expect(first_instance.acknowledge() && second_instance.acknowledge(),
+           "acknowledge both submissions");
+    operation = {};
+    operation.operation = TaskRecoveryOperation::kCancelPending;
+    operation.execution.task_id = first_task.value_or(TaskRecoveryResponse{}).execution.task_id;
+    expect(first_instance.execute(operation).has_value() && first_instance.acknowledge(),
+           "cancel first pending task");
+    operation.operation = TaskRecoveryOperation::kForget;
+    expect(first_instance.execute(operation).has_value() && first_instance.acknowledge() &&
+               first_instance.close(),
+           "retire first independent session");
+    operation.operation = TaskRecoveryOperation::kCancelPending;
+    operation.execution.task_id = second_task.value_or(TaskRecoveryResponse{}).execution.task_id;
+    expect(second_instance.execute(operation).has_value() && second_instance.acknowledge(),
+           "cancel second pending task");
+    operation.operation = TaskRecoveryOperation::kForget;
+    expect(second_instance.execute(operation).has_value() && second_instance.acknowledge() &&
+               second_instance.close(),
+           "retire second independent session");
+    serving.store(false);
+    acceptor.join();
+    server.stop();
+    expect(endpoint.retire_after_backend_stopped(), "retire stopped recovery endpoint");
+
+    TaskRecoveryEndpoint replacement({93, 94}, 100);
+    UnixSocketTaskExecutionServer restarted(replacement,
+                                            {.socket_path = path, .io_timeout_ms = 1000});
+    expect(restarted.start(), "restart recovery server with fresh incarnation");
+    serving.store(true);
+    std::thread restarted_acceptor([&] {
+        while (serving.load()) {
+            expect(restarted.serve_one_for(20) != UnixSocketServeStatus::kError,
+                   "serve restarted recovery clients");
+        }
+    });
+    expect(!exchange(request) && !exchange(request),
+           "old client cannot reconnect to restarted service");
+    TaskRecoveryClient fresh(path);
+    expect(fresh.open(), "fresh client opens after restart");
+    operation = {};
+    operation.operation = TaskRecoveryOperation::kStatus;
+    const auto fresh_status = fresh.execute(operation);
+    expect(fresh_status && fresh_status->kind == TaskRecoveryResultKind::kStatus &&
+               fresh_status->pending_tasks == 0 && fresh_status->active_tasks == 0 &&
+               fresh.acknowledge() && fresh.close(),
+           "old requests made no task changes in new service");
+    serving.store(false);
+    restarted_acceptor.join();
+    restarted.stop();
+    expect(replacement.retire_after_backend_stopped(), "retire restarted endpoint");
+    expect(::rmdir(directory) == 0, "remove recovery socket directory");
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 4 && std::string_view(argv[1]) == "--recovery-peer-probe") {
+        SharedTaskControlClient foreign(argv[2]);
+        return foreign.request(argv[3]).has_value() ? EXIT_FAILURE : EXIT_SUCCESS;
+    }
     char directory[] = "/tmp/glimmer-exec-server-XXXXXX";
     expect(::mkdtemp(directory) != nullptr, "create private socket directory");
     const std::string path = std::string(directory) + "/server.sock";
@@ -282,5 +517,6 @@ int main() {
     expect(resources.registered.load() == 4 && resources.rolled_back.load() == 1,
            "wrong UID cannot reach endpoint or change resources");
     expect(::rmdir(directory) == 0, "remove private directory");
+    test_recovery_after_lost_replies();
     return EXIT_SUCCESS;
 }

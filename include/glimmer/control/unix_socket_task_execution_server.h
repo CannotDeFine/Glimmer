@@ -11,6 +11,10 @@
 
 namespace glimmer::control {
 
+namespace internal {
+class TaskRecoveryEndpoint;
+}
+
 struct UnixSocketTaskExecutionConfig {
     std::string socket_path;
     // The bundled shared client also requires the server to have its own UID.
@@ -32,6 +36,8 @@ struct UnixSocketTaskExecutionConfig {
 class UnixSocketTaskExecutionServer final {
    public:
     explicit UnixSocketTaskExecutionServer(TaskExecutionEndpoint& endpoint,
+                                           UnixSocketTaskExecutionConfig config);
+    explicit UnixSocketTaskExecutionServer(internal::TaskRecoveryEndpoint& endpoint,
                                            UnixSocketTaskExecutionConfig config);
     ~UnixSocketTaskExecutionServer();
     UnixSocketTaskExecutionServer(const UnixSocketTaskExecutionServer&) = delete;

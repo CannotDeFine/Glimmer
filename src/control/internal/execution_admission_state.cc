@@ -79,6 +79,19 @@ core::SubmitResult ExecutionAdmissionState::submit_impl(const TaskAdmissionReque
         return {.status = core::SubmitStatus::kInvalidTask};
     }
 
+    // Construct the allocating task specification before admission can mutate
+    // scheduler state. Allocation failure is a definite, side-effect-free error.
+    std::optional<core::TaskSpec> task_spec;
+    try {
+        task_spec.emplace(core::TaskSpec{.tenant_id = request.tenant_id,
+                                         .memory_bytes = request.memory_bytes,
+                                         .weight = request.weight,
+                                         .work_units = request.work_units,
+                                         .priority = request.priority});
+    } catch (...) {
+        return {.status = core::SubmitStatus::kInternalError};
+    }
+
     // A task must not become running between Scheduler::submit and completion
     // of resource registration. Serialize this transaction with dispatches.
     std::scoped_lock admission_lock(admission_mutex_);
@@ -86,12 +99,7 @@ core::SubmitResult ExecutionAdmissionState::submit_impl(const TaskAdmissionReque
                                       lease_timeout_ != std::chrono::milliseconds::zero() ||
                                       completion_observer_ != nullptr;
 
-    const core::SubmitResult admission =
-        scheduler_.submit(core::TaskSpec{.tenant_id = request.tenant_id,
-                                         .memory_bytes = request.memory_bytes,
-                                         .weight = request.weight,
-                                         .work_units = request.work_units,
-                                         .priority = request.priority});
+    const core::SubmitResult admission = scheduler_.submit(std::move(*task_spec));
     if (!admission.accepted()) {
         return admission;
     }

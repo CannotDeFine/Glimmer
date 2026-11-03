@@ -68,6 +68,9 @@ an expired running execution is not proof of physical completion. The original
 admission interface retains its existing ownership and ABI.
 The service owner must stop and join backend work and retire leases before
 destruction; destroying the service does not stop a GPU or fence a context.
+If poisoned private accounting cannot be retired individually, the owner may
+destroy the entire non-reusable service only after all callers and backend work
+are joined, physical execution is stopped and external resources are retired.
 Cooperative admission is marked before publication; ordinary task operations
 cannot claim it, and a generation grant is issued at most once per dispatch.
 
@@ -86,6 +89,15 @@ transport reply does not authorize cancellation or prove physical completion.
 Endpoint shutdown prevents new grants while allowing owners to retire existing
 work. Internal lease counts do not prove that external resources are released
 or that GPU execution has stopped.
+
+The separate recovery session binds operation identities to a peer, nonce and
+service incarnation. It retains bounded results until acknowledged and permits
+an identical request to recover a lost reply. The session client delivers each
+result at most once within the process; its caller remains responsible for
+issuing a grant at most once and recording acceptance before acknowledgement.
+Neither acknowledgements nor disconnects prove physical completion. Recovery
+state is not durable across process or service restart, and this internal path
+is not enabled by the ordinary launch-admission quick start.
 
 The backend submission queue retains accepted command data until trusted
 proof of no native issue or final physical stop; its receipt remains until

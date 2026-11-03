@@ -4,6 +4,7 @@
 #include "internal/shared_control_channel.h"
 #include "internal/socket_line_reader.h"
 #include "internal/socket_path.h"
+#include "internal/task_recovery_endpoint.h"
 
 #include <atomic>
 #include <cerrno>
@@ -22,6 +23,16 @@
 #include <vector>
 
 namespace glimmer::control {
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+namespace testing {
+namespace {
+std::atomic<bool> drop_recovery_response{false};
+}
+void drop_next_recovery_response() noexcept {
+    drop_recovery_response.store(true);
+}
+}  // namespace testing
+#endif
 namespace {
 
 constexpr std::uint32_t kMaxTimeoutMs = 60'000;
@@ -60,7 +71,9 @@ struct UnixSocketTaskExecutionServer::Impl {
     };
 
     Impl(TaskExecutionEndpoint& task_endpoint, UnixSocketTaskExecutionConfig server_config)
-        : endpoint(task_endpoint), config(std::move(server_config)) {}
+        : endpoint(&task_endpoint), config(std::move(server_config)) {}
+    Impl(internal::TaskRecoveryEndpoint& task_endpoint, UnixSocketTaskExecutionConfig server_config)
+        : recovery_endpoint(&task_endpoint), config(std::move(server_config)) {}
     ~Impl() {
         stop();
     }
@@ -152,8 +165,18 @@ struct UnixSocketTaskExecutionServer::Impl {
             if (status != internal::SharedControlReadStatus::kLine) {
                 break;
             }
-            const auto response = endpoint.handle(request, peer);
-            if (!response || !channel.publish_response(*response)) {
+            bool published = false;
+            if (endpoint != nullptr) {
+                const auto response = endpoint->handle(request, peer);
+                published = response && channel.publish_response(*response);
+            } else if (recovery_endpoint != nullptr) {
+                const auto response = recovery_endpoint->handle(request, *peer);
+#if defined(GLIMMER_ENABLE_TEST_HOOKS)
+                if (response && testing::drop_recovery_response.exchange(false)) break;
+#endif
+                published = response && channel.publish_response(response->view());
+            }
+            if (!published) {
                 // The result may already be published; never cancel or replay.
                 break;
             }
@@ -252,7 +275,8 @@ struct UnixSocketTaskExecutionServer::Impl {
         unlink_owned();
     }
 
-    TaskExecutionEndpoint& endpoint;
+    TaskExecutionEndpoint* endpoint = nullptr;
+    internal::TaskRecoveryEndpoint* recovery_endpoint = nullptr;
     UnixSocketTaskExecutionConfig config;
     internal::ServiceIncarnation incarnation{};
     int listener = -1;
@@ -266,6 +290,10 @@ struct UnixSocketTaskExecutionServer::Impl {
 
 UnixSocketTaskExecutionServer::UnixSocketTaskExecutionServer(TaskExecutionEndpoint& endpoint,
                                                              UnixSocketTaskExecutionConfig config)
+    : impl_(std::make_unique<Impl>(endpoint, std::move(config))) {}
+
+UnixSocketTaskExecutionServer::UnixSocketTaskExecutionServer(
+    internal::TaskRecoveryEndpoint& endpoint, UnixSocketTaskExecutionConfig config)
     : impl_(std::make_unique<Impl>(endpoint, std::move(config))) {}
 
 UnixSocketTaskExecutionServer::~UnixSocketTaskExecutionServer() = default;

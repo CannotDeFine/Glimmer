@@ -28,8 +28,12 @@ struct TaskExecutionLeaseStatus {
 // on allocation failure; no partially constructed service is published. Before
 // destruction, the owner must stop and join backend work, terminate or cancel
 // every accepted pending/active lease, release registrar-owned external
-// resources, and ensure no concurrent calls remain. Destruction is not proof of
-// physical stop and does not itself fence or tear down a CUDA context.
+// resources, and ensure no concurrent calls remain. If poisoned local accounting
+// cannot be retired individually, the owner may instead destroy the entire
+// non-reusable service only after joining all callers and backend work, proving
+// physical stop, and independently retiring every external resource. Destruction
+// releases private accounting; it does not prove physical stop or fence a CUDA
+// context.
 class TaskExecutionAdmissionService final {
    public:
     explicit TaskExecutionAdmissionService(
@@ -96,6 +100,9 @@ class TaskExecutionAdmissionService final {
     // dispatch generation. Backend suspension is reported only after the
     // physical kernel has stopped; CUDA handles never enter this service.
     [[nodiscard]] std::optional<core::TaskSnapshot> claim_execution(
+        core::TaskId task_id, std::optional<TaskPeerIdentity> peer);
+    // Detailed outcomes preserve ownership when rollback cannot be proved.
+    [[nodiscard]] core::TaskDispatchResult claim_execution_detailed(
         core::TaskId task_id, std::optional<TaskPeerIdentity> peer);
     [[nodiscard]] bool supports_cooperative_execution() const noexcept;
     [[nodiscard]] std::optional<bool> retreat_requested(TaskExecutionIdentity execution,

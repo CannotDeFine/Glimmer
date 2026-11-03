@@ -1,5 +1,6 @@
 #include "glimmer/control/task_execution_admission.h"
 #include "internal/execution_admission_state.h"
+#include "dispatch_test_hooks.h"
 
 #include <array>
 #include <atomic>
@@ -53,6 +54,103 @@ void test_pending_allocation_failure() {
         state.submit_cooperative(request, count_registration, &registrations, kOwner);
     expect(!result.accepted() && registrations == 0 && scheduler.stats().quota.used_bytes() == 0,
            "failed pending allocation rolls back before registrar publishes resources");
+}
+
+struct DispatchFaultCounts {
+    unsigned dispatches = 0;
+    unsigned completions = 0;
+};
+
+void count_dispatch(void* context, const TaskDispatchObservation&) noexcept {
+    ++static_cast<DispatchFaultCounts*>(context)->dispatches;
+}
+
+void count_completion(void* context, const TaskCompletionObservation&) noexcept {
+    ++static_cast<DispatchFaultCounts*>(context)->completions;
+}
+
+void test_detailed_dispatch_failures() {
+    using namespace glimmer::core;
+    namespace faults = glimmer::core::internal;
+    const TaskAdmissionRequest request{.tenant_id = "fault-owner", .memory_bytes = 20};
+    {
+        DispatchFaultCounts counts;
+        TaskExecutionAdmissionService service(100, {}, 0ms, true, count_dispatch, &counts,
+                                              count_completion, &counts);
+        const auto task = service.submit_cooperative(request, accept_resource, nullptr, kOwner);
+        expect(task.accepted(), "clean failure fixture accepted");
+        faults::dispatch_test_faults = faults::kDispatchFailSnapshot;
+        const auto result = service.claim_execution_detailed(task.task_id, kOwner);
+        faults::dispatch_test_faults = 0;
+        expect(result.status == TaskDispatchStatus::kTerminalClean && !result.task &&
+                   counts.dispatches == 0 && counts.completions == 1 &&
+                   service.stats().quota.used_bytes() == 0 && service.forget_terminal(task.task_id),
+               "clean dispatch failure retires quota and notifies once");
+    }
+    {
+        DispatchFaultCounts counts;
+        TaskExecutionAdmissionService service(100, {}, 0ms, true, count_dispatch, &counts,
+                                              count_completion, &counts);
+        const auto task = service.submit_cooperative(request, accept_resource, nullptr, kOwner);
+        faults::dispatch_test_faults = faults::kDispatchFailSnapshot | faults::kDispatchFailCancel;
+        const auto result = service.claim_execution_detailed(task.task_id, kOwner);
+        faults::dispatch_test_faults = 0;
+        const auto status = service.lease_status();
+        expect(result.status == TaskDispatchStatus::kResourceUncertain && !result.task &&
+                   counts.dispatches == 0 && counts.completions == 0 &&
+                   status.active_cooperative == 0 && status.pending_cooperative == 1 &&
+                   service.stats().quota.used_bytes() == 20 &&
+                   !service.forget_terminal(task.task_id),
+               "uncertain reservation retains owner and quota");
+    }
+    {
+        DispatchFaultCounts counts;
+        TaskExecutionAdmissionService service(100, {}, 0ms, true, count_dispatch, &counts,
+                                              count_completion, &counts);
+        const auto task = service.submit_cooperative(request, accept_resource, nullptr, kOwner);
+        const auto granted = service.claim_execution_detailed(task.task_id, kOwner);
+        expect(granted.status == TaskDispatchStatus::kGranted && granted.task.has_value(),
+               "clean continuation fixture grants");
+        const TaskExecutionIdentity execution{
+            task.task_id, granted.task.value_or(TaskSnapshot{}).dispatch_sequence};
+        expect(service.suspend_execution(execution, kOwner), "clean continuation stops");
+        faults::dispatch_test_faults = faults::kDispatchFailSnapshot;
+        const auto failed = service.claim_execution_detailed(task.task_id, kOwner);
+        faults::dispatch_test_faults = 0;
+        expect(failed.status == TaskDispatchStatus::kTerminalClean && !failed.task &&
+                   counts.dispatches == 1 && counts.completions == 1 &&
+                   service.stats().quota.used_bytes() == 0 && service.forget_terminal(task.task_id),
+               "clean continuation failure releases quota and notifies once");
+    }
+    {
+        DispatchFaultCounts counts;
+        TaskExecutionAdmissionService service(100, {}, 0ms, true, count_dispatch, &counts,
+                                              count_completion, &counts);
+        const auto task = service.submit_cooperative(request, accept_resource, nullptr, kOwner);
+        faults::dispatch_test_faults = faults::kDispatchFailActiveRecord;
+        const auto result = service.claim_execution_detailed(task.task_id, kOwner);
+        faults::dispatch_test_faults = 0;
+        expect(result.status == TaskDispatchStatus::kQueued && !result.task &&
+                   counts.dispatches == 0 && counts.completions == 0 &&
+                   service.lease_status().pending_cooperative == 1,
+               "active record allocation fails before grant");
+        const auto granted = service.claim_execution_detailed(task.task_id, kOwner);
+        expect(granted.status == TaskDispatchStatus::kGranted && granted.task.has_value(),
+               "queued task remains claimable");
+        const TaskExecutionIdentity execution{
+            task.task_id, granted.task.value_or(TaskSnapshot{}).dispatch_sequence};
+        expect(service.suspend_execution(execution, kOwner), "continuation is physically stopped");
+        faults::dispatch_test_faults = faults::kDispatchFailSnapshot | faults::kDispatchFailRelease;
+        const auto failed = service.claim_execution_detailed(task.task_id, kOwner);
+        faults::dispatch_test_faults = 0;
+        const auto status = service.lease_status();
+        expect(failed.status == TaskDispatchStatus::kResourceUncertain && !failed.task &&
+                   counts.dispatches == 1 && counts.completions == 0 &&
+                   status.active_cooperative == 0 && status.pending_cooperative == 1 &&
+                   service.stats().quota.used_bytes() == 20 &&
+                   !service.forget_terminal(task.task_id),
+               "failed continuation release retains quota and owner");
+    }
 }
 
 void test_forget_terminal() {
@@ -503,6 +601,7 @@ void test_suspend_completion_race() {
 
 int main() {
     test_pending_allocation_failure();
+    test_detailed_dispatch_failures();
     test_forget_terminal();
     test_legacy_equivalence();
     test_cooperative_ownership();

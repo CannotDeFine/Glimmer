@@ -1,3 +1,14 @@
+add_executable(glimmer_control_task_recovery_endpoint_test
+    control/task_recovery_endpoint_test.cc)
+target_include_directories(glimmer_control_task_recovery_endpoint_test PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/control" "${PROJECT_SOURCE_DIR}/src/core")
+target_link_libraries(glimmer_control_task_recovery_endpoint_test PRIVATE
+    Glimmer::control Glimmer::project_options)
+glimmer_enable_clang_tidy(glimmer_control_task_recovery_endpoint_test)
+add_test(NAME glimmer_control_task_recovery_endpoint_test
+    COMMAND glimmer_control_task_recovery_endpoint_test)
+set_tests_properties(glimmer_control_task_recovery_endpoint_test PROPERTIES TIMEOUT 30)
+
 add_executable(glimmer_control_task_recovery_protocol_test
     control/task_recovery_protocol_test.cc)
 target_include_directories(glimmer_control_task_recovery_protocol_test PRIVATE
@@ -30,7 +41,7 @@ target_compile_definitions(glimmer_control_unix_socket_task_execution_server_tes
 target_link_libraries(glimmer_control_unix_socket_task_execution_server_test PRIVATE
     Glimmer::control Glimmer::project_options)
 target_link_options(glimmer_control_unix_socket_task_execution_server_test PRIVATE
-    "LINKER:--wrap=lstat" "LINKER:--wrap=listen")
+    "LINKER:--wrap=lstat" "LINKER:--wrap=listen" "LINKER:--wrap=getrandom")
 glimmer_enable_clang_tidy(glimmer_control_unix_socket_task_execution_server_test)
 add_test(NAME glimmer_control_unix_socket_task_execution_server_test
     COMMAND glimmer_control_unix_socket_task_execution_server_test)
@@ -64,7 +75,7 @@ set_tests_properties(glimmer_control_task_execution_endpoint_test PROPERTIES TIM
 add_executable(glimmer_control_task_execution_admission_test
     control/task_execution_admission_test.cc)
 target_include_directories(glimmer_control_task_execution_admission_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/control")
+    "${PROJECT_SOURCE_DIR}/src/control" "${PROJECT_SOURCE_DIR}/src/core")
 target_link_libraries(glimmer_control_task_execution_admission_test PRIVATE
     Glimmer::control Glimmer::project_options)
 glimmer_enable_clang_tidy(glimmer_control_task_execution_admission_test)
