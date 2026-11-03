@@ -368,6 +368,63 @@ void test_native_epoch() {
                !service.finish_native_epoch(execution, 4, false, kOwner) &&
                service.stats().quota.used_bytes() == 0,
            "native completion is exactly once");
+
+    glimmer::core::SchedulerOptions options;
+    options.max_running_tasks = 1;
+    options.max_queued_tasks = 2;
+    options.scheduling_policy = glimmer::core::SchedulingPolicy::kPriority;
+    TaskExecutionAdmissionService priority(100, options, 0ms, true, nullptr, nullptr, nullptr,
+                                           nullptr, extent);
+    auto low_request = request;
+    low_request.priority = 1;
+    auto high_request = request;
+    high_request.priority = 9;
+    const auto low =
+        priority.submit_native_epoch(low_request, extent, accept_resource, nullptr, kOwner);
+    const auto low_grant = priority.claim_native_epoch(low.task_id, kOwner);
+    expect(low.accepted() && low_grant.has_value(), "low-priority native work starts");
+    const auto high =
+        priority.submit_native_epoch(high_request, extent, accept_resource, nullptr, kOwner);
+    const auto low_execution = low_grant.value_or(NativeEpochGrant{}).execution;
+    expect(high.accepted() && !priority.claim_native_epoch(high.task_id, kOwner) &&
+               priority.native_epoch_retreat_requested(low_execution, kOwner).value_or(false),
+           "higher-priority native work requests retreat without overlapping the running task");
+    expect(priority.finish_native_epoch(low_execution, 1, false, kOwner),
+           "physical completion releases low-priority native work");
+    const auto high_grant = priority.claim_native_epoch(high.task_id, kOwner);
+    expect(high_grant.has_value() &&
+               priority.finish_native_epoch(high_grant.value_or(NativeEpochGrant{}).execution, 1,
+                                            false, kOwner) &&
+               priority.stats().quota.used_bytes() == 0,
+           "the waiting native task receives the released slot and retires");
+
+    for (int iteration = 0; iteration < 16; ++iteration) {
+        const auto pending =
+            priority.submit_native_epoch(request, extent, accept_resource, nullptr, kOwner);
+        const auto active = priority.claim_native_epoch(pending.task_id, kOwner);
+        expect(pending.accepted() && active.has_value(), "native terminal race starts once");
+        const auto identity = active.value_or(NativeEpochGrant{}).execution;
+        std::atomic<unsigned int> terminals{};
+        std::barrier start(4);
+        std::thread complete([&] {
+            start.arrive_and_wait();
+            if (priority.finish_native_epoch(identity, 1, false, kOwner)) ++terminals;
+        });
+        std::thread fail([&] {
+            start.arrive_and_wait();
+            if (priority.finish_native_epoch(identity, 1, true, kOwner)) ++terminals;
+        });
+        std::thread retreat([&] {
+            start.arrive_and_wait();
+            static_cast<void>(priority.native_epoch_retreat_requested(identity, kOwner));
+        });
+        start.arrive_and_wait();
+        complete.join();
+        fail.join();
+        retreat.join();
+        expect(terminals == 1 && priority.stats().quota.used_bytes() == 0,
+               "competing native terminal and retreat operations release quota exactly once");
+    }
 }
 
 void test_priority_and_continuation() {
