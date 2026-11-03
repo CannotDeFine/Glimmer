@@ -13,14 +13,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Check shell scripts when ShellCheck is available
+        shell: bash
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            git ls-files --cached --others --exclude-standard -z -- \
+              ':(glob)scripts/**/*.sh' ':(glob)examples/**/*.sh' |
+              while IFS= read -r -d '' script; do
+                if [[ -f "$script" && ! -L "$script" ]]; then
+                  shellcheck -x "$script"
+                fi
+              done
+          else
+            echo '::warning::ShellCheck is unavailable; shell analysis was skipped.'
+          fi
+      - name: Initialize spdlog
+        run: git submodule update --init --recursive -- 3rdparty/spdlog
       - name: Configure
         run: cmake --preset debug -DGLIMMER_WARNINGS_AS_ERRORS=ON
       - name: Build
         run: cmake --build --preset debug
       - name: Test
-        run: ctest --preset debug --output-on-failure
+        run: ctest --preset debug --output-on-failure --no-tests=error
       - name: Check formatting
         run: cmake --build --preset debug --target format-check
 
@@ -28,21 +42,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Initialize spdlog
+        run: git submodule update --init --recursive -- 3rdparty/spdlog
       - name: Configure
         run: cmake --preset asan-ubsan -DGLIMMER_WARNINGS_AS_ERRORS=ON
       - name: Build
         run: cmake --build --preset asan-ubsan
       - name: Test
-        run: ctest --preset asan-ubsan --output-on-failure
+        run: ctest --preset asan-ubsan --output-on-failure --no-tests=error -LE '^no-instrumented-code$'
 
   static-analysis:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Initialize spdlog
+        run: git submodule update --init --recursive -- 3rdparty/spdlog
       - name: Install clang-tidy
         run: sudo apt-get update && sudo apt-get install --yes clang-tidy
       - name: Configure
