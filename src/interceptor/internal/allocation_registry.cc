@@ -5,6 +5,7 @@
 #include <functional>
 #include <limits>
 #include <new>
+#include <unordered_set>
 #include <unistd.h>
 
 namespace glimmer::interceptor {
@@ -86,7 +87,7 @@ std::size_t AllocationIdentityHash::operator()(const AllocationIdentity& identit
 }
 
 bool AllocationRegistry::record(AllocationIdentity identity, core::MemoryBytes memory_bytes,
-                                AllocationScope scope) {
+                                AllocationScope scope, AllocationProvenance provenance) {
     try {
         std::scoped_lock lock(mutex());
         if (is_accounting_degraded_.load(std::memory_order_relaxed) ||
@@ -94,12 +95,33 @@ bool AllocationRegistry::record(AllocationIdentity identity, core::MemoryBytes m
             return false;
         }
         return records_
-            .emplace(identity,
-                     AllocationRecord{
-                         .memory_bytes = memory_bytes, .scope = scope, .pending_stream = {}})
+            .emplace(identity, AllocationRecord{.memory_bytes = memory_bytes,
+                                                .scope = scope,
+                                                .provenance = provenance,
+                                                .pending_stream = {}})
             .second;
     } catch (...) {
         mark_accounting_degraded();
+        return false;
+    }
+}
+
+bool AllocationRegistry::has_live_independent_allocation(
+    AllocationIdentity identity, core::MemoryBytes required_bytes) const noexcept {
+    if (!identity.device_pointer || !identity.context || identity.device < 0 || !required_bytes ||
+        identity.device_pointer > std::numeric_limits<CUdeviceptr>::max() - required_bytes)
+        return false;
+    try {
+        std::scoped_lock lock(mutex());
+        const auto found = records_.find(identity);
+        return !is_accounting_degraded_.load(std::memory_order_relaxed) &&
+               found != records_.end() && !found->second.is_releasing &&
+               found->second.scope == AllocationScope::kContextBound &&
+               found->second.provenance == AllocationProvenance::kIndependentDevice &&
+               found->second.memory_bytes <=
+                   std::numeric_limits<CUdeviceptr>::max() - identity.device_pointer &&
+               required_bytes <= found->second.memory_bytes;
+    } catch (...) {
         return false;
     }
 }
@@ -253,14 +275,22 @@ AllocationRegistry::begin_async_release(AllocationIdentity identity, AsyncStream
             return {ReleaseStatus::kInProgress, std::nullopt};
         }
 
+        if (!next_async_release_generation_) {
+            mark_accounting_degraded();
+            return {ReleaseStatus::kUnknown, std::nullopt};
+        }
+        record->second.async_release_generation = next_async_release_generation_++;
+
         record->second.is_releasing = true;
         record->second.is_async_release = true;
         record->second.is_async_release_submitted = false;
         record->second.is_async_release_stream_detached = false;
         record->second.pending_stream = stream;
-        return {ReleaseStatus::kStarted, ReleaseTicket{.identity = identity,
-                                                       .memory_bytes = record->second.memory_bytes,
-                                                       .stream = stream}};
+        return {ReleaseStatus::kStarted,
+                ReleaseTicket{.identity = identity,
+                              .memory_bytes = record->second.memory_bytes,
+                              .stream = stream,
+                              .async_release_generation = record->second.async_release_generation}};
     } catch (...) {
         mark_accounting_degraded();
         return {ReleaseStatus::kUnknown, std::nullopt};
@@ -290,15 +320,23 @@ AllocationRegistry::begin_async_release_by_pointer(CUdeviceptr device_pointer, C
             return {ReleaseStatus::kInProgress, std::nullopt};
         }
 
+        if (!next_async_release_generation_) {
+            mark_accounting_degraded();
+            return {ReleaseStatus::kUnknown, std::nullopt};
+        }
+        candidate->second.async_release_generation = next_async_release_generation_++;
+
         candidate->second.is_releasing = true;
         candidate->second.is_async_release = true;
         candidate->second.is_async_release_submitted = false;
         candidate->second.is_async_release_stream_detached = false;
         candidate->second.pending_stream = stream;
-        return {ReleaseStatus::kStarted,
-                ReleaseTicket{.identity = candidate->first,
-                              .memory_bytes = candidate->second.memory_bytes,
-                              .stream = stream}};
+        return {
+            ReleaseStatus::kStarted,
+            ReleaseTicket{.identity = candidate->first,
+                          .memory_bytes = candidate->second.memory_bytes,
+                          .stream = stream,
+                          .async_release_generation = candidate->second.async_release_generation}};
     } catch (...) {
         mark_accounting_degraded();
         return {ReleaseStatus::kUnknown, std::nullopt};
@@ -348,14 +386,57 @@ bool AllocationRegistry::complete_vmm_release(const VmmReleaseTicket& ticket) no
     }
 }
 
+bool AllocationRegistry::matches_async_release(const AllocationRecord& record,
+                                               const ReleaseTicket& ticket) noexcept {
+    return record.is_releasing && record.is_async_release && ticket.async_release_generation != 0 &&
+           record.async_release_generation == ticket.async_release_generation &&
+           record.memory_bytes == ticket.memory_bytes &&
+           same_async_stream(record.pending_stream, ticket.stream);
+}
+
+bool AllocationRegistry::can_complete_async_release(const AllocationRecord& record) noexcept {
+    return record.is_releasing && record.is_async_release && record.is_async_release_submitted &&
+           (!record.is_cooperative_release || record.is_cooperative_release_complete);
+}
+
+bool AllocationRegistry::prepare_cooperative_release(const ReleaseTicket& ticket) noexcept {
+    try {
+        std::scoped_lock lock(mutex());
+        const auto record = records_.find(ticket.identity);
+        if (record == records_.end() || !matches_async_release(record->second, ticket) ||
+            record->second.is_async_release_submitted || record->second.is_cooperative_release) {
+            return false;
+        }
+        record->second.is_cooperative_release = true;
+        return true;
+    } catch (...) {
+        mark_accounting_degraded();
+        return false;
+    }
+}
+
+bool AllocationRegistry::confirm_cooperative_release(const ReleaseTicket& ticket) noexcept {
+    try {
+        std::scoped_lock lock(mutex());
+        const auto record = records_.find(ticket.identity);
+        if (record == records_.end() || !matches_async_release(record->second, ticket) ||
+            !record->second.is_cooperative_release ||
+            record->second.is_cooperative_release_complete) {
+            return false;
+        }
+        record->second.is_cooperative_release_complete = true;
+        return true;
+    } catch (...) {
+        mark_accounting_degraded();
+        return false;
+    }
+}
+
 bool AllocationRegistry::commit_async_release(const ReleaseTicket& ticket) noexcept {
     try {
         std::scoped_lock lock(mutex());
         const auto record = records_.find(ticket.identity);
-        if (record == records_.end() || !record->second.is_releasing ||
-            !record->second.is_async_release ||
-            record->second.memory_bytes != ticket.memory_bytes ||
-            !same_async_stream(record->second.pending_stream, ticket.stream)) {
+        if (record == records_.end() || !matches_async_release(record->second, ticket)) {
             return false;
         }
         record->second.is_async_release_submitted = true;
@@ -371,13 +452,17 @@ void AllocationRegistry::cancel_release(const ReleaseTicket& ticket) noexcept {
         std::scoped_lock lock(mutex());
         const auto record = records_.find(ticket.identity);
         if (record == records_.end() || !record->second.is_releasing ||
-            record->second.memory_bytes != ticket.memory_bytes) {
+            record->second.memory_bytes != ticket.memory_bytes ||
+            record->second.async_release_generation != ticket.async_release_generation) {
             return;
         }
         record->second.is_releasing = false;
         record->second.is_async_release = false;
         record->second.is_async_release_submitted = false;
         record->second.is_async_release_stream_detached = false;
+        record->second.is_cooperative_release = false;
+        record->second.is_cooperative_release_complete = false;
+        record->second.async_release_generation = 0;
         record->second.pending_stream = {};
     } catch (...) {
         mark_accounting_degraded();
@@ -410,7 +495,8 @@ bool AllocationRegistry::detach_async_releases_for_stream(
                 continue;
             }
             record.is_async_release_stream_detached = true;
-            record.pending_stream = {};
+            // Retain inert CPU release identity for generation-bound physical
+            // confirmation and context fences; never query this retired stream.
         }
         return true;
     } catch (...) {
@@ -453,8 +539,7 @@ AllocationRegistry::complete_async_releases_for_stream_by_device(
         std::scoped_lock lock(mutex());
         std::vector<DeviceReleaseSummary> summaries;
         for (const auto& [identity, record] : records_) {
-            if (!record.is_releasing || !record.is_async_release ||
-                !record.is_async_release_submitted || record.is_async_release_stream_detached ||
+            if (!can_complete_async_release(record) || record.is_async_release_stream_detached ||
                 !same_async_stream(record.pending_stream, stream)) {
                 continue;
             }
@@ -468,8 +553,7 @@ AllocationRegistry::complete_async_releases_for_stream_by_device(
         }
 
         for (auto record = records_.begin(); record != records_.end();) {
-            if (record->second.is_releasing && record->second.is_async_release &&
-                record->second.is_async_release_submitted &&
+            if (can_complete_async_release(record->second) &&
                 !record->second.is_async_release_stream_detached &&
                 same_async_stream(record->second.pending_stream, stream)) {
                 record = records_.erase(record);
@@ -484,14 +568,76 @@ AllocationRegistry::complete_async_releases_for_stream_by_device(
     }
 }
 
+std::optional<std::vector<AllocationRegistry::ReleaseTicket>>
+AllocationRegistry::submitted_async_releases(bool should_include_detached_streams) const noexcept {
+    try {
+        std::scoped_lock lock(mutex());
+        std::vector<ReleaseTicket> submitted;
+        for (const auto& [identity, record] : records_) {
+            if (record.is_releasing && record.is_async_release &&
+                record.is_async_release_submitted &&
+                (should_include_detached_streams || !record.is_async_release_stream_detached)) {
+                submitted.push_back({identity, record.memory_bytes, record.pending_stream,
+                                     record.async_release_generation});
+            }
+        }
+        return submitted;
+    } catch (...) {
+        return std::nullopt;  // No original completion has issued; nothing was retired.
+    }
+}
+
+std::optional<std::vector<AllocationRegistry::DeviceReleaseSummary>>
+AllocationRegistry::complete_submitted_async_releases(std::span<const ReleaseTicket> submitted,
+                                                      const AsyncStreamIdentity& stream) noexcept {
+    return complete_submitted_releases(submitted, &stream, nullptr);
+}
+std::optional<std::vector<AllocationRegistry::DeviceReleaseSummary>>
+AllocationRegistry::complete_submitted_context_releases(std::span<const ReleaseTicket> submitted,
+                                                        CUcontext context) noexcept {
+    return context ? complete_submitted_releases(submitted, nullptr, context) : std::nullopt;
+}
+std::optional<std::vector<AllocationRegistry::DeviceReleaseSummary>>
+AllocationRegistry::complete_submitted_releases(std::span<const ReleaseTicket> submitted,
+                                                const AsyncStreamIdentity* stream,
+                                                CUcontext context) noexcept {
+    try {
+        std::scoped_lock lock(mutex());
+        std::vector<DeviceReleaseSummary> summaries;
+        std::unordered_set<AllocationIdentity, AllocationIdentityHash> retired;
+        for (const auto& ticket : submitted) {
+            const auto found = records_.find(ticket.identity);
+            if (found == records_.end() || !can_complete_async_release(found->second) ||
+                (stream ? found->second.is_async_release_stream_detached ||
+                              !same_async_stream(found->second.pending_stream, *stream)
+                        : found->second.pending_stream.context != context) ||
+                !matches_async_release(found->second, ticket)) {
+                continue;
+            }
+            if (!retired.insert(ticket.identity).second) {
+                mark_accounting_degraded();
+                return std::nullopt;  // Duplicate proof must not count the allocation twice.
+            }
+            if (!append_device_release_summary(summaries, ticket.identity.device,
+                                               found->second.memory_bytes)) {
+                return std::nullopt;
+            }
+        }
+        std::erase_if(records_, [&](const auto& entry) { return retired.contains(entry.first); });
+        return summaries;
+    } catch (...) {
+        mark_accounting_degraded();
+        return std::nullopt;
+    }
+}
+
 core::MemoryBytes AllocationRegistry::complete_async_releases_for_context(
     CUcontext context, CUdevice device) noexcept {
     try {
         std::scoped_lock lock(mutex());
         core::MemoryBytes released_bytes = 0;
         for (auto record = records_.begin(); record != records_.end();) {
-            if (!record->second.is_releasing || !record->second.is_async_release ||
-                !record->second.is_async_release_submitted || record->first.context != context ||
+            if (!can_complete_async_release(record->second) || record->first.context != context ||
                 record->first.device != device) {
                 ++record;
                 continue;
@@ -518,8 +664,7 @@ AllocationRegistry::complete_async_releases_for_context_by_device(CUcontext cont
         std::scoped_lock lock(mutex());
         std::vector<DeviceReleaseSummary> summaries;
         for (const auto& [identity, record] : records_) {
-            if (!record.is_releasing || !record.is_async_release ||
-                !record.is_async_release_submitted || identity.context != context) {
+            if (!can_complete_async_release(record) || identity.context != context) {
                 continue;
             }
             if (!append_device_release_summary(summaries, identity.device, record.memory_bytes)) {
@@ -532,8 +677,7 @@ AllocationRegistry::complete_async_releases_for_context_by_device(CUcontext cont
         }
 
         for (auto record = records_.begin(); record != records_.end();) {
-            if (record->second.is_releasing && record->second.is_async_release &&
-                record->second.is_async_release_submitted && record->first.context == context) {
+            if (can_complete_async_release(record->second) && record->first.context == context) {
                 record = records_.erase(record);
             } else {
                 ++record;

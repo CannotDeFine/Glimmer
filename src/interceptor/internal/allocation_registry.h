@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -41,6 +42,13 @@ enum class AllocationScope : std::uint8_t {
     kContextIndependent,
 };
 
+// Published only by observed successful ordinary device allocators, never by
+// pointer queries, managed/pool allocation or imported/mapped memory paths.
+enum class AllocationProvenance : std::uint8_t {
+    kUnknown,
+    kIndependentDevice,
+};
+
 struct AsyncStreamIdentity {
     CUstream stream = nullptr;
     CUcontext context = nullptr;
@@ -60,6 +68,7 @@ class AllocationRegistry {
         AllocationIdentity identity;
         core::MemoryBytes memory_bytes;
         AsyncStreamIdentity stream;
+        std::uint64_t async_release_generation{};
     };
 
     struct VmmReleaseTicket {
@@ -80,7 +89,12 @@ class AllocationRegistry {
     AllocationRegistry& operator=(const AllocationRegistry&) = delete;
 
     [[nodiscard]] bool record(AllocationIdentity identity, core::MemoryBytes memory_bytes,
-                              AllocationScope scope = AllocationScope::kContextBound);
+                              AllocationScope scope = AllocationScope::kContextBound,
+                              AllocationProvenance provenance = AllocationProvenance::kUnknown);
+    // CPU-only exact-base snapshot, not a lease. Caller must externally order
+    // allocation destruction after logical use. Never invokes native code.
+    [[nodiscard]] bool has_live_independent_allocation(
+        AllocationIdentity identity, core::MemoryBytes required_bytes) const noexcept;
     [[nodiscard]] bool record_vmm(VmmAllocationIdentity identity, core::MemoryBytes memory_bytes);
     [[nodiscard]] bool retain_vmm_handle(CUmemGenericAllocationHandle handle) noexcept;
 
@@ -100,12 +114,28 @@ class AllocationRegistry {
     [[nodiscard]] bool complete_release(const ReleaseTicket& ticket);
     [[nodiscard]] bool complete_vmm_release(const VmmReleaseTicket& ticket) noexcept;
     [[nodiscard]] bool commit_async_release(const ReleaseTicket& ticket) noexcept;
+    // CPU metadata only. A cooperative release cannot finalize from an original
+    // stream fence until its exact queued free supplies physical completion.
+    [[nodiscard]] bool prepare_cooperative_release(const ReleaseTicket& ticket) noexcept;
+    [[nodiscard]] bool confirm_cooperative_release(const ReleaseTicket& ticket) noexcept;
     void cancel_release(const ReleaseTicket& ticket) noexcept;
     void cancel_vmm_release(const VmmReleaseTicket& ticket) noexcept;
     [[nodiscard]] bool detach_async_releases_for_stream(const AsyncStreamIdentity& stream) noexcept;
 
     [[nodiscard]] std::optional<std::vector<DeviceReleaseSummary>>
     complete_async_releases_for_stream_by_device(const AsyncStreamIdentity& stream) noexcept;
+    // Capture before original completion issue. CPU-only, owns no allocation.
+    [[nodiscard]] std::optional<std::vector<ReleaseTicket>> submitted_async_releases(
+        bool should_include_detached_streams = false) const noexcept;
+    // Exact pre-issue generations only; later commits cannot inherit old proof.
+    [[nodiscard]] std::optional<std::vector<DeviceReleaseSummary>>
+    complete_submitted_async_releases(std::span<const ReleaseTicket> submitted,
+                                      const AsyncStreamIdentity& stream) noexcept;
+    // Context completion covers every release-stream namespace, including
+    // detached streams and foreign PTDS callers, never a later generation.
+    [[nodiscard]] std::optional<std::vector<DeviceReleaseSummary>>
+    complete_submitted_context_releases(std::span<const ReleaseTicket> submitted,
+                                        CUcontext context) noexcept;
     [[nodiscard]] core::MemoryBytes complete_async_releases_for_context(CUcontext context,
                                                                         CUdevice device) noexcept;
     [[nodiscard]] std::optional<std::vector<DeviceReleaseSummary>>
@@ -126,12 +156,22 @@ class AllocationRegistry {
     struct AllocationRecord {
         core::MemoryBytes memory_bytes;
         AllocationScope scope = AllocationScope::kContextBound;
+        AllocationProvenance provenance = AllocationProvenance::kUnknown;
         bool is_releasing = false;
         bool is_async_release = false;
         bool is_async_release_submitted = false;
         bool is_async_release_stream_detached = false;
+        bool is_cooperative_release{};
+        bool is_cooperative_release_complete{};
+        std::uint64_t async_release_generation{};
         AsyncStreamIdentity pending_stream;
     };
+    [[nodiscard]] static bool matches_async_release(const AllocationRecord& record,
+                                                    const ReleaseTicket& ticket) noexcept;
+    [[nodiscard]] static bool can_complete_async_release(const AllocationRecord& record) noexcept;
+    [[nodiscard]] std::optional<std::vector<DeviceReleaseSummary>> complete_submitted_releases(
+        std::span<const ReleaseTicket> submitted, const AsyncStreamIdentity* stream,
+        CUcontext context) noexcept;
 
     struct VmmAllocationRecord {
         core::MemoryBytes memory_bytes;
@@ -146,6 +186,7 @@ class AllocationRegistry {
     mutable std::unordered_map<CUmemGenericAllocationHandle, VmmAllocationRecord> vmm_records_;
     // Health must remain observable even when acquiring the registry mutex fails.
     mutable std::atomic<bool> is_accounting_degraded_{false};
+    std::uint64_t next_async_release_generation_{1};
     mutable pid_t process_id_ = 0;
 };
 

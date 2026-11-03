@@ -1,6 +1,7 @@
 #include "internal/allocation_registry.h"
 
 #include <cstdlib>
+#include <array>
 #include <iostream>
 #include <string_view>
 #include <sys/wait.h>
@@ -10,6 +11,7 @@
 namespace {
 
 using glimmer::interceptor::AllocationIdentity;
+using glimmer::interceptor::AllocationProvenance;
 using glimmer::interceptor::AllocationRegistry;
 using glimmer::interceptor::AllocationScope;
 using glimmer::interceptor::AsyncStreamIdentity;
@@ -22,6 +24,34 @@ bool expect(bool condition, std::string_view message) {
 
     std::cerr << message << '\n';
     return false;
+}
+
+bool test_independent_allocation_provenance() {
+    AllocationRegistry registry;
+    const AllocationIdentity key{0x1000, reinterpret_cast<CUcontext>(0x3000), 0};
+    bool passed = expect(registry.record(key, 128, AllocationScope::kContextBound,
+                                         AllocationProvenance::kIndependentDevice),
+                         "ordinary record failed");
+    passed &= expect(registry.has_live_independent_allocation(key, 128) &&
+                         registry.has_live_independent_allocation(key, 1) &&
+                         !registry.has_live_independent_allocation(key, 0) &&
+                         !registry.has_live_independent_allocation(key, 129),
+                     "exact allocation extent not enforced");
+    passed &= expect(!registry.has_live_independent_allocation({0x1001, key.context, 0}, 1) &&
+                         !registry.has_live_independent_allocation({0x1000, nullptr, 0}, 1) &&
+                         !registry.has_live_independent_allocation({0x1000, key.context, 1}, 1),
+                     "allocation identity not enforced");
+    const auto summaries = registry.erase_context_by_device(key.context);
+    passed &=
+        expect(summaries && summaries->size() == 1 && summaries->front().memory_bytes == 128 &&
+                   !registry.has_live_independent_allocation(key, 1),
+               "context retirement must preserve accounting and remove provenance");
+    const AllocationIdentity wrapped{~CUdeviceptr{0} - 15, key.context, 0};
+    passed &= expect(registry.record(wrapped, 32, AllocationScope::kContextBound,
+                                     AllocationProvenance::kIndependentDevice) &&
+                         !registry.has_live_independent_allocation(wrapped, 1),
+                     "wrapped recorded allocation cannot establish provenance");
+    return passed;
 }
 
 bool test_registry_reinitializes_after_fork() {
@@ -56,6 +86,309 @@ bool test_registry_reinitializes_after_fork() {
                   "forked allocation registry retained parent metadata");
 }
 
+bool test_submitted_context_snapshots() {
+    AllocationRegistry registry;
+    const auto context = reinterpret_cast<CUcontext>(0x8000);
+    const auto foreign = reinterpret_cast<CUcontext>(0x8100);
+    const AsyncStreamIdentity legacy{.context = context};
+    const AsyncStreamIdentity detached{.stream = reinterpret_cast<CUstream>(0x9000),
+                                       .context = context};
+    std::thread other([] {});
+    const AsyncStreamIdentity thread_stream{
+        .context = context, .per_thread_default_stream = true, .thread_id = other.get_id()};
+    other.join();
+    const AsyncStreamIdentity foreign_stream{.context = foreign};
+    const AllocationIdentity native{0x100, context, 0}, cooperative{0x200, context, 0},
+        detached_key{0x300, context, 1}, foreign_allocation{0x400, foreign, 1},
+        late{0x500, context, 0}, foreign_release{0x600, foreign, 0};
+    for (const auto& [key, bytes] :
+         std::array{std::pair{native, 16U}, std::pair{cooperative, 32U},
+                    std::pair{detached_key, 64U}, std::pair{foreign_allocation, 128U},
+                    std::pair{late, 256U}, std::pair{foreign_release, 512U}}) {
+        if (!registry.record(key, bytes, AllocationScope::kContextIndependent)) {
+            return false;
+        }
+    }
+    const auto first = registry.begin_async_release(native, legacy).second;
+    const auto second = registry.begin_async_release(cooperative, legacy).second;
+    const auto third = registry.begin_async_release(detached_key, detached).second;
+    const auto fourth = registry.begin_async_release(foreign_allocation, thread_stream).second;
+    const auto fifth = registry.begin_async_release(late, legacy).second;
+    const auto sixth = registry.begin_async_release(foreign_release, foreign_stream).second;
+    if (!first || !second || !third || !fourth || !fifth || !sixth ||
+        !registry.prepare_cooperative_release(*second) ||
+        !registry.prepare_cooperative_release(*third)) {
+        return false;
+    }
+    for (const auto& ticket : {*first, *second, *third, *fourth, *sixth}) {
+        if (!registry.commit_async_release(ticket)) {
+            return false;
+        }
+    }
+    if (!registry.detach_async_releases_for_stream(detached)) {
+        return false;
+    }
+    const auto snapshot = registry.submitted_async_releases(true);
+    const auto stream_snapshot = registry.submitted_async_releases();
+    if (!snapshot || snapshot->size() != 5 || !stream_snapshot || stream_snapshot->size() != 4 ||
+        !registry.commit_async_release(*fifth)) {
+        return false;
+    }
+    const auto has_bytes = [](const auto& result, std::array<glimmer::core::MemoryBytes, 2> bytes) {
+        if (!result) {
+            return false;
+        }
+        for (const auto& summary : *result) {
+            if (summary.device < 0 || summary.device > 1 ||
+                bytes[static_cast<std::size_t>(summary.device)] != summary.memory_bytes) {
+                return false;
+            }
+            bytes[static_cast<std::size_t>(summary.device)] = 0;
+        }
+        return bytes == std::array<glimmer::core::MemoryBytes, 2>{};
+    };
+    bool passed = expect(
+        has_bytes(registry.complete_submitted_context_releases(*snapshot, foreign), {512, 0}) &&
+            has_bytes(registry.complete_submitted_context_releases(*snapshot, context), {16, 128}),
+        "context proof uses release context, all PTDS callers and detached ownership, not late or "
+        "unconfirmed frees");
+    passed &= expect(
+        registry.confirm_cooperative_release(*second) &&
+            registry.confirm_cooperative_release(*third) &&
+            has_bytes(registry.complete_submitted_context_releases(*snapshot, context), {32, 64}),
+        "captured and detached context frees require exact physical confirmation");
+    if (!registry.record(native, 16)) {
+        return false;
+    }
+    const auto reused = registry.begin_async_release(native, legacy).second;
+    if (!reused || !registry.commit_async_release(*reused)) {
+        return false;
+    }
+    passed &= expect(
+        has_bytes(registry.complete_submitted_context_releases(*snapshot, context), {0, 0}) &&
+            !registry.complete_submitted_context_releases(*snapshot, nullptr) &&
+            !registry.is_accounting_degraded(),
+        "stale context snapshot and missing context retire no ownership");
+    const auto fresh = registry.submitted_async_releases(true);
+    passed &= expect(
+        fresh && has_bytes(registry.complete_submitted_context_releases(*fresh, context), {272, 0}),
+        "fresh context proof retires exact reused and late generations once");
+
+    AllocationRegistry duplicate;
+    if (!duplicate.record(native, 16)) {
+        return false;
+    }
+    const auto ticket = duplicate.begin_async_release(native, legacy).second;
+    if (!ticket || !duplicate.commit_async_release(*ticket)) {
+        return false;
+    }
+    const std::array duplicated{*ticket, *ticket};
+    passed &= expect(
+        !duplicate.complete_submitted_context_releases(duplicated, context) &&
+            duplicate.is_accounting_degraded() &&
+            duplicate.begin_release(native).first == AllocationRegistry::ReleaseStatus::kInProgress,
+        "duplicate context proof fails closed before erasing any allocation");
+    return passed;
+}
+
+bool test_submitted_release_snapshots() {
+    AllocationRegistry registry;
+    const auto context = reinterpret_cast<CUcontext>(0x8000);
+    const AsyncStreamIdentity stream{.stream = reinterpret_cast<CUstream>(0x9000),
+                                     .context = context};
+    const AllocationIdentity cooperative{0x100, context, 0};
+    const AllocationIdentity native{0x200, context, 0};
+    const AllocationIdentity late{0x300, context, 0};
+    for (const auto identity : {cooperative, native, late}) {
+        if (!registry.record(identity, identity.device_pointer)) {
+            return false;
+        }
+    }
+    const auto first = registry.begin_async_release(cooperative, stream).second;
+    const auto second = registry.begin_async_release(native, stream).second;
+    const auto third = registry.begin_async_release(late, stream).second;
+    if (!first || !second || !third || !registry.prepare_cooperative_release(*first) ||
+        !registry.commit_async_release(*first) || !registry.commit_async_release(*second)) {
+        return false;
+    }
+    const auto snapshot = registry.submitted_async_releases();
+    if (!snapshot || snapshot->size() != 2 || !registry.commit_async_release(*third)) {
+        return false;
+    }
+    const auto has_bytes = [](const auto& result, glimmer::core::MemoryBytes bytes) {
+        return result && (bytes ? result->size() == 1 && result->front().memory_bytes == bytes
+                                : result->empty());
+    };
+    bool passed = expect(has_bytes(registry.complete_submitted_async_releases(*snapshot, stream),
+                                   native.device_pointer),
+                         "snapshot excludes unconfirmed physical free and late submission");
+    passed &= expect(registry.confirm_cooperative_release(*first) &&
+                         has_bytes(registry.complete_submitted_async_releases(*snapshot, stream),
+                                   cooperative.device_pointer),
+                     "captured cooperative release retires only after exact physical proof");
+    if (!registry.record(native, native.device_pointer)) {
+        return false;
+    }
+    const auto reused = registry.begin_async_release(native, stream).second;
+    if (!reused || !registry.commit_async_release(*reused)) {
+        return false;
+    }
+    passed &= expect(has_bytes(registry.complete_submitted_async_releases(*snapshot, stream), 0),
+                     "old snapshot cannot retire reused allocation or later release generation");
+    const auto fresh = registry.submitted_async_releases();
+    if (!fresh) {
+        return false;
+    }
+    passed &= expect(has_bytes(registry.complete_submitted_async_releases(*fresh, stream),
+                               native.device_pointer + late.device_pointer),
+                     "fresh proof retires exactly its matching submitted generations");
+    const AllocationIdentity detached{0x400, context, 0};
+    if (!registry.record(detached, 16)) {
+        return false;
+    }
+    const auto detached_ticket = registry.begin_async_release(detached, stream).second;
+    if (!detached_ticket || !registry.commit_async_release(*detached_ticket)) {
+        return false;
+    }
+    const auto before_detach = registry.submitted_async_releases();
+    passed &=
+        expect(before_detach && registry.detach_async_releases_for_stream(stream) &&
+                   has_bytes(registry.complete_submitted_async_releases(*before_detach, stream), 0),
+               "detached release cannot inherit proof through an old stream snapshot");
+    passed &= expect(has_bytes(registry.erase_context_by_device(context), 16),
+                     "only checked context retirement can erase detached ownership");
+
+    const AsyncStreamIdentity legacy{.context = context};
+    AsyncStreamIdentity per_thread{.context = context,
+                                   .per_thread_default_stream = true,
+                                   .thread_id = std::this_thread::get_id()};
+    if (!registry.record(cooperative, 16) || !registry.record(native, 32)) {
+        return false;
+    }
+    const auto legacy_ticket = registry.begin_async_release(cooperative, legacy).second;
+    const auto thread_ticket = registry.begin_async_release(native, per_thread).second;
+    if (!legacy_ticket || !thread_ticket || !registry.commit_async_release(*legacy_ticket) ||
+        !registry.commit_async_release(*thread_ticket)) {
+        return false;
+    }
+    const auto defaults = registry.submitted_async_releases();
+    if (!defaults) {
+        return false;
+    }
+    passed &= expect(has_bytes(registry.complete_submitted_async_releases(*defaults, legacy), 16),
+                     "legacy completion does not retire the caller PTDS namespace");
+    const auto owner_thread = per_thread.thread_id;
+    std::thread other([] {});
+    per_thread.thread_id = other.get_id();
+    other.join();
+    passed &=
+        expect(has_bytes(registry.complete_submitted_async_releases(*defaults, per_thread), 0),
+               "another caller cannot retire a PTDS ticket");
+    per_thread.thread_id = owner_thread;
+    passed &=
+        expect(has_bytes(registry.complete_submitted_async_releases(*defaults, per_thread), 32),
+               "exact PTDS namespace proof retires its captured ticket once");
+
+    AllocationRegistry duplicate;
+    if (!duplicate.record(native, 32)) {
+        return false;
+    }
+    const auto duplicate_ticket = duplicate.begin_async_release(native, stream).second;
+    if (!duplicate_ticket || !duplicate.commit_async_release(*duplicate_ticket)) {
+        return false;
+    }
+    const std::array duplicated{*duplicate_ticket, *duplicate_ticket};
+    passed &= expect(
+        !duplicate.complete_submitted_async_releases(duplicated, stream) &&
+            duplicate.is_accounting_degraded() &&
+            duplicate.begin_release(native).first == AllocationRegistry::ReleaseStatus::kInProgress,
+        "duplicate snapshot proof fails accounting without erasing ownership");
+    return passed;
+}
+
+}  // namespace
+
+namespace {
+bool test_cooperative_release_proof() {
+    AllocationRegistry registry;
+    const AllocationIdentity identity{
+        .device_pointer = 0x9000, .context = reinterpret_cast<CUcontext>(0x3000), .device = 0};
+    const AsyncStreamIdentity stream{.stream = reinterpret_cast<CUstream>(0x4000),
+                                     .context = identity.context};
+    bool passed = true;
+    for (bool should_confirm_first : {false, true}) {
+        passed &= expect(registry.record(identity, 32), "record cooperative allocation");
+        const auto [status, ticket] = registry.begin_async_release(identity, stream);
+        if (!expect(status == AllocationRegistry::ReleaseStatus::kStarted && ticket.has_value(),
+                    "start generation-bound cooperative release")) {
+            return false;
+        }
+        passed &= expect(!registry.confirm_cooperative_release(*ticket) &&
+                             registry.prepare_cooperative_release(*ticket) &&
+                             !registry.prepare_cooperative_release(*ticket),
+                         "only one prepared cooperative ticket permits completion proof");
+        auto stale = *ticket;
+        ++stale.async_release_generation;
+        passed &= expect(
+            !registry.confirm_cooperative_release(stale) && !registry.commit_async_release(stale),
+            "wrong generation cannot confirm or commit a release");
+        auto wrong_stream = *ticket;
+        wrong_stream.stream.stream = reinterpret_cast<CUstream>(0x5000);
+        passed &= expect(!registry.confirm_cooperative_release(wrong_stream),
+                         "wrong stream cannot supply another release's proof");
+        if (should_confirm_first) {
+            passed &= expect(registry.confirm_cooperative_release(*ticket),
+                             "physical confirmation may precede Runtime return/commit");
+        }
+        passed &=
+            expect(registry.commit_async_release(*ticket), "commit accepted cooperative free");
+        if (!should_confirm_first) {
+            const auto premature_stream =
+                registry.complete_async_releases_for_stream_by_device(stream);
+            const auto premature_context =
+                registry.complete_async_releases_for_context_by_device(identity.context);
+            passed &=
+                expect(premature_stream && premature_stream->empty() && premature_context &&
+                           premature_context->empty() &&
+                           registry.complete_async_releases_for_context(identity.context, 0) == 0,
+                       "original stream/context completion cannot release unissued private free");
+            passed &=
+                expect(registry.confirm_cooperative_release(*ticket), "confirm actual queued free");
+        }
+        passed &= expect(!registry.confirm_cooperative_release(*ticket),
+                         "physical proof is consumed once");
+        const auto completed = registry.complete_async_releases_for_stream_by_device(stream);
+        passed &=
+            expect(completed && completed->size() == 1 && completed->front().memory_bytes == 32,
+                   "only submitted plus physically confirmed release returns bytes once");
+        passed &= expect(!registry.confirm_cooperative_release(*ticket),
+                         "erased ticket cannot be confirmed again");
+    }
+    passed &= expect(registry.record(identity, 32), "record cancellable allocation");
+    const auto first = registry.begin_async_release(identity, stream).second;
+    if (!first) {
+        return false;
+    }
+    passed &= expect(registry.prepare_cooperative_release(*first), "prepare cancellable release");
+    registry.cancel_release(*first);
+    const auto second = registry.begin_async_release(identity, stream).second;
+    if (!second) {
+        return false;
+    }
+    passed &= expect(first->async_release_generation != second->async_release_generation &&
+                         !registry.confirm_cooperative_release(*first) &&
+                         !registry.commit_async_release(*first),
+                     "cancelled ticket cannot affect a new release of the same allocation");
+    registry.cancel_release(*first);
+    passed &= expect(registry.commit_async_release(*second),
+                     "stale cancel must not cancel the new ticket");
+    const auto ordinary = registry.complete_async_releases_for_context_by_device(identity.context);
+    passed &= expect(ordinary && ordinary->size() == 1 && ordinary->front().memory_bytes == 32,
+                     "cancelled cooperative marker must not change ordinary native completion");
+    passed &= expect(!registry.is_accounting_degraded(),
+                     "invalid proof attempts do not corrupt registry");
+    return passed;
+}
 }  // namespace
 
 int main() {
@@ -428,6 +761,10 @@ int main() {
     }
 
     all_passed &= test_registry_reinitializes_after_fork();
+    all_passed &= test_independent_allocation_provenance();
+    all_passed &= test_cooperative_release_proof();
+    all_passed &= test_submitted_release_snapshots();
+    all_passed &= test_submitted_context_snapshots();
 
     return all_passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }
