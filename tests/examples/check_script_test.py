@@ -491,6 +491,42 @@ with open(os.environ['CHECK_PRESET_LOG'], 'a') as target:
         self.assertEqual(asan[3], "detect_leaks=1:halt_on_error=1")
 
 
+    @unittest.skipUnless(shutil.which("cmake") and shutil.which("ctest"),
+                         "cmake and ctest are required")
+    def test_ctest_default_timeout_is_bounded_and_overridable(self):
+        source = self.root / "timeout source"
+        source.mkdir()
+        (source / "CMakeLists.txt").write_text(f'''
+cmake_minimum_required(VERSION 3.20)
+project(TimeoutFixture LANGUAGES NONE)
+include("{(PROJECT / "cmake/ProjectTesting.cmake").as_posix()}")
+add_test(NAME default_limit COMMAND "${{CMAKE_COMMAND}}" -E sleep 2)
+add_test(NAME explicit_limit COMMAND "${{CMAKE_COMMAND}}" -E sleep 2)
+set_tests_properties(explicit_limit PROPERTIES TIMEOUT 15)
+''')
+        cmake, ctest = shutil.which("cmake"), shutil.which("ctest")
+        for override, expected in (([], 180), (["-DDART_TESTING_TIMEOUT=1"], 1)):
+            build = self.root / f"timeout-{expected}"
+            configured = subprocess.run([cmake, "-S", str(source), "-B", str(build), *override],
+                                       env=self.environment, capture_output=True, text=True, timeout=30)
+            self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+            self.assertIn(f"TimeOut: {expected}\n", (build / "DartConfiguration.tcl").read_text())
+        reconfigured = subprocess.run([cmake, "-S", str(source), "-B", str(self.root / "timeout-1")],
+                                      env=self.environment, capture_output=True, text=True, timeout=30)
+        self.assertEqual(reconfigured.returncode, 0, reconfigured.stdout + reconfigured.stderr)
+        self.assertIn("TimeOut: 1\n", (self.root / "timeout-1/DartConfiguration.tcl").read_text())
+        command = [ctest, "--test-dir", str(self.root / "timeout-1"), "--output-on-failure"]
+        bounded = subprocess.run([*command, "-R", "^default_limit$"], env=self.environment,
+                                 capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(bounded.returncode, 0, bounded.stdout + bounded.stderr)
+        self.assertIn("Timeout", bounded.stdout + bounded.stderr)
+        explicit = subprocess.run([*command, "-R", "^explicit_limit$"], env=self.environment,
+                                  capture_output=True, text=True, timeout=30)
+        self.assertEqual(explicit.returncode, 0, explicit.stdout + explicit.stderr)
+        command_override = subprocess.run([*command, "--timeout", "15", "-R", "^default_limit$"],
+                                          env=self.environment, capture_output=True, text=True, timeout=30)
+        self.assertEqual(command_override.returncode, 0, command_override.stdout + command_override.stderr)
+
     @unittest.skipUnless(shutil.which("cmake") and shutil.which("c++"),
                          "cmake and a C++ compiler are required")
     def test_compile_database_target_preserves_non_symlink_files(self):

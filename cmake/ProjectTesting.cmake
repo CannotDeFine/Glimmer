@@ -1,1 +1,1 @@
-include(CTest)
+include("${CMAKE_CURRENT_LIST_DIR}/CTestDefaults.cmake")
