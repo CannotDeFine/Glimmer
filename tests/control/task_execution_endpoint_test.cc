@@ -30,6 +30,7 @@ struct Resources {
     std::atomic<bool> hold_registration{false};
     std::atomic<bool> registration_entered{false};
     std::atomic<bool> registration_release{false};
+    std::atomic<bool> reject_registration{false};
 };
 
 bool register_resource(void* context, glimmer::core::TaskId) noexcept {
@@ -40,7 +41,7 @@ bool register_resource(void* context, glimmer::core::TaskId) noexcept {
         resources->registration_entered.notify_all();
         resources->registration_release.wait(false);
     }
-    return true;
+    return !resources->reject_registration.load();
 }
 
 void rollback_resource(void* context, glimmer::core::TaskId) noexcept {
@@ -116,6 +117,31 @@ void test_legacy_golden() {
         expect(old_endpoint.handle(line) == new_endpoint->handle(line),
                "new endpoint preserves legacy response bytes");
     }
+}
+
+void test_handoff_preserves_completion_on_registration_failure() {
+    Resources resources;
+    auto service = endpoint(resources);
+    const auto running = exec(*service, "GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE tenant 20 1 1\n");
+    expect(running.kind == TaskExecutionProtocolResponseKind::kExecutionLease,
+           "handoff fixture acquires a real generation");
+    const TaskExecutionIdentity execution{running.task_id, running.generation};
+    const auto prefix = operation("EXEC_COMPLETE_ACQUIRE", execution);
+    const auto request = prefix.substr(0, prefix.size() - 1) + " tenant 20 1 1\n";
+    expect(exec(*service, request, kForeign).kind == TaskExecutionProtocolResponseKind::kError &&
+               resources.registered.load() == 1 && used(*service) == 20,
+           "foreign handoff cannot retire or admit work");
+    resources.reject_registration.store(true);
+    const auto rejected = exec(*service, request);
+    expect(rejected.kind == TaskExecutionProtocolResponseKind::kExecutionHandoff &&
+               rejected.completed_execution.task_id == execution.task_id &&
+               rejected.completed_execution.generation == execution.generation &&
+               rejected.task_id == 0 && rejected.generation == 0 &&
+               resources.registered.load() == 2 && used(*service) == 0,
+           "failed successor registration retains the completed generation acknowledgement");
+    expect(exec(*service, request).kind == TaskExecutionProtocolResponseKind::kError &&
+               resources.registered.load() == 2,
+           "replayed handoff cannot register a successor");
 }
 
 void test_routing_and_ownership() {
@@ -541,6 +567,7 @@ void test_shutdown_waits_for_registration() {
 
 int main() {
     test_legacy_golden();
+    test_handoff_preserves_completion_on_registration_failure();
     test_routing_and_ownership();
     test_native_routing();
     test_unpublished_rollback();
