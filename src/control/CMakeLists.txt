@@ -30,6 +30,7 @@ add_library(glimmer_control
     internal/socket_line_reader.cc
     internal/socket_path.cc
     internal/task_recovery_journal.cc
+    internal/task_recovery_protocol.cc
     launch_gate.cc
     process_memory_quota.cc
     shared_memory_quota.cc
