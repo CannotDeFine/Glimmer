@@ -83,6 +83,14 @@ treated as proof of non-issue. Completion observers are not resource ownership.
 The shared task client uses an authenticated local channel and pins the first
 service incarnation for its logical session. It does not replay a request after
 an uncertain reply or fall back to another transport.
+The separate versioned transport client can select socket, shared memory or
+automatic negotiation. Automatic fallback is restricted to an explicit
+unsupported reply on the same connection before publishing a domain request.
+Shared sessions pin the service incarnation; socket sessions retire after a
+lost exchange because the legacy wire does not identify an incarnation.
+The detailed result distinguishes requests not published from uncertain
+delivery; callers must validate replies and retain uncertain ownership.
+This transport is not yet integrated into the ordinary launch-admission path.
 The cooperative launch gate uses the versioned execution service for remote
 admission. It serializes requests and permanently quarantines the gate if a
 reply is lost, inconsistent, or cannot establish a safe native outcome. A
