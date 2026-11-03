@@ -479,6 +479,255 @@ void test_concurrent_claim_is_single_owner() {
            "failed concurrent lease should release its reservation");
 }
 
+void test_cooperative_suspend_and_priority_resume() {
+    Scheduler scheduler(100, SchedulerOptions{.max_queued_tasks = 1,
+                                              .scheduling_policy = SchedulingPolicy::kPriority});
+    const auto low =
+        scheduler.submit(TaskSpec{.tenant_id = "low", .memory_bytes = 60, .priority = 1});
+    expect(low.accepted(), "low-priority work should submit");
+    const auto first = scheduler.dispatch_task(low.task_id);
+    if (!first) {
+        expect(false, "low-priority work should dispatch");
+        return;
+    }
+    expect(!scheduler.retreat_requested(low.task_id),
+           "running work should not retreat without higher priority queued work");
+    const auto high =
+        scheduler.submit(TaskSpec{.tenant_id = "high", .memory_bytes = 30, .priority = 9});
+    expect(high.accepted() && scheduler.retreat_requested(low.task_id),
+           "higher-priority arrival must request cooperative retreat");
+    expect(!scheduler.dispatch_task(high.task_id).has_value(),
+           "a retreat request must not release capacity before the backend stops");
+    expect(scheduler.suspend(low.task_id) && !scheduler.suspend(low.task_id),
+           "physical completion may suspend exactly once, even with a full submission queue");
+    expect(scheduler.running_task_count() == 0 && scheduler.queued_task_count() == 2 &&
+               scheduler.usage().allocated_bytes == 60 && scheduler.usage().reserved_bytes == 30,
+           "suspension must retain committed memory while returning only the execution slot");
+    expect(!scheduler.dispatch_task(low.task_id).has_value() &&
+               scheduler.dispatch_task(high.task_id).has_value(),
+           "priority must run high work before resuming the continuation");
+    expect(scheduler.complete(high.task_id), "high-priority task must complete");
+    for (unsigned int iteration = 0; iteration < 4; ++iteration) {
+        const auto resumed = scheduler.dispatch_task(low.task_id);
+        expect(resumed.has_value() && resumed->dispatch_sequence > first->dispatch_sequence &&
+                   scheduler.usage().allocated_bytes == 60 && scheduler.usage().reserved_bytes == 0,
+               "resumption must obtain a fresh dispatch generation without recommitting memory");
+        expect(scheduler.suspend(low.task_id), "repeated continuation must suspend cleanly");
+    }
+    expect(scheduler.cancel_queued(low.task_id) && !scheduler.cancel_queued(low.task_id) &&
+               scheduler.usage().used_bytes() == 0,
+           "cancelling a stopped continuation must release committed memory exactly once");
+    expect(!scheduler.retreat_requested(low.task_id) && !scheduler.suspend(999),
+           "terminal and unknown tasks must not participate in retreat");
+    Scheduler fifo(100, SchedulerOptions{.scheduling_policy = SchedulingPolicy::kFifo});
+    const auto id = submit(fifo, "fifo", 10);
+    expect(fifo.dispatch_task(id).has_value() && fifo.suspend(id) &&
+               fifo.dispatch_task(id).has_value() && fifo.complete(id) &&
+               fifo.usage().used_bytes() == 0,
+           "non-priority continuation must preserve completion accounting");
+}
+
+void test_cooperative_continuations_across_policies() {
+    for (const auto policy :
+         {SchedulingPolicy::kFifo, SchedulingPolicy::kPriority,
+          SchedulingPolicy::kWeightedRoundRobin, SchedulingPolicy::kDeficitRoundRobin}) {
+        Scheduler scheduler(100, SchedulerOptions{.scheduling_policy = policy});
+        const auto task = scheduler.submit(TaskSpec{
+            .tenant_id = "continuation", .memory_bytes = 60, .weight = 2, .work_units = 3});
+        expect(task.accepted(), "continuation task should submit");
+        auto claim = [&] {
+            std::optional<glimmer::core::TaskSnapshot> result;
+            for (unsigned int attempt = 0; attempt < 5 && !result; ++attempt)
+                result = scheduler.dispatch_task(task.task_id);
+            return result;
+        };
+        const auto first = claim();
+        if (!first) {
+            expect(false, "task-specific claims must progress under every policy");
+            return;
+        }
+        expect(scheduler.suspend(task.task_id), "running task should suspend after physical stop");
+        const auto resumed = claim();
+        expect(resumed.has_value() && resumed->dispatch_sequence > first->dispatch_sequence &&
+                   scheduler.usage().allocated_bytes == 60,
+               "every policy must resume with a fresh generation and retain quota once");
+        expect(scheduler.complete(task.task_id) && scheduler.usage().used_bytes() == 0,
+               "resumed completion must release quota exactly once");
+    }
+}
+
+void test_cooperative_terminal_races() {
+    for (unsigned int iteration = 0; iteration < 64; ++iteration) {
+        Scheduler scheduler(100);
+        const auto task = submit(scheduler, "race", 20);
+        expect(scheduler.dispatch_task(task).has_value(), "race fixture should start");
+        std::atomic<bool> start{false};
+        bool suspended = false;
+        bool completed = false;
+        std::thread first([&] {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            suspended = scheduler.suspend(task);
+        });
+        std::thread second([&] {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            completed = scheduler.complete(task);
+        });
+        start.store(true, std::memory_order_release);
+        first.join();
+        second.join();
+        expect(suspended != completed, "suspend and completion cannot both win the same run");
+        if (suspended)
+            expect(scheduler.cancel_queued(task), "stopped continuation can be cancelled");
+        expect(scheduler.usage().used_bytes() == 0 && scheduler.running_task_count() == 0 &&
+                   scheduler.queued_task_count() == 0,
+               "terminal race leaves no duplicate quota or execution slot");
+
+        Scheduler double_suspend(100);
+        const auto duplicate = submit(double_suspend, "duplicate", 20);
+        expect(double_suspend.dispatch_task(duplicate).has_value(),
+               "double suspend fixture starts");
+        std::atomic<bool> duplicate_start{false};
+        bool first_suspended = false;
+        bool second_suspended = false;
+        std::thread third([&] {
+            while (!duplicate_start.load(std::memory_order_acquire)) std::this_thread::yield();
+            first_suspended = double_suspend.suspend(duplicate);
+        });
+        std::thread fourth([&] {
+            while (!duplicate_start.load(std::memory_order_acquire)) std::this_thread::yield();
+            second_suspended = double_suspend.suspend(duplicate);
+        });
+        duplicate_start.store(true, std::memory_order_release);
+        third.join();
+        fourth.join();
+        expect(first_suspended != second_suspended && double_suspend.cancel_queued(duplicate) &&
+                   double_suspend.usage().used_bytes() == 0,
+               "concurrent suspension queues once and releases retained quota once");
+
+        Scheduler cancel_race(100);
+        const auto cancellable = submit(cancel_race, "cancel", 20);
+        expect(cancel_race.dispatch_task(cancellable).has_value(), "cancel race fixture starts");
+        std::atomic<bool> cancel_start{false};
+        bool cancelled = false;
+        std::thread fifth([&] {
+            while (!cancel_start.load(std::memory_order_acquire)) std::this_thread::yield();
+            static_cast<void>(cancel_race.suspend(cancellable));
+        });
+        std::thread sixth([&] {
+            while (!cancel_start.load(std::memory_order_acquire)) std::this_thread::yield();
+            cancelled = cancel_race.cancel(cancellable);
+        });
+        cancel_start.store(true, std::memory_order_release);
+        fifth.join();
+        sixth.join();
+        expect(cancelled && cancel_race.usage().used_bytes() == 0 &&
+                   cancel_race.running_task_count() == 0 && cancel_race.queued_task_count() == 0,
+               "cancel and suspension race must release quota and leave no queued work");
+    }
+}
+
+void test_pending_selection_preserves_history_and_continuations() {
+    for (const auto policy : {SchedulingPolicy::kFifo, SchedulingPolicy::kPriority}) {
+        Scheduler scheduler(
+            100, SchedulerOptions{
+                     .max_running_tasks = 2, .max_queued_tasks = 2, .scheduling_policy = policy});
+        TaskId first_history = 0;
+        for (unsigned int index = 0; index < 128; ++index) {
+            const auto task = scheduler.submit(
+                TaskSpec{.tenant_id = "history", .memory_bytes = 1, .priority = 100});
+            expect(task.accepted(), "historical task should submit");
+            if (index == 0) {
+                first_history = task.task_id;
+            }
+            if (index % 3 == 0) {
+                expect(scheduler.cancel_queued(task.task_id),
+                       "history cancellation should release");
+            } else {
+                expect(scheduler.dispatch_task(task.task_id).has_value(),
+                       "history task should dispatch");
+                expect(index % 3 == 1 ? scheduler.complete(task.task_id)
+                                      : scheduler.fail(task.task_id),
+                       "history terminal transition should release");
+            }
+        }
+        const auto cancelled =
+            scheduler.submit(TaskSpec{.tenant_id = "empty", .memory_bytes = 1, .priority = 200});
+        expect(cancelled.accepted() && scheduler.cancel_queued(cancelled.task_id) &&
+                   scheduler.forget(cancelled.task_id),
+               "cancelled forgotten candidate must leave no queue entry");
+
+        const auto first =
+            scheduler.submit(TaskSpec{.tenant_id = "active", .memory_bytes = 10, .priority = 7});
+        expect(first.accepted(), "first continuation should submit");
+        const auto first_lease = scheduler.dispatch_task(first.task_id);
+        if (!first_lease) {
+            expect(false, "first continuation should run");
+            return;
+        }
+        const auto first_sequence = first_lease->dispatch_sequence;
+        const auto second =
+            scheduler.submit(TaskSpec{.tenant_id = "active", .memory_bytes = 10, .priority = 7});
+        expect(second.accepted(), "second continuation should submit");
+        const auto second_lease = scheduler.dispatch_task(second.task_id);
+        if (!second_lease) {
+            expect(false, "second continuation should run");
+            return;
+        }
+        const auto second_sequence = second_lease->dispatch_sequence;
+        const auto third =
+            scheduler.submit(TaskSpec{.tenant_id = "active", .memory_bytes = 10, .priority = 7});
+        const auto high =
+            scheduler.submit(TaskSpec{.tenant_id = "active", .memory_bytes = 10, .priority = 9});
+        expect(third.accepted() && high.accepted(), "pending candidates should fill queue");
+        expect(
+            scheduler.retreat_requested(first.task_id) == (policy == SchedulingPolicy::kPriority),
+            "only priority policy should request retreat for actual pending high work");
+        expect(!scheduler.dispatch_task(high.task_id).has_value(),
+               "retreat request must not return occupied physical slots");
+        expect(scheduler.suspend(first.task_id) && scheduler.suspend(second.task_id),
+               "continuations may exceed submission limit and reorder the tenant deque");
+        expect(scheduler.queued_task_count() == 4 && scheduler.usage().allocated_bytes == 20 &&
+                   scheduler.usage().reserved_bytes == 20,
+               "stopped work retains quota while all four candidates remain queued");
+        expect(scheduler.submit(TaskSpec{.tenant_id = "extra", .memory_bytes = 1}).status ==
+                   SubmitStatus::kQueueFull,
+               "continuations must not weaken admission backpressure");
+        const std::vector<TaskId> expected =
+            policy == SchedulingPolicy::kPriority
+                ? std::vector<TaskId>{high.task_id, first.task_id, second.task_id, third.task_id}
+                : std::vector<TaskId>{first.task_id, second.task_id, third.task_id, high.task_id};
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            if (index + 1 < expected.size()) {
+                expect(!scheduler.dispatch_task(expected[index + 1]).has_value(),
+                       "task-specific peek must reject a candidate behind the policy head");
+            }
+            const auto lease = index % 2 == 0 ? scheduler.dispatch_task(expected[index])
+                                              : scheduler.dispatch_next();
+            if (!lease) {
+                expect(false, "selected candidate should dispatch");
+                return;
+            }
+            expect(lease->task_id == expected[index],
+                   "selection must preserve global ID ties despite tenant deque order");
+            if (expected[index] == first.task_id || expected[index] == second.task_id) {
+                const auto previous =
+                    expected[index] == first.task_id ? first_sequence : second_sequence;
+                expect(lease->dispatch_sequence > previous,
+                       "resumed continuation must obtain a fresh generation");
+            }
+            expect(scheduler.complete(expected[index]), "selected candidate should complete");
+        }
+        expect_state(scheduler, first_history, TaskState::kCancelled,
+                     "selection must retain original historical queries");
+        expect(!scheduler.forget(999999) && !scheduler.dispatch_next().has_value(),
+               "unknown forget and empty dispatch must not manufacture candidates");
+        const auto stats = scheduler.stats();
+        expect(stats.total_task_count == 132 && stats.queued_task_count == 0 &&
+                   stats.running_task_count == 0 && stats.quota.used_bytes() == 0,
+               "historical records and terminal quota must reconcile");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -500,5 +749,9 @@ int main() {
     test_input_validation_and_tenant_weight_consistency();
     test_scheduler_mode_configuration();
     test_concurrent_claim_is_single_owner();
+    test_cooperative_suspend_and_priority_resume();
+    test_cooperative_continuations_across_policies();
+    test_cooperative_terminal_races();
+    test_pending_selection_preserves_history_and_continuations();
     return EXIT_SUCCESS;
 }

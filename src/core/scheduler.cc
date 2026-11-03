@@ -188,7 +188,15 @@ std::optional<TaskSnapshot> Scheduler::dispatch_task(TaskId task_id) {
         return std::nullopt;
     }
     const auto next_task = peek_next_task_locked();
-    if (!next_task.has_value() || next_task.value() != task_id) {
+    if (!next_task.has_value()) {
+        // A DRR round can accrue quantum without selecting any task. Commit
+        // that progress so repeated task-specific claims cannot stall forever.
+        if (scheduling_policy == SchedulingPolicy::kDeficitRoundRobin) {
+            static_cast<void>(select_deficit_round_robin_task_locked());
+        }
+        return std::nullopt;
+    }
+    if (next_task.value() != task_id) {
         return std::nullopt;
     }
     const auto selected_task = select_next_task_locked();
@@ -208,6 +216,9 @@ std::optional<TaskSnapshot> Scheduler::dispatch_selected_task_locked(TaskId sele
         task_iterator->second.state = TaskState::kFailed;
         return std::nullopt;
     }
+    // Only a previously dispatched task can return to the queue. Its quota
+    // was committed on that first dispatch and remains owned while suspended.
+    const bool is_continuation = task_iterator->second.dispatch_sequence != 0;
 
     TaskSnapshot dispatched_snapshot;
     try {
@@ -218,7 +229,14 @@ std::optional<TaskSnapshot> Scheduler::dispatch_selected_task_locked(TaskId sele
         dispatched_snapshot = snapshot_locked(selected_task_id, task_iterator->second);
         dispatched_snapshot.state = TaskState::kRunning;
     } catch (...) {
-        reservation->cancel();
+        if (is_continuation) {
+            if (!quota_ledger_.release(task_iterator->second.spec.memory_bytes)) {
+                task_iterator->second.state = TaskState::kFailed;
+                return std::nullopt;
+            }
+        } else {
+            reservation->cancel();
+        }
         task_iterator->second.state = TaskState::kFailed;
         return std::nullopt;
     }
@@ -226,14 +244,21 @@ std::optional<TaskSnapshot> Scheduler::dispatch_selected_task_locked(TaskId sele
     try {
         running_task_ids_.push_back(selected_task_id);
     } catch (...) {
-        reservation->cancel();
+        if (is_continuation) {
+            if (!quota_ledger_.release(task_iterator->second.spec.memory_bytes)) {
+                task_iterator->second.state = TaskState::kFailed;
+                return std::nullopt;
+            }
+        } else {
+            reservation->cancel();
+        }
         task_iterator->second.state = TaskState::kFailed;
         return std::nullopt;
     }
 
     bool committed = false;
     try {
-        committed = reservation.value().commit();
+        committed = is_continuation || reservation.value().commit();
     } catch (...) {
         committed = false;
     }
@@ -257,6 +282,51 @@ std::optional<TaskSnapshot> Scheduler::dispatch_selected_task_locked(TaskId sele
     saturating_add(queue_wait_us, &total_queue_wait_microseconds_);
     max_queue_wait_microseconds_ = std::max(max_queue_wait_microseconds_, queue_wait_us);
     return dispatched_snapshot;
+}
+
+bool Scheduler::suspend(TaskId task_id) {
+    std::scoped_lock lock(mutex_);
+    const auto task_iterator = tasks_.find(task_id);
+    const auto running_iterator =
+        std::find(running_task_ids_.begin(), running_task_ids_.end(), task_id);
+    if (task_iterator == tasks_.end() || task_iterator->second.state != TaskState::kRunning ||
+        task_iterator->second.dispatch_sequence == std::numeric_limits<std::uint64_t>::max() ||
+        running_iterator == running_task_ids_.end()) {
+        return false;
+    }
+    const auto tenant_iterator = tenant_queues_.find(task_iterator->second.spec.tenant_id);
+    if (tenant_iterator == tenant_queues_.end()) {
+        return false;
+    }
+    try {
+        tenant_iterator->second.task_ids.push_front(task_id);
+    } catch (...) {
+        return false;
+    }
+    const auto stopped_at = std::chrono::steady_clock::now();
+    const auto segment = std::chrono::duration_cast<std::chrono::microseconds>(
+        stopped_at - task_iterator->second.running_at);
+    const auto service_us =
+        segment.count() < 0 ? std::uint64_t{0} : static_cast<std::uint64_t>(segment.count());
+    saturating_add(service_us, &total_service_time_microseconds_);
+    max_service_time_microseconds_ = std::max(max_service_time_microseconds_, service_us);
+    task_iterator->second.state = TaskState::kQueued;
+    task_iterator->second.queued_at = stopped_at;
+    running_task_ids_.erase(running_iterator);
+    ++queued_task_count_;
+    return true;
+}
+
+bool Scheduler::retreat_requested(TaskId task_id) const {
+    std::scoped_lock lock(mutex_);
+    const auto task_iterator = tasks_.find(task_id);
+    if (scheduling_policy != SchedulingPolicy::kPriority || task_iterator == tasks_.end() ||
+        task_iterator->second.dispatch_sequence == std::numeric_limits<std::uint64_t>::max() ||
+        task_iterator->second.state != TaskState::kRunning) {
+        return false;
+    }
+    const auto next = peek_priority_task_locked();
+    return next.has_value() && tasks_.at(*next).spec.priority > task_iterator->second.spec.priority;
 }
 
 bool Scheduler::complete(TaskId task_id) {
@@ -430,14 +500,7 @@ std::optional<TaskId> Scheduler::select_next_task_locked() {
 }
 
 std::optional<TaskId> Scheduler::select_fifo_task_locked() {
-    std::optional<TaskId> selected_task_id;
-    for (const auto& [task_id, task] : tasks_) {
-        if (task.state != TaskState::kQueued ||
-            (selected_task_id.has_value() && task_id >= selected_task_id.value())) {
-            continue;
-        }
-        selected_task_id = task_id;
-    }
+    const auto selected_task_id = peek_fifo_task_locked();
     if (!selected_task_id.has_value()) {
         return std::nullopt;
     }
@@ -541,18 +604,7 @@ std::optional<TaskId> Scheduler::select_deficit_round_robin_task_locked() {
 }
 
 std::optional<TaskId> Scheduler::select_priority_task_locked() {
-    std::optional<TaskId> selected_task_id;
-    std::uint32_t selected_priority = 0;
-    for (const auto& [task_id, task] : tasks_) {
-        if (task.state != TaskState::kQueued ||
-            (selected_task_id.has_value() &&
-             (task.spec.priority < selected_priority ||
-              (task.spec.priority == selected_priority && task_id > selected_task_id.value())))) {
-            continue;
-        }
-        selected_task_id = task_id;
-        selected_priority = task.spec.priority;
-    }
+    const auto selected_task_id = peek_priority_task_locked();
     if (!selected_task_id.has_value()) {
         return std::nullopt;
     }
@@ -569,16 +621,8 @@ std::optional<TaskId> Scheduler::select_priority_task_locked() {
 
 std::optional<TaskId> Scheduler::peek_next_task_locked() const {
     switch (scheduling_policy) {
-        case SchedulingPolicy::kFifo: {
-            std::optional<TaskId> selected;
-            for (const auto& [task_id, task] : tasks_) {
-                if (task.state == TaskState::kQueued &&
-                    (!selected.has_value() || task_id < selected.value())) {
-                    selected = task_id;
-                }
-            }
-            return selected;
-        }
+        case SchedulingPolicy::kFifo:
+            return peek_fifo_task_locked();
         case SchedulingPolicy::kWeightedRoundRobin:
             return peek_weighted_round_robin_task_locked();
         case SchedulingPolicy::kDeficitRoundRobin:
@@ -587,6 +631,24 @@ std::optional<TaskId> Scheduler::peek_next_task_locked() const {
             return peek_priority_task_locked();
     }
     return std::nullopt;
+}
+
+std::optional<TaskId> Scheduler::peek_fifo_task_locked() const {
+    // Empty tenant entries persist for weight consistency; this avoids scanning
+    // completed tasks but still visits the historical tenant set.
+    std::optional<TaskId> selected_task_id;
+    for (const auto& [tenant_id, queue] : tenant_queues_) {
+        static_cast<void>(tenant_id);
+        for (const TaskId task_id : queue.task_ids) {
+            const auto task_iterator = tasks_.find(task_id);
+            if (task_iterator != tasks_.end() &&
+                task_iterator->second.state == TaskState::kQueued &&
+                (!selected_task_id.has_value() || task_id < selected_task_id.value())) {
+                selected_task_id = task_id;
+            }
+        }
+    }
+    return selected_task_id;
 }
 
 std::optional<TaskId> Scheduler::peek_weighted_round_robin_task_locked() const {
@@ -630,16 +692,6 @@ std::optional<TaskId> Scheduler::peek_deficit_round_robin_task_locked() const {
         return std::nullopt;
     }
     std::size_t cursor = tenant_cursor_;
-    std::vector<std::uint64_t> deficits;
-    try {
-        deficits.reserve(tenant_order_.size());
-        for (const auto& tenant_id : tenant_order_) {
-            const auto iterator = tenant_queues_.find(tenant_id);
-            deficits.push_back(iterator == tenant_queues_.end() ? 0 : iterator->second.deficit);
-        }
-    } catch (...) {
-        return std::nullopt;
-    }
     const std::size_t tenant_count = tenant_order_.size();
     for (std::size_t attempt = 0; attempt < tenant_count; ++attempt) {
         const auto tenant_iterator = tenant_queues_.find(tenant_order_[cursor]);
@@ -651,14 +703,9 @@ std::optional<TaskId> Scheduler::peek_deficit_round_robin_task_locked() const {
                     continue;
                 }
                 const std::uint64_t cost = task_iterator->second.spec.work_units;
-                if (deficits[cursor] >= cost) {
+                if (tenant_iterator->second.deficit >= cost) {
                     return task_id;
                 }
-                const std::uint64_t quantum = tenant_iterator->second.weight;
-                deficits[cursor] =
-                    deficits[cursor] > std::numeric_limits<std::uint64_t>::max() - quantum
-                        ? std::numeric_limits<std::uint64_t>::max()
-                        : deficits[cursor] + quantum;
                 break;
             }
         }
@@ -670,15 +717,23 @@ std::optional<TaskId> Scheduler::peek_deficit_round_robin_task_locked() const {
 std::optional<TaskId> Scheduler::peek_priority_task_locked() const {
     std::optional<TaskId> selected_task_id;
     std::uint32_t selected_priority = 0;
-    for (const auto& [task_id, task] : tasks_) {
-        if (task.state != TaskState::kQueued ||
-            (selected_task_id.has_value() &&
-             (task.spec.priority < selected_priority ||
-              (task.spec.priority == selected_priority && task_id > selected_task_id.value())))) {
-            continue;
+    for (const auto& [tenant_id, queue] : tenant_queues_) {
+        static_cast<void>(tenant_id);
+        for (const TaskId task_id : queue.task_ids) {
+            const auto task_iterator = tasks_.find(task_id);
+            if (task_iterator == tasks_.end() ||
+                task_iterator->second.state != TaskState::kQueued) {
+                continue;
+            }
+            const auto priority = task_iterator->second.spec.priority;
+            if (selected_task_id.has_value() &&
+                (priority < selected_priority ||
+                 (priority == selected_priority && task_id > selected_task_id.value()))) {
+                continue;
+            }
+            selected_task_id = task_id;
+            selected_priority = priority;
         }
-        selected_task_id = task_id;
-        selected_priority = task.spec.priority;
     }
     return selected_task_id;
 }
@@ -720,12 +775,21 @@ bool Scheduler::finish_running_task_locked(TaskId task_id, TaskState terminal_st
 }
 
 bool Scheduler::cancel_queued_task_locked(TaskId task_id, TaskRecord& task) noexcept {
-    if (!task.reservation.has_value() || !task.reservation->is_active()) {
+    if (!task.reservation.has_value()) {
         return false;
     }
-    task.reservation->cancel();
-    if (task.reservation->is_active()) {
-        return false;
+    if (task.dispatch_sequence != 0) {
+        if (!quota_ledger_.release(task.spec.memory_bytes)) {
+            return false;
+        }
+    } else {
+        if (!task.reservation->is_active()) {
+            return false;
+        }
+        task.reservation->cancel();
+        if (task.reservation->is_active()) {
+            return false;
+        }
     }
     task.state = TaskState::kCancelled;
     --queued_task_count_;

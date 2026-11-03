@@ -123,6 +123,14 @@ class Scheduler {
     [[nodiscard]] std::optional<TaskSnapshot> dispatch_next();
     // Dispatches task_id only when it is next under the configured policy.
     [[nodiscard]] std::optional<TaskSnapshot> dispatch_task(TaskId task_id);
+    // Cooperative backends call suspend only after physical execution has
+    // stopped. The task becomes queued again without releasing its memory.
+    // Continuations may exceed the new-submission queue limit; existing work
+    // must not be dropped just because that limit is currently full.
+    [[nodiscard]] bool suspend(TaskId task_id);
+    // Strict-priority policy only. This is a request, never an assertion that
+    // the running backend has stopped or that its slot can be reused.
+    [[nodiscard]] bool retreat_requested(TaskId task_id) const;
     [[nodiscard]] bool complete(TaskId task_id);
     [[nodiscard]] bool fail(TaskId task_id);
     [[nodiscard]] bool cancel(TaskId task_id);
@@ -163,6 +171,7 @@ class Scheduler {
     [[nodiscard]] std::optional<TaskId> select_priority_task_locked();
     [[nodiscard]] bool priority_reservation_blocks_low_dispatch_locked() const;
     [[nodiscard]] std::optional<TaskId> peek_next_task_locked() const;
+    [[nodiscard]] std::optional<TaskId> peek_fifo_task_locked() const;
     [[nodiscard]] std::optional<TaskId> peek_weighted_round_robin_task_locked() const;
     [[nodiscard]] std::optional<TaskId> peek_deficit_round_robin_task_locked() const;
     [[nodiscard]] std::optional<TaskId> peek_priority_task_locked() const;
