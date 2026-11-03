@@ -1,5 +1,7 @@
 add_library(glimmer_control
     execution_protocol.cc
+    execution_socket.cc
+    internal/process_identity.cc
     execution_dnn_legacy_protocol.cc
     execution_dnn_protocol.cc
     execution_dnn_backend_protocol.cc
@@ -35,6 +37,8 @@ target_link_libraries(glimmer_control
     PUBLIC
         Glimmer::core
         Threads::Threads
+    PRIVATE
+        spdlog::spdlog
 )
 
 glimmer_enable_clang_tidy(glimmer_control)

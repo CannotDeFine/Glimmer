@@ -1,3 +1,31 @@
+add_executable(glimmer_control_execution_socket_test control/execution_socket_test.cc)
+target_include_directories(glimmer_control_execution_socket_test PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
+target_link_libraries(glimmer_control_execution_socket_test PRIVATE Glimmer::control)
+target_link_options(glimmer_control_execution_socket_test PRIVATE
+    "LINKER:--wrap=send" "LINKER:--wrap=sendmsg" "LINKER:--wrap=recvmsg")
+glimmer_enable_clang_tidy(glimmer_control_execution_socket_test)
+add_test(NAME glimmer_control_execution_socket_test COMMAND glimmer_control_execution_socket_test)
+set_tests_properties(glimmer_control_execution_socket_test PROPERTIES TIMEOUT 30)
+add_test(NAME glimmer_control_execution_preparation_deadline_test
+    COMMAND glimmer_control_execution_socket_test --preparation-deadlines)
+set_tests_properties(glimmer_control_execution_preparation_deadline_test PROPERTIES TIMEOUT 30)
+add_executable(glimmer_control_execution_receive_test control/execution_socket_receive_test.cc)
+target_include_directories(glimmer_control_execution_receive_test PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
+target_link_libraries(glimmer_control_execution_receive_test PRIVATE Glimmer::control)
+target_link_options(glimmer_control_execution_receive_test PRIVATE
+    "LINKER:--wrap=recvmsg" "LINKER:--wrap=eventfd" "LINKER:--wrap=read" "LINKER:--wrap=write"
+    "LINKER:--wrap=ppoll")
+glimmer_enable_clang_tidy(glimmer_control_execution_receive_test)
+add_test(NAME glimmer_control_execution_receive_test COMMAND glimmer_control_execution_receive_test)
+set_tests_properties(glimmer_control_execution_receive_test PROPERTIES TIMEOUT 30)
+add_executable(glimmer_control_execution_send_test control/execution_socket_send_test.cc)
+target_include_directories(glimmer_control_execution_send_test PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
+target_link_libraries(glimmer_control_execution_send_test PRIVATE Glimmer::control)
+target_link_options(glimmer_control_execution_send_test PRIVATE
+    "LINKER:--wrap=send" "LINKER:--wrap=sendmsg")
+glimmer_enable_clang_tidy(glimmer_control_execution_send_test)
+add_test(NAME glimmer_control_execution_send_test COMMAND glimmer_control_execution_send_test)
+set_tests_properties(glimmer_control_execution_send_test PROPERTIES TIMEOUT 30)
 add_executable(glimmer_control_execution_dnn_legacy_protocol_test
     control/execution_dnn_legacy_protocol_test.cc)
 target_link_libraries(glimmer_control_execution_dnn_legacy_protocol_test PRIVATE

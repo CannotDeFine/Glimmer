@@ -48,6 +48,12 @@ The control execution-wire codec validates bounded message framing and payload
 shapes. Opcode definitions alone do not establish support for an operation; the
 consumer owns authentication, resource validation, execution and completion.
 
+Execution transport is externally serialized and owned by its constructing
+process. Every data chunk is authenticated, and each transferred descriptor
+reference has one owner. A fork child must not use the inherited endpoint and must
+promptly exec or `_exit`. A lost reply leaves delivery uncertain and does not
+authorize replay.
+
 The backend submission queue retains accepted command data until trusted
 proof of no native issue or final physical stop; its receipt remains until
 reply acknowledgement. It owns neither CUDA calls nor scheduling policy.
