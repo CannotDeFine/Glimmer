@@ -15,11 +15,19 @@ namespace glimmer::control {
 #ifdef GLIMMER_ENDPOINT_TESTING
 namespace testing {
 thread_local unsigned fail_next_response = 0;
+thread_local bool mismatch_epoch_extent = false;
+thread_local bool error_epoch_grant = false;
 void fail_next_endpoint_response_format() noexcept {
     fail_next_response = 1;
 }
 void throw_next_endpoint_response_format() noexcept {
     fail_next_response = 2;
+}
+void mismatch_next_epoch_grant_extent() noexcept {
+    mismatch_epoch_extent = true;
+}
+void error_next_epoch_grant() noexcept {
+    error_epoch_grant = true;
 }
 }  // namespace testing
 #endif
@@ -906,6 +914,19 @@ std::optional<std::string> TaskExecutionEndpoint::Impl::handle_native_epoch(
             }
             break;
     }
+#ifdef GLIMMER_ENDPOINT_TESTING
+    if (std::exchange(testing::mismatch_epoch_extent, false) &&
+        (response.kind == NativeEpochResponseKind::kGranted ||
+         response.kind == NativeEpochResponseKind::kPending)) {
+        ++response.grant.extent.max_calls;
+    }
+    if (std::exchange(testing::error_epoch_grant, false) &&
+        (response.kind == NativeEpochResponseKind::kGranted ||
+         response.kind == NativeEpochResponseKind::kPending)) {
+        response.kind = NativeEpochResponseKind::kError;
+        response.error = TaskProtocolErrorCode::kInvalidRequest;
+    }
+#endif
     auto encoded = encode_epoch_response(response);
     if (encoded) {
         unpublished.publish();

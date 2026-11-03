@@ -1,4 +1,5 @@
 add_library(glimmer_control
+    cooperative_launch_gate.cc
     execution_protocol.cc
     internal/control_request_sequence.cc
     internal/local_control_wake.cc

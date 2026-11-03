@@ -83,6 +83,12 @@ treated as proof of non-issue. Completion observers are not resource ownership.
 The shared task client uses an authenticated local channel and pins the first
 service incarnation for its logical session. It does not replay a request after
 an uncertain reply or fall back to another transport.
+The cooperative launch gate uses the versioned execution service for remote
+admission. It serializes requests and permanently quarantines the gate if a
+reply is lost, inconsistent, or cannot establish a safe native outcome. A
+quarantined gate sends no further requests and does not release remote leases;
+the service owner remains responsible for proving physical stop and retiring
+the associated resources. This gate is not yet used by the ordinary launch path.
 The execution task server accepts domain messages only after shared-channel
 negotiation and joins its connection workers before endpoint teardown. A lost
 transport reply does not authorize cancellation or prove physical completion.
