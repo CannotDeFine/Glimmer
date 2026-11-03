@@ -50,7 +50,7 @@ int main() {
     }
 
     CUcontext context{};
-    if (!check(cuCtxCreate(&context, nullptr, 0, device), "cuCtxCreate")) {
+    if (!check(cuCtxCreate(&context, 0, device), "cuCtxCreate")) {
         return EXIT_FAILURE;
     }
 
