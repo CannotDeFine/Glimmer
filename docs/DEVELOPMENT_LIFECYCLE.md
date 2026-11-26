@@ -104,7 +104,9 @@ to verify that it refers to the intended build.
 ## Full-device comparison qualification
 
 Before formal GPU comparisons, qualify actual SM participation for every matched
-dominant operation and compared path by default. An 80-SM V100 requires 80/80 SMs.
+dominant operation and compared path by default. Every SM of the compared device
+is required, using the count queried from that device: 80/80 on a V100 and
+108/108 on an A100.
 Explicit worker geometry and sufficient occupancy capacity are prerequisites,
 not coverage evidence. Small correctness-test worker defaults must not leak into
 measurement launchers. Preserve actual selection and numerical evidence too;

@@ -74,7 +74,8 @@ user explicitly asks for that exact operation.
 ## Full-device experiment qualification
 
 - Treat full-device SM participation as a prerequisite for formal comparisons.
-  On the current V100 require evidence for all 80 SMs in every compared path.
+  Require evidence for every SM of the compared device in every compared path,
+  using the SM count queried from that device (80 on a V100, 108 on an A100).
 - Set benchmark worker geometry explicitly; never inherit the interceptor's
   small correctness-test worker default. Worker counts and occupancy capacity
   alone are not proof of useful compute coverage or sustained saturation.
