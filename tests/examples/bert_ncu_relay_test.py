@@ -30,6 +30,17 @@ def bare_relay():
 
 
 class RelayTest(unittest.TestCase):
+    def setUp(self):
+        # Command construction resolves the range library strictly. Use a
+        # hermetic stand-in, as launch fixtures do, instead of the host CUDA.
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        provider = Path(temporary.name) / 'range.so'
+        provider.touch()
+        patcher = patch.object(bridge, 'RANGE_LIBRARY', provider)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_fresh_claim_in_replay_plan_comes_only_from_root_authority(self):
         instance = bare_relay()
         instance.current['phase'] = 'await-launch'

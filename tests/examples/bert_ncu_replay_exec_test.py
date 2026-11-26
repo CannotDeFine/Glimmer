@@ -174,6 +174,9 @@ class ReplayExecTest(unittest.TestCase):
             os.close(descriptor)
 
     @unittest.skipUnless(Path('/usr/bin/cc').exists(), 'C compiler needed for sealed preload fixture')
+    # The child runs bridge.PYTHON, so the mapping audit must require that
+    # interpreter rather than the BERT workload environment.
+    @patch.object(native_capture.protocol, 'PYTHON', bridge.PYTHON)
     def test_sealed_preload_mapping_is_bound_to_live_child_and_descriptor(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'libnative_sgemm_range.so'

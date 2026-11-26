@@ -22,6 +22,17 @@ import bert_ncu_service_proxy as proxy
 
 
 class ServiceProxyTest(unittest.TestCase):
+    def setUp(self):
+        # Command construction resolves the range library strictly. Use a
+        # hermetic stand-in, as launch fixtures do, instead of the host CUDA.
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        provider = Path(temporary.name) / 'range.so'
+        provider.touch()
+        patcher = patch.object(bridge, 'RANGE_LIBRARY', provider)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_ordinary_logical_release_requires_exact_issued_then_completed_chain(self):
         prefix = 'authenticated low binding\n'
         admission = 'Native admission audit: session=2, sequence=2842, accepted=true, operation=42\n'
