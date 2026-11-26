@@ -66,6 +66,16 @@ model, not derived from its SM count. This applies to `bert_device_capture.py`,
 `run_execution_ncu_init_probe.py`, `run_rnn_v8_validation.py` and many
 `run_bert_*.py` entry points; check a script before running it elsewhere.
 
+## Source-layout assumptions
+
+`run_bert_delivery_boundary.py` and `build_execution_host_pair.py` treat
+`src/backend/cuda/cuda_execution_session.cc` as the only CUDA session
+translation unit. The session implementation is now split into
+`cuda_execution_session.cc`, `cuda_execution_session_blas.cc` and
+`cuda_execution_session_dnn.cc` with private state in
+`internal/cuda_execution_session_state.h`; update their object selection and
+link-map checks before reusing them.
+
 ## Entry points without tests
 
 These are run by hand and have no CTest coverage: `bert_direct_cpu.py`,

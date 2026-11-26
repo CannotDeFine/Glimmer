@@ -119,8 +119,11 @@ if(NOT GLIMMER_SESSION_ADMISSION_DIAGNOSTICS)
     message(FATAL_ERROR "Current admission diagnostics require GLIMMER_SESSION_ADMISSION_DIAGNOSTICS=ON")
 endif()
 if(GLIMMER_SESSION_ADMISSION_DIAGNOSTICS)
+    # Rebuild every session translation unit so no baseline session object is linked.
     add_library(glimmer_execution_session_diagnostic OBJECT
-        "${PROJECT_SOURCE_DIR}/src/backend/cuda/cuda_execution_session.cc")
+        "${PROJECT_SOURCE_DIR}/src/backend/cuda/cuda_execution_session.cc"
+        "${PROJECT_SOURCE_DIR}/src/backend/cuda/cuda_execution_session_blas.cc"
+        "${PROJECT_SOURCE_DIR}/src/backend/cuda/cuda_execution_session_dnn.cc")
     set_target_properties(glimmer_execution_session_diagnostic PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_include_directories(glimmer_execution_session_diagnostic PRIVATE
         "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"

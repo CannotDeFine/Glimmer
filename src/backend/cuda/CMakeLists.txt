@@ -2,6 +2,8 @@ add_library(glimmer_cuda_backend
     cuda_execution_dispatcher.cc
     cuda_execution_domain.cc
     cuda_execution_session.cc
+    cuda_execution_session_blas.cc
+    cuda_execution_session_dnn.cc
     cuda_execution_graph.cc
     cuda_external_execution_bridge.cc
     cuda_native_execution_lanes.cc
