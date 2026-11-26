@@ -1,0 +1,8 @@
+libcudart.so.11.0 {
+    local:
+        glimmer_runtime_graph_instantiate_legacy;
+        glimmer_runtime_graph_instantiate_modern;
+        glimmer_runtime_graph_update_legacy;
+        glimmer_runtime_graph_update_modern;
+};
+libcudart.so.12 {};

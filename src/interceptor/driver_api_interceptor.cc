@@ -14,25 +14,40 @@
 #include "internal/driver_api_interceptor.h"
 #include "internal/driver_dispatch.h"
 #include "internal/launch_completion_tracker.h"
+#include "internal/loaded_image_path.h"
+#include "internal/persistent_kernel.h"
+#include "internal/persistent_sgemm.h"
+#include "internal/cuda_gemm_allocation.h"
+#include "internal/cuda_cooperative_pool.h"
+#include "internal/cuda_binary_slice.h"
+#include "internal/qualified_cubin_source.h"
+#include "internal/driver_cooperative_router.h"
 #include "internal/runtime_api_bridge.h"
+#include <filesystem>
 #include "internal/symbol_registry.h"
 #include "internal/nvml_dispatch.h"
 
 #include <cuda.h>
 
 #include <charconv>
+#include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
+#include <exception>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <system_error>
+#include <type_traits>
 #include <thread>
 #include <unordered_map>
 #include <unistd.h>
@@ -69,15 +84,26 @@ enum class QuotaMode : std::uint8_t {
 
 struct InterceptorState {
     std::once_flag initialization_once;
+    std::mutex construction_mutex;
+    bool has_started_initialization{};
+    std::optional<CudaNativeEpochConfiguration> native_epoch_configuration;
+    bool should_owner_pump_control{};
+    std::once_flag driver_initialization_once;
     DriverDispatch driver;
     NvmlDispatch nvml;
     std::unique_ptr<LaunchGate> launch_gate;
     std::unique_ptr<LaunchCompletionTracker> launch_tracker;
+    std::unique_ptr<PersistentKernelRuntime> persistent_kernels;
+    std::unique_ptr<DriverCooperativeRouter> cooperative_router;
+    bool is_cooperative_requested{};
+    bool is_runtime_persistent_enabled = false;
+    std::uint32_t persistent_worker_blocks = 0;
     QuotaMode quota_mode = QuotaMode::kDisabled;
     glimmer::core::SchedulerMode scheduler_mode = glimmer::core::SchedulerMode::kOff;
     std::atomic<bool> launch_observation_reported = false;
     std::atomic<std::uint64_t> launch_observation_count = 0;
     bool trace_kernel_launches = false;
+    bool persistent_audit{};
     bool trace_memory_info = false;
     bool trace_launch_timings = false;
     std::size_t launch_batch_size = 1;
@@ -91,11 +117,13 @@ struct InterceptorState {
     std::unique_ptr<QuotaStore> quota;
     glimmer::interceptor::AllocationRegistry allocations;
     bool is_driver_ready = false;
+    std::atomic<bool> is_native_dispatch_ready{false};
     bool launch_scheduler_ready = false;
     bool uses_shared_quota = false;
 };
 
 thread_local bool g_is_inside_proc_address_v2 = false;
+thread_local bool g_is_inside_cooperative_boundary = false;
 
 struct ThreadLaunchBatch final {
     glimmer::core::TaskId task_id = 0;
@@ -163,6 +191,48 @@ class ProcAddressV2Scope {
         return std::nullopt;
     }
     return static_cast<std::size_t>(value.value());
+}
+
+[[nodiscard]] bool read_public_native_epoch_configuration(InterceptorState& state) {
+    constexpr std::array names{
+        "GLIMMER_NATIVE_EPOCH_MAX_CALLS", "GLIMMER_NATIVE_EPOCH_CALLS_PER_PREFIX",
+        "GLIMMER_NATIVE_EPOCH_PENDING_PREFIXES", "GLIMMER_NATIVE_EPOCH_ACCEPTANCE_US"};
+    if (std::ranges::none_of(names, [](const char* name) { return std::getenv(name) != nullptr; }))
+        return true;
+    if (state.native_epoch_configuration || !cooperative_runtime_preview_requested() ||
+        state.scheduler_mode != glimmer::core::SchedulerMode::kEnforce)
+        return false;
+    const auto limit = read_quota_limit();
+    const char* quota_mode = std::getenv("GLIMMER_QUOTA_MODE");
+    if (!limit || *limit == 0 ||
+        (quota_mode && std::strcmp(quota_mode, "process") != 0 &&
+         std::strcmp(quota_mode, "shared") != 0))
+        return false;
+    const char* batch = std::getenv("GLIMMER_SCHEDULER_BATCH_SIZE");
+    if (batch && read_positive_size("GLIMMER_SCHEDULER_BATCH_SIZE") != 1) return false;
+    control::NativeEpochExtent extent;
+    const std::array fields{&extent.max_calls, &extent.calls_per_prefix,
+                            &extent.max_pending_prefixes, &extent.acceptance_microseconds};
+    for (std::size_t index = 0; index < names.size(); ++index) {
+        const auto value = read_memory_limit(names[index]);
+        if (!value || *value > std::numeric_limits<std::uint32_t>::max()) return false;
+        *fields[index] = static_cast<std::uint32_t>(*value);
+    }
+    if (!control::valid_native_epoch_extent(extent)) return false;
+    state.native_epoch_configuration = CudaNativeEpochConfiguration{extent, {}};
+    return true;
+}
+
+[[nodiscard]] bool read_experimental_control_executor(InterceptorState& state) {
+    const char* selection = std::getenv("GLIMMER_EXPERIMENTAL_CONTROL_EXECUTOR");
+    if (!selection || std::strcmp(selection, "thread") == 0) return true;
+    const char* socket = std::getenv("GLIMMER_SCHEDULER_CONTROL_SOCKET");
+    if (std::strcmp(selection, "owner") != 0 ||
+        state.scheduler_mode != glimmer::core::SchedulerMode::kEnforce ||
+        !cooperative_runtime_preview_requested() || !socket || *socket == '\0')
+        return false;
+    state.should_owner_pump_control = true;
+    return true;
 }
 
 [[nodiscard]] std::optional<std::size_t> read_nonnegative_size(const char* variable_name) {
@@ -255,11 +325,20 @@ bool resolve_device_capacity(void* context, DeviceId device,
     }
 
     auto* driver = static_cast<DriverDispatch*>(context);
+    CUcontext current_context = nullptr;
     CUdevice current_device = -1;
-    const bool has_matching_context = driver->has_context_queries() &&
-                                      driver->context_get_device(&current_device) == CUDA_SUCCESS &&
-                                      current_device == device;
-    if (has_matching_context) {
+    const bool has_matching_context =
+        driver->has_context_queries() &&
+        driver->context_get_current(&current_context) == CUDA_SUCCESS &&
+        current_context != nullptr && driver->context_get_device(&current_device) == CUDA_SUCCESS &&
+        current_device == device;
+    bool is_primary_active = false;
+    const bool can_query_free_capacity =
+        has_matching_context &&
+        (!is_inside_runtime_call() ||
+         (driver->primary_context_is_active(current_device, is_primary_active) == CUDA_SUCCESS &&
+          is_primary_active));
+    if (can_query_free_capacity) {
         std::size_t free_bytes = 0;
         std::size_t total_bytes = 0;
         if (driver->mem_get_info(&free_bytes, &total_bytes) == CUDA_SUCCESS && total_bytes != 0) {
@@ -268,20 +347,19 @@ bool resolve_device_capacity(void* context, DeviceId device,
         }
     }
 
-    // Without a matching current context, cuMemGetInfo cannot identify the
-    // requested device. Use the device-specific total query only as a
-    // fallback; normal allocation admission follows the context-aware path
-    // above and avoids an unnecessary Driver entry point.
+    // A cold Runtime may report a current handle before its primary is active.
+    // Do not force SDK initialization or infer that handle's primary identity.
+    // Non-primary Runtime callers with an inactive primary conservatively use
+    // this fallback too. Ready callers and direct Driver calls still query free
+    // capacity above; the original allocator always checks physical availability.
     std::size_t total_bytes = 0;
     if (!driver->has_device_total_mem() ||
         driver->device_total_mem(&total_bytes, static_cast<CUdevice>(device)) != CUDA_SUCCESS ||
         total_bytes == 0) {
         return false;
     }
-    // A total-capacity query is valid without a matching current context. In
-    // that case retain the total-memory boundary and defer the physical-free
-    // check until the allocation path has a matching context and cuMemGetInfo
-    // can safely identify the same device.
+    // Device total is valid without Runtime context readiness. Retain the total
+    // boundary and quota ledger; failed original allocation cancels reservation.
     *capacity = DeviceMemoryCapacity{.total_bytes = total_bytes, .free_bytes = total_bytes};
     return true;
 }
@@ -360,7 +438,7 @@ void initialize_launch_scheduler(InterceptorState& state) noexcept {
     state.launch_batch_size = batch_size.value();
 
     try {
-        state.launch_gate = std::make_unique<LaunchGate>(LaunchGateOptions{
+        LaunchGateOptions options{
             .max_concurrent_launches = max_concurrent.value(),
             .priority_reserved_slots = reserved_slots.value(),
             .priority_reservation_threshold = priority_threshold.value(),
@@ -370,7 +448,29 @@ void initialize_launch_scheduler(InterceptorState& state) noexcept {
             .task_priority = priority.value(),
             .control_socket =
                 configured_socket == nullptr ? std::string{} : std::string(configured_socket),
-        });
+        };
+        if (state.is_cooperative_requested) {
+            if (state.launch_batch_size != 1) {
+                report_diagnostic("[glimmer] cooperative preview requires launch batch size one\n");
+                return;
+            }
+            if (state.native_epoch_configuration) {
+                const auto& configuration = *state.native_epoch_configuration;
+                state.cooperative_router = std::make_unique<DriverCooperativeRouter>(
+                    state.driver, options, state.trace_kernel_launches, state.trace_launch_timings,
+                    configuration.extent, configuration.projections,
+                    state.persistent_audit ? 16384 : 0, state.should_owner_pump_control);
+            } else {
+                state.cooperative_router = std::make_unique<DriverCooperativeRouter>(
+                    state.driver, options, state.trace_kernel_launches, state.trace_launch_timings,
+                    std::optional<control::NativeEpochExtent>{},
+                    CudaNativeEpochProjectionOverrides{}, state.persistent_audit ? 16384 : 0,
+                    state.should_owner_pump_control);
+            }
+            state.launch_scheduler_ready = true;
+            return;
+        }
+        state.launch_gate = std::make_unique<LaunchGate>(std::move(options));
         state.launch_tracker = std::make_unique<LaunchCompletionTracker>(
             state.driver, *state.launch_gate, state.trace_launch_timings);
         state.launch_scheduler_ready =
@@ -389,10 +489,52 @@ void initialize_launch_scheduler(InterceptorState& state) noexcept {
     }
 }
 
-void initialize_state(InterceptorState& state) noexcept {
+void initialize_persistent_kernels(InterceptorState& state) noexcept {
+    try {
+        if (std::getenv("GLIMMER_PERSISTENT_WORKER_BLOCKS") == nullptr &&
+            !state.is_cooperative_requested) {
+            return;
+        }
+        const auto workers = std::getenv("GLIMMER_PERSISTENT_WORKER_BLOCKS") == nullptr
+                                 ? std::optional<MemoryBytes>{3}
+                                 : read_memory_limit("GLIMMER_PERSISTENT_WORKER_BLOCKS");
+        if (!workers.has_value() || *workers == 0 || *workers > 65536) {
+            report_diagnostic(
+                "[glimmer] GLIMMER_PERSISTENT_WORKER_BLOCKS is invalid; "
+                "PTX transformation disabled\n");
+            return;
+        }
+        state.persistent_kernels = std::make_unique<PersistentKernelRuntime>(
+            state.driver, static_cast<std::uint32_t>(*workers), state.trace_kernel_launches,
+            state.is_cooperative_requested);
+        state.persistent_worker_blocks = static_cast<std::uint32_t>(*workers);
+        const auto* runtime_setting = std::getenv("GLIMMER_PERSISTENT_RUNTIME");
+        state.is_runtime_persistent_enabled =
+            runtime_setting != nullptr && std::strcmp(runtime_setting, "1") == 0;
+        if (runtime_setting != nullptr && std::strcmp(runtime_setting, "0") != 0 &&
+            std::strcmp(runtime_setting, "1") != 0) {
+            report_diagnostic(
+                "[glimmer] GLIMMER_PERSISTENT_RUNTIME is invalid; Runtime PTB disabled\n");
+        }
+    } catch (...) {
+        report_diagnostic("[glimmer] persistent kernel initialization failed\n");
+    }
+}
+
+bool initialize_native_driver_dispatch(InterceptorState& state) {
+    std::call_once(state.driver_initialization_once, [&state] {
+        state.is_native_dispatch_ready.store(state.driver.initialize(), std::memory_order_release);
+    });
+    return state.is_native_dispatch_ready.load(std::memory_order_acquire);
+}
+
+void initialize_state_impl(InterceptorState& state) {
     state.trace_kernel_launches = read_kernel_launch_trace_setting();
     state.trace_memory_info = read_memory_info_trace_setting();
     state.trace_launch_timings = read_launch_timing_trace_setting();
+    state.is_cooperative_requested = cooperative_driver_preview_requested();
+    const auto* persistent_audit = std::getenv("GLIMMER_PERSISTENT_AUDIT");
+    state.persistent_audit = persistent_audit && std::strcmp(persistent_audit, "1") == 0;
     const std::optional<glimmer::core::SchedulerMode> configured_scheduler_mode =
         read_scheduler_mode();
     if (!configured_scheduler_mode.has_value()) {
@@ -402,13 +544,25 @@ void initialize_state(InterceptorState& state) noexcept {
         state.scheduler_mode = *configured_scheduler_mode;
     }
 
-    state.is_driver_ready = state.driver.initialize();
+    if (!read_public_native_epoch_configuration(state)) {
+        state.quota_mode = QuotaMode::kInvalidConfiguration;
+        report_diagnostic("[glimmer] native epoch startup configuration is invalid\n");
+        return;
+    }
+    if (!read_experimental_control_executor(state)) {
+        state.quota_mode = QuotaMode::kInvalidConfiguration;
+        report_diagnostic("[glimmer] experimental control executor configuration is invalid\n");
+        return;
+    }
+    state.is_driver_ready = initialize_native_driver_dispatch(state);
     if (!state.is_driver_ready) {
         glimmer::interceptor::report_diagnostic(
             "[glimmer] CUDA Driver symbol initialization failed\n");
     }
 
     initialize_launch_scheduler(state);
+
+    initialize_persistent_kernels(state);
 
     const char* configured_mode = std::getenv("GLIMMER_QUOTA_MODE");
     if (configured_mode != nullptr && std::strcmp(configured_mode, "process") != 0 &&
@@ -495,8 +649,24 @@ void initialize_state(InterceptorState& state) noexcept {
     }
 }
 
+void initialize_state(InterceptorState& state) noexcept {
+    try {
+        initialize_state_impl(state);
+    } catch (...) {
+        state.is_driver_ready = false;
+        state.quota_mode = QuotaMode::kInvalidConfiguration;
+        report_diagnostic("[glimmer] interceptor initialization failed\n");
+    }
+}
+
 void ensure_state_initialized(InterceptorState& state) {
-    std::call_once(state.initialization_once, [&state] { initialize_state(state); });
+    std::call_once(state.initialization_once, [&state] {
+        {
+            const std::lock_guard lock(state.construction_mutex);
+            state.has_started_initialization = true;
+        }
+        initialize_state(state);  // no metadata lock spans loader/SDK/control effects
+    });
 }
 
 [[nodiscard]] bool ensure_initialized(InterceptorState& state) {
@@ -504,9 +674,440 @@ void ensure_state_initialized(InterceptorState& state) {
     return state.is_driver_ready;
 }
 
-[[nodiscard]] void* find_proc_address_interceptor(const char* symbol, cuuint64_t flags) noexcept {
+[[nodiscard]] bool should_route_cooperative(const InterceptorState& state) noexcept {
+    return state.is_cooperative_requested && !g_is_inside_cooperative_boundary &&
+           !is_inside_driver_call() &&
+           (!is_inside_runtime_call() || runtime_cooperative_driver_routing_is_enabled());
+}
+
+[[nodiscard]] CUresult source_native_stream_execution(
+    InterceptorState& state, CUstream stream, bool is_ptds,
+    const std::function<CUresult()>& original,
+    const CudaSourceEventOperation* event_operation = nullptr,
+    const CudaNativeGraphExecutable* graph_operation = nullptr) {
+    if (!state.is_driver_ready || !state.cooperative_router) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    auto& gate = cooperative_process_call_gate();
+    CudaProcessNativeToken token;
+    const auto owned = state.cooperative_router->source_native_token(gate, token);
+    if (owned != CUDA_SUCCESS) {
+        return owned;
+    }
+    CUcontext context{};
+    CUresult queried{};
+    {
+        const NativeDriverCallScope native;
+        queried = is_ptds ? state.driver.stream_get_context_ptsz(stream, &context)
+                          : state.driver.stream_get_context(stream, &context);
+    }
+    if (queried != CUDA_SUCCESS || !context) {
+        return queried == CUDA_SUCCESS ? CUDA_ERROR_INVALID_CONTEXT : queried;
+    }
+    return state.cooperative_router->native_session_execution(
+        token, context, stream, is_ptds, original,
+        [&](const auto& issue) {
+            const ProcessCallGate::Transition source(gate);
+            return issue();
+        },
+        &gate, event_operation, graph_operation);
+}
+
+[[nodiscard]] CUresult source_native_current_context(InterceptorState& state,
+                                                     CudaProcessNativeToken& token,
+                                                     CUcontext& context) {
+    if (!state.is_driver_ready || !state.cooperative_router) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    const auto owned =
+        state.cooperative_router->source_native_token(cooperative_process_call_gate(), token);
+    if (owned != CUDA_SUCCESS) {
+        return owned;
+    }
+    const auto queried = state.driver.context_get_current(&context);
+    if (queried != CUDA_SUCCESS || !context) {
+        return queried == CUDA_SUCCESS ? CUDA_ERROR_INVALID_CONTEXT : queried;
+    }
+    return CUDA_SUCCESS;
+}
+
+[[nodiscard]] CUresult source_native_event_create(InterceptorState& state, CUevent* event,
+                                                  unsigned int flags) {
+    CudaProcessNativeToken token;
+    CUcontext context{};
+    const auto ready = source_native_current_context(state, token, context);
+    if (ready != CUDA_SUCCESS) {
+        return ready;
+    }
+    if (!event || (flags & CU_EVENT_INTERPROCESS) != 0) {
+        const auto observed = state.cooperative_router->observe_native_session_context(context);
+        return observed == CUDA_SUCCESS ? state.driver.event_create(event, flags) : observed;
+    }
+    CudaEventRegistrationReservation reservation;
+    const auto prepared =
+        state.cooperative_router->prepare_native_event(token, context, reservation);
+    if (prepared != CUDA_SUCCESS) {
+        return prepared;
+    }
+    CUevent created{};
+    const auto native_status = state.driver.event_create(&created, flags);
+    if (native_status == CUDA_SUCCESS || created) {
+        *event = created;
+    }
+    return state.cooperative_router->publish_native_event(reservation, created, native_status);
+}
+
+[[nodiscard]] CUresult cooperative_frontend_current(
+    InterceptorState& state, std::shared_ptr<CudaCooperativeFrontend>& frontend) {
+    if (!ensure_initialized(state) || !state.cooperative_router || !state.persistent_kernels) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    CUcontext context = nullptr;
+    const auto result = state.driver.context_get_current(&context);
+    return result == CUDA_SUCCESS ? state.cooperative_router->frontend(context, frontend) : result;
+}
+
+class CooperativeBoundaryScope final {
+   public:
+    CooperativeBoundaryScope() : previous_(g_is_inside_cooperative_boundary) {
+        g_is_inside_cooperative_boundary = true;
+    }
+    ~CooperativeBoundaryScope() {
+        g_is_inside_cooperative_boundary = previous_;
+    }
+    CooperativeBoundaryScope(const CooperativeBoundaryScope&) = delete;
+    CooperativeBoundaryScope& operator=(const CooperativeBoundaryScope&) = delete;
+
+   private:
+    bool previous_;
+};
+
+// Once the SDK accepts a metadata effect, every exceptional exit must fail
+// the router as well as the actor. A temporary callback may allocate before
+// the noexcept private command is entered. No native cleanup or retry here.
+class RuntimeMetadataEffectGuard final {
+   public:
+    RuntimeMetadataEffectGuard(DriverCooperativeRouter& router, CUcontext context_value)
+        : router_(router), context(context_value) {}
+    RuntimeMetadataEffectGuard(const RuntimeMetadataEffectGuard&) = delete;
+    RuntimeMetadataEffectGuard& operator=(const RuntimeMetadataEffectGuard&) = delete;
+    ~RuntimeMetadataEffectGuard() {
+        if (!is_complete_) {
+            router_.fail_context_owner(context, CUDA_ERROR_UNKNOWN);
+        }
+    }
+    void complete() noexcept {
+        is_complete_ = true;
+    }
+
+   private:
+    DriverCooperativeRouter& router_;
+    const CUcontext context;
+    bool is_complete_{};
+};
+
+struct RuntimeQueuedRelease {
+    AllocationRegistry::ReleaseTicket ticket;
+    bool was_consumed{};
+    bool has_owned_release{};
+};
+class ReleaseExceptionGuard final {
+   public:
+    ReleaseExceptionGuard(AllocationRegistry& registry,
+                          const AllocationRegistry::ReleaseTicket& ticket,
+                          const bool& has_owned_release)
+        : registry_(registry),
+          ticket_(ticket),
+          has_owned_release_(has_owned_release),
+          exception_count_(std::uncaught_exceptions()) {}
+    ~ReleaseExceptionGuard() {
+        if (std::uncaught_exceptions() > exception_count_) {
+            if (has_owned_release_) {
+                registry_.mark_accounting_degraded();
+            } else {
+                registry_.cancel_release(ticket_);
+            }
+        }
+    }
+    ReleaseExceptionGuard(const ReleaseExceptionGuard&) = delete;
+    ReleaseExceptionGuard& operator=(const ReleaseExceptionGuard&) = delete;
+
+   private:
+    AllocationRegistry& registry_;
+    const AllocationRegistry::ReleaseTicket& ticket_;
+    const bool& has_owned_release_;
+    int exception_count_;
+};
+thread_local RuntimeQueuedRelease* g_runtime_queued_release{};
+class RuntimeQueuedReleaseScope final {
+   public:
+    explicit RuntimeQueuedReleaseScope(RuntimeQueuedRelease& pending)
+        : previous_(g_runtime_queued_release) {
+        g_runtime_queued_release = &pending;
+    }
+    ~RuntimeQueuedReleaseScope() {
+        g_runtime_queued_release = previous_;
+    }
+    RuntimeQueuedReleaseScope(const RuntimeQueuedReleaseScope&) = delete;
+    RuntimeQueuedReleaseScope& operator=(const RuntimeQueuedReleaseScope&) = delete;
+
+   private:
+    RuntimeQueuedRelease* previous_;
+};
+
+class CooperativeReleaseProof final : public CudaQueueReleaseObserver {
+   public:
+    CooperativeReleaseProof(AllocationRegistry& registry, AllocationRegistry::ReleaseTicket ticket)
+        : registry_(registry), k_ticket(ticket) {}
+    void confirmed_release(CUdeviceptr pointer) noexcept override {
+        if (pointer != k_ticket.identity.device_pointer ||
+            !registry_.confirm_cooperative_release(k_ticket)) {
+            registry_.mark_accounting_degraded();
+            report_diagnostic("[glimmer] cooperative free completion ticket mismatch\n");
+        }
+    }
+    void context_destroyed(CUdeviceptr) noexcept override {
+        // Context destruction cannot prove an ambiguous native free or release
+        // a context-independent allocation. Preserve accounting ownership.
+        registry_.mark_accounting_degraded();
+    }
+
+   private:
+    AllocationRegistry& registry_;
+    const AllocationRegistry::ReleaseTicket k_ticket;
+};
+
+[[nodiscard]] bool can_queue_cooperative_release(InterceptorState& state,
+                                                 const AllocationRegistry::ReleaseTicket& ticket) {
+    if (!state.cooperative_router || !ticket.memory_bytes ||
+        ticket.memory_bytes > std::numeric_limits<std::size_t>::max()) {
+        return false;
+    }
+    const NativeDriverCallScope scope;
+    CUcontext current{};
+    const auto& dispatch = state.cooperative_router->copy_range_dispatch();
+    CUdeviceptr base{};
+    std::size_t extent{};
+    const auto pointer = ticket.identity.device_pointer;
+    return state.driver.context_get_current(&current) == CUDA_SUCCESS &&
+           current == ticket.identity.context &&
+           can_defer_cuda_copy_range(dispatch, current, pointer,
+                                     static_cast<std::size_t>(ticket.memory_bytes),
+                                     CU_MEMORYTYPE_DEVICE) &&
+           dispatch.address_range(&base, &extent, pointer) == CUDA_SUCCESS && base == pointer;
+}
+
+[[nodiscard]] CudaQueuedReleaseAdmission queue_cooperative_release(
+    InterceptorState& state, CudaCooperativeFrontend& frontend, CUstream stream,
+    bool per_thread_default_stream, const AllocationRegistry::ReleaseTicket& ticket) noexcept {
+    try {
+        auto observer = std::make_shared<CooperativeReleaseProof>(state.allocations, ticket);
+        if (!state.allocations.prepare_cooperative_release(ticket)) {
+            return {CUDA_ERROR_UNKNOWN, false};
+        }
+        return frontend.release(stream, per_thread_default_stream,
+                                {ticket.identity.device_pointer,
+                                 state.cooperative_router->resources(), std::move(observer)});
+    } catch (...) {
+        return {CUDA_ERROR_OUT_OF_MEMORY, false};
+    }
+}
+
+CUresult cooperative_event_completion(InterceptorState& state, CUevent event, bool should_wait,
+                                      bool& needs_native_boundary) {
+    needs_native_boundary = false;
+    if (!state.cooperative_router) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return state.cooperative_router->logical_event_completion(event, should_wait,
+                                                              needs_native_boundary);
+}
+
+CUresult cooperative_record(InterceptorState& state, CUevent event, CUstream stream,
+                            bool per_thread_default_stream,
+                            const std::function<CUresult()>& original) {
+    if (cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        const CudaSourceEventOperation descriptor{CudaSourceEventOperation::Kind::kRecord, event,
+                                                  0};
+        return source_native_stream_execution(state, stream, per_thread_default_stream, original,
+                                              &descriptor);
+    }
+    std::shared_ptr<CudaCooperativeFrontend> frontend;
+    const auto ready = cooperative_frontend_current(state, frontend);
+    if (ready != CUDA_SUCCESS) {
+        return ready;
+    }
+    CUcontext event_context = nullptr;
+    std::shared_ptr<CudaCooperativeFrontend> event_owner;
+    const auto found = state.cooperative_router->event_frontend(event, event_context, event_owner);
+    if (found == CUDA_SUCCESS && event_owner == frontend) {
+        CudaEventProjection projection;
+        auto projected = state.cooperative_router->event_projection(event, projection);
+        if (projected != CUDA_SUCCESS) {
+            return projected;
+        }
+        if (!projection.is_logical() && !projection.has_native_completion() &&
+            !projection.issued_native_prefix()) {
+            // Retain the binding and historical waits. Prove all native use
+            // complete before queue ownership resumes against this handle.
+            const auto completed =
+                intercept_cooperative_native_boundary([] { return CUDA_SUCCESS; });
+            if (completed != CUDA_SUCCESS) {
+                return completed;
+            }
+            projection = {};
+            projected = state.cooperative_router->event_projection(event, projection);
+            if (projected != CUDA_SUCCESS) {
+                return projected;
+            }
+        }
+        std::shared_ptr<CudaQueueEventRecordGuard> guard;
+        const auto prepared =
+            state.cooperative_router->prepare_event_record_guard(projection, guard);
+        if (prepared != CUDA_SUCCESS) {
+            return prepared;
+        }
+        return frontend->record_event(event, stream, per_thread_default_stream, std::move(guard));
+    }
+    if (found != CUDA_SUCCESS && found != CUDA_ERROR_INVALID_HANDLE) {
+        return found;
+    }
+    return intercept_cooperative_native_boundary(original);
+}
+
+CUresult cooperative_wait(InterceptorState& state, CUstream stream, CUevent event,
+                          bool per_thread_default_stream,
+                          const std::function<CUresult()>& original) {
+    if (cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return source_native_stream_execution(state, stream, per_thread_default_stream, original);
+    }
+    std::shared_ptr<CudaCooperativeFrontend> frontend;
+    const auto ready = cooperative_frontend_current(state, frontend);
+    if (ready != CUDA_SUCCESS) {
+        return ready;
+    }
+    CUcontext event_context = nullptr;
+    std::shared_ptr<CudaCooperativeFrontend> event_owner;
+    const auto found = state.cooperative_router->event_frontend(event, event_context, event_owner);
+    if (found == CUDA_SUCCESS && event_owner == frontend) {
+        CudaEventProjection projection;
+        const auto projected = state.cooperative_router->event_projection(event, projection);
+        if (projected != CUDA_SUCCESS) {
+            return projected;
+        }
+        if (!projection.is_logical()) {
+            return intercept_cooperative_native_boundary(original);
+        }
+        return frontend->wait_event(stream, per_thread_default_stream, event);
+    }
+    if (found != CUDA_SUCCESS && found != CUDA_ERROR_INVALID_HANDLE) {
+        return found;
+    }
+    return intercept_cooperative_native_boundary(original);
+}
+
+[[nodiscard]] void* find_proc_address_interceptor(const char* symbol, cuuint64_t flags,
+                                                  int cuda_version = 12600) noexcept {
+    const std::string_view name{symbol};
+    if ((name == "cuLibraryLoadData" || name == "cuLibraryLoadFromFile" ||
+         name == "cuLibraryGetModule" || name == "cuLibraryUnload") &&
+        cuda_version < 12000)
+        return nullptr;
+    if (name == "cuCtxDestroy") {
+        return cuda_version < 2000
+                   ? nullptr
+                   : find_interceptor_symbol(
+                         cuda_version < 4000 ? "cuCtxDestroy" : "cuCtxDestroy_v2", false);
+    }
+    if (name == "cuCtxDestroy_v2") {
+        return nullptr;
+    }
+    if (name == "cuDevicePrimaryCtxRelease") {
+        if (cuda_version < 7000) {
+            return nullptr;
+        }
+        return find_interceptor_symbol(
+            cuda_version < 11000 ? "cuDevicePrimaryCtxRelease" : "cuDevicePrimaryCtxRelease_v2",
+            false);
+    }
+    if (name == "cuDevicePrimaryCtxRelease_v2" && cuda_version < 11000) {
+        return nullptr;
+    }
+    if (name == "cuDevicePrimaryCtxReset") {
+        if (cuda_version < 7000) {
+            return nullptr;
+        }
+        return find_interceptor_symbol(
+            cuda_version < 11000 ? "cuDevicePrimaryCtxReset" : "cuDevicePrimaryCtxReset_v2", false);
+    }
+    if (name == "cuDevicePrimaryCtxReset_v2" && cuda_version < 11000) {
+        return nullptr;
+    }
+    if (name == "cuGraphInstantiate") {
+        return find_interceptor_symbol(cuda_version < 11000   ? "cuGraphInstantiate"
+                                       : cuda_version < 11040 ? "cuGraphInstantiate_v2"
+                                                              : "cuGraphInstantiateWithFlags",
+                                       false);
+    }
+    if (name == "cuGraphExecUpdate") {
+        return find_interceptor_symbol(
+            cuda_version < 12000 ? "cuGraphExecUpdate" : "cuGraphExecUpdate_v2", false);
+    }
+    if (name == "cuStreamBeginCapture" || name == "cuStreamBeginCapture_ptsz") {
+        if (cuda_version < 10000) {
+            return nullptr;
+        }
+        const bool is_ptds = name == "cuStreamBeginCapture_ptsz" ||
+                             (flags & CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM) != 0;
+        return find_interceptor_symbol(
+            cuda_version < 10010 ? "cuStreamBeginCapture" : "cuStreamBeginCapture_v2", is_ptds);
+    }
+    const bool is_copy = name.starts_with("cuMemcpyHtoD") || name.starts_with("cuMemcpyDtoH") ||
+                         name.starts_with("cuMemcpyDtoD") || name == "cuMemcpy" ||
+                         name == "cuMemcpyAsync";
+    const bool is_memset = name.starts_with("cuMemsetD8") || name.starts_with("cuMemsetD16") ||
+                           name.starts_with("cuMemsetD32");
+    // Never substitute a modern pointer/size ABI for an old resolver result.
+    // CUDA's cudaTypedefs.h identifies these versioned signatures.
+    if (((is_copy || is_memset || name == "cuMemAllocHost" ||
+          name == "cuMemHostGetDevicePointer") &&
+         cuda_version < 3020) ||
+        ((name == "cuMemcpy" || name == "cuMemcpyAsync") && cuda_version < 4000) ||
+        (name == "cuMemHostRegister" && cuda_version < 6050) ||
+        ((name == "cuStreamGetCtx" || name == "cuStreamGetCtx_ptsz") &&
+         (cuda_version < 9020 || cuda_version >= 12050)) ||
+        ((is_copy || is_memset) && (flags & CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM) != 0 &&
+         cuda_version < 7000)) {
+        return nullptr;
+    }
     return glimmer::interceptor::find_interceptor_symbol(
         symbol, (flags & CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM) != 0);
+}
+
+void replace_runtime_proc_address(const DriverDispatch& driver, const char* symbol, void** address,
+                                  cuuint64_t flags, int cuda_version) {
+    // Runtime cache bindings outlive a trusted private initialization call.
+    // Keep them controlled; their later invocation still honors native guards.
+    // Driver-only private lookups have no Runtime frame and remain original.
+    if (*address == nullptr || (is_inside_driver_call() && !is_inside_runtime_call()) ||
+        !runtime_persistent_lookup_is_enabled()) {
+        return;
+    }
+    if (std::strcmp(symbol, "cuGetProcAddress") == 0) {
+        // libcudart caches both resolver ABIs before querying its launch entry.
+        // Match the actual native pointer rather than guessing from a version.
+        if (driver.is_proc_address_function(*address, true)) {
+            *address = reinterpret_cast<void*>(&runtime_driver_get_proc_address_v2);
+        } else if (driver.is_proc_address_function(*address, false)) {
+            *address = reinterpret_cast<void*>(&runtime_driver_get_proc_address);
+        }
+    } else if (std::strcmp(symbol, "cuLaunchKernel") == 0 ||
+               cooperative_runtime_preview_requested()) {
+        if (auto* replacement = find_proc_address_interceptor(symbol, flags, cuda_version);
+            replacement != nullptr) {
+            *address = replacement;
+        }
+    }
 }
 
 struct ContextIdentity {
@@ -537,10 +1138,6 @@ struct ContextIdentity {
     if (stream == nullptr) {
         return capture_context_identity(state);
     }
-    if (per_thread_default_stream ? !state.driver.has_stream_identity_ptsz()
-                                  : !state.driver.has_stream_identity()) {
-        return std::nullopt;
-    }
 
     CUcontext context = nullptr;
     const CUresult context_result = per_thread_default_stream
@@ -554,7 +1151,16 @@ struct ContextIdentity {
     const CUresult device_result = per_thread_default_stream
                                        ? state.driver.stream_get_device_ptsz(stream, &device)
                                        : state.driver.stream_get_device(stream, &device);
-    if (device_result != CUDA_SUCCESS || device < 0) {
+    if (device_result == CUDA_ERROR_NOT_SUPPORTED) {
+        const std::optional<ContextIdentity> current = capture_context_identity(state);
+        if (!current.has_value() || current->context != context) {
+            return std::nullopt;
+        }
+        device = current->device;
+    } else if (device_result != CUDA_SUCCESS) {
+        return std::nullopt;
+    }
+    if (device < 0) {
         return std::nullopt;
     }
     return ContextIdentity{.context = context, .device = device};
@@ -616,6 +1222,1151 @@ template <typename Invocation>
 
 }  // namespace
 
+bool cooperative_driver_preview_requested() noexcept {
+    const char* value = std::getenv("GLIMMER_COOPERATIVE_DRIVER_PREVIEW");
+    return (value != nullptr && std::strcmp(value, "1") == 0) ||
+           cooperative_runtime_preview_requested();
+}
+
+ProcessCallGate& cooperative_process_call_gate() noexcept {
+    static ProcessCallGate gate;
+    return gate;
+}
+
+DriverCooperativeRouter* cooperative_source_router() noexcept {
+    try {
+        if (!cooperative_process_call_gate().is_entered_by_current_thread()) {
+            return nullptr;
+        }
+        auto& state = get_state();
+        return ensure_initialized(state) && state.is_cooperative_requested
+                   ? state.cooperative_router.get()
+                   : nullptr;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+std::optional<PersistentBlasContext> persistent_blas_current_context() noexcept {
+    try {
+        auto& gate = cooperative_process_call_gate();
+        if (!gate.is_entered_by_current_thread() || gate.is_native_only_on_current_thread() ||
+            is_inside_driver_call() || is_inside_runtime_call())
+            return std::nullopt;
+        auto& state = get_state();
+        PersistentBlasContext result;
+        if (!ensure_initialized(state) || !should_route_cooperative(state) ||
+            state.driver.context_get_current(&result.context) != CUDA_SUCCESS || !result.context)
+            return std::nullopt;
+        static const auto get_id =
+            reinterpret_cast<decltype(&cuCtxGetId)>(resolve_native_driver_function("cuCtxGetId"));
+        const NativeDriverCallScope native;
+        if (!get_id || get_id(result.context, &result.id) != CUDA_SUCCESS) return std::nullopt;
+        return result;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<CUresult> try_intercept_persistent_sgemm(CUcontext handle_context,
+                                                       PersistentSgemmProblem problem,
+                                                       CUdeviceptr a, CUdeviceptr b, CUdeviceptr c,
+                                                       CUdeviceptr bias, CUdeviceptr workspace,
+                                                       std::size_t workspace_bytes) {
+    auto& gate = cooperative_process_call_gate();
+    if (!gate.is_entered_by_current_thread() || gate.is_native_only_on_current_thread() ||
+        is_inside_driver_call() || is_inside_runtime_call())
+        return std::nullopt;
+    const auto layout = persistent_sgemm_layout(problem);
+    if (!handle_context || !layout || !a || !b || !c || a % 4 || b % 4 || c % 4)
+        return std::nullopt;
+    if ((layout->bias_bytes != 0) != (bias != 0) || bias % 4 || (workspace_bytes && !workspace))
+        return std::nullopt;
+    auto& state = get_state();
+    if (!ensure_initialized(state) || !should_route_cooperative(state) ||
+        !state.persistent_kernels || !state.cooperative_router)
+        return std::nullopt;
+    CUcontext context{};
+    CUdevice device{};
+    CUstreamCaptureStatus capture{};
+    if (state.driver.context_get_current(&context) != CUDA_SUCCESS || context != handle_context ||
+        state.driver.context_get_device(&device) != CUDA_SUCCESS ||
+        state.driver.stream_capture_status(nullptr, &capture, false) != CUDA_SUCCESS ||
+        capture != CU_STREAM_CAPTURE_STATUS_NONE)
+        return std::nullopt;
+    {
+        const NativeDriverCallScope native;
+        const auto& dispatch = state.cooperative_router->copy_range_dispatch();
+        if (!has_independent_gemm_range(dispatch, state.allocations, {a, context, device},
+                                        layout->a_bytes) ||
+            !has_independent_gemm_range(dispatch, state.allocations, {b, context, device},
+                                        layout->b_bytes) ||
+            !has_independent_gemm_range(dispatch, state.allocations, {c, context, device},
+                                        layout->c_bytes) ||
+            (bias && !has_independent_gemm_range(dispatch, state.allocations,
+                                                 {bias, context, device}, layout->bias_bytes)) ||
+            (workspace_bytes &&
+             !has_independent_gemm_range(dispatch, state.allocations, {workspace, context, device},
+                                         workspace_bytes)))
+            return std::nullopt;
+    }
+    // The range qualification above bounds these half-open endpoints.
+    if ((a < c + layout->c_bytes && c < a + layout->a_bytes) ||
+        (b < c + layout->c_bytes && c < b + layout->b_bytes) ||
+        (bias && bias < c + layout->c_bytes && c < bias + layout->bias_bytes))
+        return std::nullopt;
+    if (workspace_bytes) {
+        const auto overlaps_workspace = [&](CUdeviceptr pointer, std::size_t bytes) {
+            return bytes && workspace < pointer + bytes && pointer < workspace + workspace_bytes;
+        };
+        if (overlaps_workspace(a, layout->a_bytes) || overlaps_workspace(b, layout->b_bytes) ||
+            overlaps_workspace(c, layout->c_bytes) || overlaps_workspace(bias, layout->bias_bytes))
+            return std::nullopt;
+    }
+    auto code = state.persistent_kernels->owned_sgemm(context);
+    if (!code) {
+        const auto prepared = intercept_cooperative_native_boundary(
+            [&] { return state.persistent_kernels->prepare_owned_sgemm(context); });
+        if (prepared == CUDA_ERROR_NOT_SUPPORTED) return std::nullopt;
+        if (prepared != CUDA_SUCCESS) return prepared;
+        code = state.persistent_kernels->owned_sgemm(context);
+        if (!code) return CUDA_ERROR_UNKNOWN;
+    }
+    std::shared_ptr<CudaCooperativeFrontend> frontend;
+    const auto ready = state.cooperative_router->frontend(context, frontend);
+    if (ready != CUDA_SUCCESS) return ready;
+    struct Owners {
+        std::shared_ptr<void> code;
+        std::shared_ptr<void> router;
+    };
+    const auto owners =
+        std::make_shared<Owners>(Owners{code->resources, state.cooperative_router->resources()});
+    if (!owners->code || !owners->router) return CUDA_ERROR_UNKNOWN;
+    CooperativeKernelVariant variant{
+        context,
+        code->function,
+        {kPersistentSgemmParameters.begin(), kPersistentSgemmParameters.end()},
+        {layout->grid[0] * layout->grid[1], 256},
+        code->worker_blocks};
+    if (state.persistent_audit)
+        variant.audit = CooperativeKernelVariant::AuditParameters{14, 15, true};
+    CUdeviceptr first_tile_observer{};
+    CUdeviceptr tile_counts{};
+    auto reduction_depth = layout->reduction_depth;
+    std::array<void*, 17> arguments{&a,
+                                    &b,
+                                    &c,
+                                    &problem.rows,
+                                    &problem.columns,
+                                    &problem.depth,
+                                    &problem.leading_a,
+                                    &problem.leading_b,
+                                    &problem.leading_c,
+                                    &problem.transpose_b,
+                                    &problem.alpha,
+                                    &problem.beta,
+                                    &problem.transpose_a,
+                                    &bias,
+                                    &first_tile_observer,
+                                    &tile_counts,
+                                    &reduction_depth};
+    const auto result = frontend->launch(variant, nullptr, false, layout->grid, layout->block,
+                                         arguments.data(), owners);
+    if (result == CUDA_SUCCESS && state.trace_kernel_launches)
+        report_diagnostic(bias ? "[glimmer] persistent_lt_bias accepted=1\n"
+                               : "[glimmer] persistent_sgemm accepted=1\n");
+    return result;
+}
+
+CUresult configure_cooperative_native_epochs(
+    const CudaNativeEpochConfiguration& configuration) noexcept {
+    try {
+        auto& gate = cooperative_process_call_gate();
+        if (!gate.is_entered_by_current_thread() || gate.is_native_only_on_current_thread() ||
+            is_inside_driver_call() || is_inside_runtime_call())
+            return CUDA_ERROR_NOT_PERMITTED;
+        if (!control::valid_native_epoch_extent(configuration.extent))
+            return CUDA_ERROR_INVALID_VALUE;
+        const ProcessCallGate::Transition transition(gate);
+        auto& state = get_state();
+        const std::lock_guard lock(state.construction_mutex);
+        if (state.has_started_initialization || state.native_epoch_configuration)
+            return CUDA_ERROR_NOT_PERMITTED;
+        state.native_epoch_configuration = configuration;
+        return CUDA_SUCCESS;
+    } catch (...) {
+        return CUDA_ERROR_UNKNOWN;
+    }
+}
+
+std::optional<std::size_t> cooperative_submitted_release_count(CUcontext context) noexcept {
+    try {
+        if (!context || !cooperative_process_call_gate().is_entered_by_current_thread())
+            return std::nullopt;
+        const auto submitted = get_state().allocations.submitted_async_releases(true);
+        if (!submitted) return std::nullopt;
+        return static_cast<std::size_t>(std::ranges::count_if(
+            *submitted, [&](const auto& ticket) { return ticket.identity.context == context; }));
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+CooperativeCallScope::CooperativeCallScope() {
+    if (cooperative_driver_preview_requested() && !is_inside_driver_call() &&
+        !g_is_inside_cooperative_boundary) {
+        auto& gate = cooperative_process_call_gate();
+        const bool is_outer = !gate.is_entered_by_current_thread();
+        call_.emplace(gate);
+        if (is_outer && gate.is_native_only_on_current_thread()) {
+            auto& state = get_state();
+            if (!state.cooperative_router)
+                throw std::runtime_error("missing retained source owner");
+            const CooperativeBoundaryScope boundary;
+            const auto finished = state.cooperative_router->try_finish_source_capture(gate, true);
+            if (finished != CUDA_SUCCESS && finished != CUDA_ERROR_NOT_READY)
+                throw std::runtime_error("failed retained source ownership");
+        }
+    }
+}
+
+CUresult intercept_cooperative_native_boundary(const std::function<CUresult()>& operation) {
+    if (!cooperative_driver_preview_requested() || is_inside_driver_call() ||
+        (is_inside_runtime_call() && !runtime_cooperative_driver_routing_is_enabled()) ||
+        g_is_inside_cooperative_boundary) {
+        return operation();
+    }
+    InterceptorState& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router || !state.persistent_kernels) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    const CooperativeBoundaryScope scope;
+    return state.cooperative_router->native_boundary(
+        operation, [] { return intercept_context_synchronize(); });
+}
+
+CUresult intercept_cooperative_memory_boundary(const std::function<CUresult()>& operation) {
+    auto& gate = cooperative_process_call_gate();
+    if (!gate.is_native_only_on_current_thread()) {
+        return intercept_cooperative_native_boundary(operation);
+    }
+    auto& state = get_state();
+    if (!ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (!should_route_cooperative(state)) {
+        return operation();
+    }
+    if (!state.cooperative_router) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    const CooperativeBoundaryScope scope;
+    return state.cooperative_router->source_memory_metadata(gate, operation);
+}
+
+CUresult intercept_cooperative_module_boundary(const std::function<CUresult()>& operation) {
+    auto& gate = cooperative_process_call_gate();
+    if (!gate.is_native_only_on_current_thread()) {
+        return intercept_cooperative_native_boundary(operation);
+    }
+    auto& state = get_state();
+    if (!ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (!should_route_cooperative(state)) {
+        return operation();
+    }
+    if (!state.cooperative_router) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    const CooperativeBoundaryScope scope;
+    return state.cooperative_router->source_module_metadata(gate, operation);
+}
+
+CUresult intercept_graph_instantiation(CUgraphExec* output, CUgraph graph,
+                                       bool should_prepare_effects,
+                                       const std::function<CUresult(CUgraphExec*)>& original) {
+    auto& state = get_state();
+    ensure_state_initialized(state);
+    if (!should_route_cooperative(state)) {
+        return original(output);
+    }
+    if (!output) {
+        return intercept_cooperative_native_boundary([&] { return original(output); });
+    }
+    if (!state.cooperative_router) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    CUcontext context{};
+    const auto current = state.driver.context_get_current(&context);
+    if (current != CUDA_SUCCESS || !context) {
+        return intercept_cooperative_native_boundary([&] { return original(output); });
+    }
+    CudaNativeGraphReservation reservation;
+    const auto prepared = state.cooperative_router->prepare_graph(context, graph, reservation,
+                                                                  should_prepare_effects);
+    if (prepared != CUDA_SUCCESS) {
+        return prepared;
+    }
+    return intercept_cooperative_native_boundary([&] {
+        // Native failure may leave the application's output uninitialized.
+        // Never inspect it: stage the exact native output in initialized storage.
+        CUgraphExec native_output{};
+        const auto result = original(&native_output);
+        const auto published =
+            state.cooperative_router->graphs().publish(reservation, native_output, result);
+        if (native_output || result == CUDA_SUCCESS) {
+            *output = native_output;
+        }
+        return published;
+    });
+}
+
+CUresult intercept_graph_mutation(CUgraphExec executable, bool is_destroy,
+                                  const std::function<CUresult()>& original) {
+    auto& state = get_state();
+    ensure_state_initialized(state);
+    if (!should_route_cooperative(state)) {
+        return original();
+    }
+    if (!state.cooperative_router) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    state.cooperative_router->graphs().invalidate(executable);
+    // Executable mutation is CPU/native graph metadata. Do not drain unrelated
+    // low work or treat successful native destruction as GPU completion proof.
+    const auto result = original();
+    if (is_destroy && result == CUDA_SUCCESS) {
+        state.cooperative_router->graphs().forget(executable);
+    }
+    return result;
+}
+
+CUresult cooperative_graph_executable(CUgraphExec executable,
+                                      CudaNativeGraphExecutable& output) noexcept {
+    try {
+        auto& state = get_state();
+        ensure_state_initialized(state);
+        return state.cooperative_router
+                   ? state.cooperative_router->graphs().lookup(executable, output)
+                   : CUDA_ERROR_NOT_SUPPORTED;
+    } catch (...) {
+        return CUDA_ERROR_UNKNOWN;
+    }
+}
+
+CUresult intercept_graph_event_update(CUgraphExec executable, CUgraphNode node, CUevent event,
+                                      bool is_record, const std::function<CUresult()>& original) {
+    auto& state = get_state();
+    ensure_state_initialized(state);
+    if (!should_route_cooperative(state)) return original();
+    if (!state.cooperative_router) return CUDA_ERROR_NOT_SUPPORTED;
+    auto& router = *state.cooperative_router;
+    CudaNativeGraphReservation replacement;
+    if (executable) {
+        const auto prepared =
+            router.prepare_graph_event_update(executable, node, event, is_record, replacement);
+        if (prepared != CUDA_SUCCESS && prepared != CUDA_ERROR_INVALID_HANDLE) return prepared;
+    }
+    const auto status = original();
+    return replacement ? router.graphs().publish_event_update(replacement, status) : status;
+}
+
+CUresult intercept_graph_node_update(CUgraphExec executable, CUgraphNode node,
+                                     std::optional<CUgraphNodeType> expected_type,
+                                     const std::function<CUresult()>& original) {
+    auto& state = get_state();
+    ensure_state_initialized(state);
+    if (!should_route_cooperative(state)) return original();
+    if (!state.cooperative_router) return CUDA_ERROR_NOT_SUPPORTED;
+    auto& graphs = state.cooperative_router->graphs();
+    CudaNativeGraphReservation replacement;
+    if (executable) {
+        const auto prepared =
+            graphs.prepare_node_update(executable, node, expected_type, replacement);
+        if (prepared != CUDA_SUCCESS && prepared != CUDA_ERROR_INVALID_HANDLE) return prepared;
+    }
+    const auto status = original();
+    return replacement ? graphs.publish_event_update(replacement, status) : status;
+}
+
+CUresult intercept_graph_update(CUgraphExec executable, CUgraph graph,
+                                std::optional<CUgraphNode> child_node,
+                                const std::function<CUresult()>& original) {
+    auto& state = get_state();
+    ensure_state_initialized(state);
+    if (!should_route_cooperative(state)) return original();
+    if (!state.cooperative_router) return CUDA_ERROR_NOT_SUPPORTED;
+    auto& router = *state.cooperative_router;
+    CudaNativeGraphReservation replacement;
+    if (executable) {
+        const auto prepared =
+            router.prepare_graph_update(executable, graph, child_node, replacement);
+        if (prepared != CUDA_SUCCESS && prepared != CUDA_ERROR_INVALID_HANDLE) return prepared;
+    }
+    const auto status = original();
+    return replacement ? router.graphs().publish_event_update(replacement, status) : status;
+}
+
+cudaError_t intercept_cooperative_runtime_stream_destroy(
+    cudaStream_t stream, const std::function<cudaError_t()>& original) {
+    static_assert(std::is_same_v<cudaStream_t, CUstream>);
+    auto& gate = cooperative_process_call_gate();
+    if (!original) {
+        return cudaErrorInvalidValue;
+    }
+    if (!cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary) {
+        return original();
+    }
+    auto& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router) {
+        return cudaErrorNotSupported;
+    }
+    const CooperativeBoundaryScope scope;
+    cudaError_t native_status{cudaErrorUnknown};
+    bool was_invoked{}, has_native_effect{};
+    const auto invoke = [&] {
+        was_invoked = true;
+        native_status = original();
+        has_native_effect = native_status == cudaSuccess;
+        return has_native_effect ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
+    };
+    const auto detach = [&](CUcontext context) {
+        if (state.quota_mode != QuotaMode::kEnabled) {
+            return CUDA_SUCCESS;
+        }
+        const AsyncStreamIdentity saved{.stream = stream, .context = context};
+        if (state.allocations.is_accounting_degraded() ||
+            !state.allocations.detach_async_releases_for_stream(saved)) {
+            state.allocations.mark_accounting_degraded();
+            return CUDA_ERROR_UNKNOWN;
+        }
+        return CUDA_SUCCESS;
+    };
+    const auto status =
+        gate.is_native_only_on_current_thread()
+            ? state.cooperative_router->source_stream_destroy(gate, stream, invoke, detach,
+                                                              CudaSourceMemoryOrigin::kRuntime,
+                                                              &has_native_effect)
+            : state.cooperative_router->native_stream_destroy(
+                  stream, invoke, detach, [] { return intercept_context_synchronize(); },
+                  &has_native_effect);
+    return was_invoked && native_status != cudaSuccess ? native_status
+           : status == CUDA_SUCCESS                    ? native_status
+                                                       : cudaErrorUnknown;
+}
+
+cudaError_t intercept_cooperative_runtime_event_record(
+    cudaEvent_t event, cudaStream_t stream, bool is_ptds, unsigned int flags,
+    const std::function<cudaError_t()>& original) {
+    static_assert(std::is_same_v<cudaEvent_t, CUevent>);
+    static_assert(std::is_same_v<cudaStream_t, CUstream>);
+    auto& gate = cooperative_process_call_gate();
+    if (!original) {
+        return cudaErrorInvalidValue;
+    }
+    if (!cooperative_runtime_preview_requested() || !gate.is_native_only_on_current_thread() ||
+        is_inside_driver_call() || g_is_inside_cooperative_boundary) {
+        return original();
+    }
+    auto& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router) {
+        return cudaErrorNotSupported;
+    }
+    const CooperativeBoundaryScope scope;
+    cudaError_t native_status{cudaErrorUnknown};
+    bool was_invoked{};
+    bool has_native_effect{};
+    const auto status = state.cooperative_router->source_runtime_event_record(
+        gate, event, stream, is_ptds, flags,
+        [&] {
+            was_invoked = true;
+            native_status = original();
+            has_native_effect = native_status == cudaSuccess;
+            return has_native_effect ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
+        },
+        &has_native_effect);
+    return was_invoked && native_status != cudaSuccess ? native_status
+           : status == CUDA_SUCCESS                    ? native_status
+                                                       : cudaErrorUnknown;
+}
+
+std::optional<cudaError_t> intercept_normal_runtime_event_destroy(
+    cudaEvent_t event, const std::function<cudaError_t()>& original) {
+    static_assert(std::is_same_v<cudaEvent_t, CUevent>);
+    if (!original || !cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary ||
+        cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return std::nullopt;
+    }
+    auto& state = get_state();
+    if (!state.cooperative_router) {
+        return std::nullopt;
+    }
+    CudaEventProjection owned;
+    const auto found = state.cooperative_router->event_projection(event, owned);
+    const CooperativeBoundaryScope scope;
+    if (found == CUDA_SUCCESS && !owned.allows_logical_binding()) {
+        const auto status = original();
+        return status == cudaSuccess &&
+                       state.cooperative_router->retire_metadata_event(owned) != CUDA_SUCCESS
+                   ? cudaErrorUnknown
+                   : status;
+    }
+    cudaError_t native_status{cudaErrorUnknown};
+    bool was_invoked{}, has_native_effect{};
+    const auto status = state.cooperative_router->native_event_destroy(
+        event,
+        [&] {
+            was_invoked = true;
+            native_status = original();
+            has_native_effect = native_status == cudaSuccess;
+            return has_native_effect ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
+        },
+        [] { return intercept_context_synchronize(); }, &has_native_effect);
+    return was_invoked && native_status != cudaSuccess ? native_status
+           : status == CUDA_SUCCESS                    ? native_status
+                                                       : cudaErrorUnknown;
+}
+
+std::optional<cudaError_t> intercept_normal_runtime_event_completion(
+    cudaEvent_t event, bool should_wait, const std::function<cudaError_t()>& original) {
+    static_assert(std::is_same_v<cudaEvent_t, CUevent>);
+    if (!original || !cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary ||
+        cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return std::nullopt;
+    }
+    auto& state = get_state();
+    if (!state.cooperative_router) {
+        return std::nullopt;
+    }
+    const CooperativeBoundaryScope scope;
+    // Original SDK validates this exact handle and retains native last-error /
+    // lazy binding. Its readiness alone does not complete a deferred record.
+    const auto native = original();
+    if (native != cudaSuccess) {
+        // Native pending status is already conservative. In particular, do
+        // not turn an unknown pending query into a blocking context drain.
+        return native;
+    }
+    bool needs_native_boundary{};
+    const auto logical =
+        cooperative_event_completion(state, event, should_wait, needs_native_boundary);
+    if (logical == CUDA_ERROR_NOT_READY) {
+        return cudaErrorNotReady;  // Explicit logical status mapping, not an enum cast.
+    }
+    if (logical != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+    if (needs_native_boundary &&
+        state.cooperative_router->native_boundary([] { return CUDA_SUCCESS; },
+                                                  [] { return intercept_context_synchronize(); }) !=
+            CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+    return native;
+}
+
+std::optional<cudaError_t> intercept_normal_runtime_event_elapsed_time(
+    float* milliseconds, cudaEvent_t start, cudaEvent_t end,
+    const std::function<cudaError_t(float*)>& original) {
+    static_assert(std::is_same_v<cudaEvent_t, CUevent>);
+    if (!original || !cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary ||
+        cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return std::nullopt;
+    }
+    auto& state = get_state();
+    if (!state.cooperative_router) {
+        return std::nullopt;
+    }
+    const CooperativeBoundaryScope scope;
+    std::array<CudaEventProjection, 2> owned;
+    std::size_t count{};
+    CUresult prepared{CUDA_SUCCESS};
+    for (CUevent event : {start, end}) {
+        CudaEventProjection snapshot;
+        const auto found = state.cooperative_router->event_projection(event, snapshot);
+        if (found == CUDA_SUCCESS) {
+            owned[count++] = std::move(snapshot);
+        } else if (found != CUDA_ERROR_INVALID_HANDLE) {
+            prepared = found;
+        }
+    }
+    cudaError_t measured{cudaErrorUnknown};
+    bool was_invoked{};
+    const auto sample = [&] {
+        was_invoked = true;
+        measured = measure_runtime_event_timing(
+            milliseconds, start, end,
+            [&](CUevent event) {
+                bool needs_native_boundary{};
+                return cooperative_event_completion(state, event, false, needs_native_boundary);
+            },
+            original);
+        return CUDA_SUCCESS;
+    };
+    const auto admitted = prepared == CUDA_SUCCESS ? state.cooperative_router->admit_event_metadata(
+                                                         std::span{owned.data(), count}, sample)
+                                                   : prepared;
+    if (was_invoked) {
+        return measured;
+    }
+    // Even an internal read-only admission failure retains one original SDK
+    // validation and its native error precedence, with no sample publication.
+    return measure_runtime_event_timing(
+        milliseconds, start, end, [admitted](CUevent) { return admitted; }, original);
+}
+
+cudaError_t measure_runtime_event_timing(float* milliseconds, cudaEvent_t start, cudaEvent_t end,
+                                         const std::function<CUresult(CUevent)>& observe,
+                                         const std::function<cudaError_t(float*)>& original) {
+    if (!observe || !original) {
+        return cudaErrorNotSupported;
+    }
+    CUresult readiness{CUDA_SUCCESS};
+    for (CUevent event : {start, end}) {
+        const auto logical = observe(event);
+        if (logical != CUDA_SUCCESS &&
+            (readiness == CUDA_SUCCESS || readiness == CUDA_ERROR_NOT_READY)) {
+            readiness = logical;
+        }
+    }
+    float sample{};
+    const auto native = original(milliseconds == nullptr ? nullptr : &sample);
+    if (native != cudaSuccess) {
+        return native;
+    }
+    if (readiness == CUDA_ERROR_NOT_READY) {
+        return cudaErrorNotReady;
+    }
+    if (readiness != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+    if (milliseconds != nullptr) {
+        *milliseconds = sample;
+    }
+    return native;
+}
+
+std::optional<cudaError_t> intercept_normal_runtime_event_record(
+    cudaEvent_t event, cudaStream_t stream, bool is_ptds,
+    const std::function<cudaError_t()>& original) {
+    static_assert(std::is_same_v<cudaEvent_t, CUevent>);
+    static_assert(std::is_same_v<cudaStream_t, CUstream>);
+    if (!original || !cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary ||
+        cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return std::nullopt;
+    }
+    auto& state = get_state();
+    if (!state.cooperative_router) {
+        return std::nullopt;
+    }
+    const CooperativeBoundaryScope scope;
+    auto& router = *state.cooperative_router;
+    if (router.normal_owner_status() != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+    CudaEventProjection projection;
+    const auto found = router.event_projection(event, projection);
+    if (found != CUDA_SUCCESS || !projection.allows_logical_binding() ||
+        (!projection.is_logical() && !projection.has_native_completion() &&
+         !projection.issued_native_prefix())) {
+        const auto native = original();
+        if (native != cudaSuccess) {
+            return native;
+        }
+        return router.native_boundary([] { return CUDA_SUCCESS; },
+                                      [] { return intercept_context_synchronize(); }) ==
+                       CUDA_SUCCESS
+                   ? cudaSuccess
+                   : cudaErrorUnknown;
+    }
+    CUcontext context{};
+    std::shared_ptr<CudaCooperativeFrontend> owner;
+    const auto bound = router.event_frontend(event, context, owner);
+    if (bound != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+    cudaError_t native_status{cudaErrorUnknown};
+    bool was_invoked{};
+    const auto accepted = router.admit_event_metadata(std::span{&projection, 1}, [&] {
+        return owner->admit_event_metadata(event, [&] {
+            CudaEventProjection current;
+            auto status = router.refresh_event_projection(projection, current);
+            std::shared_ptr<CudaQueueEventRecordGuard> guard;
+            if (status == CUDA_SUCCESS) {
+                status = router.prepare_event_record_guard(current, guard);
+            }
+            if (status != CUDA_SUCCESS) {
+                return status;  // No original effect has occurred.
+            }
+            was_invoked = true;
+            try {
+                native_status = original();
+            } catch (...) {
+                router.fail_context_owner(context, CUDA_ERROR_UNKNOWN);
+                return CUDA_ERROR_UNKNOWN;
+            }
+            if (native_status != cudaSuccess) {
+                return CUDA_SUCCESS;  // SDK failure accepts no logical record.
+            }
+            RuntimeMetadataEffectGuard effect(router, context);
+            CUcontext stream_context{};
+            {
+                const NativeDriverCallScope native;
+                status = is_ptds ? state.driver.stream_get_context_ptsz(stream, &stream_context)
+                                 : state.driver.stream_get_context(stream, &stream_context);
+            }
+            if (status == CUDA_SUCCESS && stream_context != context) {
+                status = CUDA_ERROR_INVALID_CONTEXT;
+            }
+            if (status == CUDA_SUCCESS) {
+                status = router.with_context(context, [&] {
+                    return owner->record_event(event, stream, is_ptds, std::move(guard));
+                });
+            }
+            if (status == CUDA_SUCCESS) {
+                effect.complete();
+            }
+            return status;
+        });
+    });
+    return was_invoked && native_status != cudaSuccess ? native_status
+           : accepted == CUDA_SUCCESS                  ? native_status
+                                                       : cudaErrorUnknown;
+}
+
+std::optional<cudaError_t> intercept_normal_runtime_event_wait(
+    cudaStream_t stream, cudaEvent_t event, bool is_ptds, unsigned int flags,
+    const std::function<cudaError_t()>& original) {
+    static_assert(std::is_same_v<cudaEvent_t, CUevent>);
+    static_assert(std::is_same_v<cudaStream_t, CUstream>);
+    if (!original || !cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary ||
+        cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return std::nullopt;
+    }
+    auto& state = get_state();
+    if (!state.cooperative_router) {
+        return std::nullopt;
+    }
+    const CooperativeBoundaryScope scope;
+    auto& router = *state.cooperative_router;
+    if (router.normal_owner_status() != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+    const auto complete_native = [&] {
+        return router.native_boundary([] { return CUDA_SUCCESS; },
+                                      [] { return intercept_context_synchronize(); }) ==
+                       CUDA_SUCCESS
+                   ? cudaSuccess
+                   : cudaErrorUnknown;
+    };
+    CudaEventProjection projection;
+    const auto found = router.event_projection(event, projection);
+    if (flags != 0 || found != CUDA_SUCCESS || !projection.allows_logical_binding() ||
+        (!projection.is_logical() && !projection.has_native_completion())) {
+        const auto native = original();
+        return native != cudaSuccess ? native : complete_native();
+    }
+    CUcontext context{};
+    std::shared_ptr<CudaCooperativeFrontend> owner;
+    if (router.event_frontend(event, context, owner) != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+    bool needs_native_boundary{}, was_invoked{};
+    cudaError_t native_status{cudaErrorUnknown};
+    const auto accepted = owner->admit_event_metadata(event, [&] {
+        CudaEventProjection current;
+        auto status = router.refresh_event_projection(projection, current);
+        if (status != CUDA_SUCCESS) {
+            return status;
+        }
+        if (!current.is_logical() && !current.has_native_completion()) {
+            needs_native_boundary = true;
+            return CUDA_SUCCESS;  // Validate outside the contribution, without a logical import.
+        }
+        CudaFrontendEventWait snapshot;
+        status = router.with_context(context,
+                                     [&] { return owner->prepare_event_wait(event, snapshot); });
+        if (status != CUDA_SUCCESS) {
+            return status;
+        }
+        was_invoked = true;
+        try {
+            native_status = original();
+        } catch (...) {
+            router.fail_context_owner(context, CUDA_ERROR_UNKNOWN);
+            return CUDA_ERROR_UNKNOWN;
+        }
+        if (native_status != cudaSuccess) {
+            return CUDA_SUCCESS;
+        }
+        RuntimeMetadataEffectGuard effect(router, context);
+        bool is_current{};
+        status = router.matches_event_epoch(current, is_current);
+        if (status == CUDA_SUCCESS && !is_current) {
+            status = CUDA_ERROR_INVALID_HANDLE;
+        }
+        CUcontext stream_context{};
+        if (status == CUDA_SUCCESS) {
+            const NativeDriverCallScope native;
+            status = is_ptds ? state.driver.stream_get_context_ptsz(stream, &stream_context)
+                             : state.driver.stream_get_context(stream, &stream_context);
+        }
+        if (status == CUDA_SUCCESS && stream_context != context) {
+            needs_native_boundary = true;
+            effect.complete();
+            return CUDA_SUCCESS;  // Cross-queue tokens are not inferred from SDK acceptance.
+        }
+        if (status == CUDA_SUCCESS) {
+            status = router.with_context(
+                context, [&] { return owner->wait_event_snapshot(stream, is_ptds, snapshot); });
+        }
+        if (status == CUDA_SUCCESS) {
+            effect.complete();
+        }
+        return status;
+    });
+    if (was_invoked && native_status != cudaSuccess) {
+        return native_status;
+    }
+    if (accepted != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+    if (needs_native_boundary) {
+        if (!was_invoked) {
+            native_status = original();
+        }
+        return native_status != cudaSuccess ? native_status : complete_native();
+    }
+    return native_status;
+}
+
+std::optional<cudaError_t> intercept_normal_runtime_event_create(
+    cudaEvent_t* event, unsigned int flags, const std::function<cudaError_t()>& original) {
+    static_assert(std::is_same_v<cudaEvent_t, CUevent>);
+    if (!original || !cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary || (flags & cudaEventInterprocess) != 0U ||
+        cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return std::nullopt;
+    }
+    auto& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router) {
+        return cudaErrorNotSupported;
+    }
+    const CooperativeBoundaryScope scope;
+    cudaError_t native_status{cudaErrorUnknown};
+    bool was_invoked{};
+    const auto result = state.cooperative_router->normal_runtime_event_create(event, [&] {
+        was_invoked = true;
+        native_status = original();
+        return native_status == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
+    });
+    return was_invoked && native_status != cudaSuccess ? native_status
+           : result == CUDA_SUCCESS                    ? native_status
+                                                       : cudaErrorUnknown;
+}
+
+cudaError_t intercept_cooperative_runtime_event_create(
+    cudaEvent_t* event, unsigned int flags, const std::function<cudaError_t()>& original) {
+    static_assert(std::is_same_v<cudaEvent_t, CUevent>);
+    auto& gate = cooperative_process_call_gate();
+    if (!original) {
+        return cudaErrorInvalidValue;
+    }
+    if (!cooperative_runtime_preview_requested() || !gate.is_native_only_on_current_thread() ||
+        is_inside_driver_call() || g_is_inside_cooperative_boundary) {
+        return original();
+    }
+    if ((flags & cudaEventInterprocess) != 0U) {
+        return cudaErrorNotSupported;
+    }
+    auto& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router) {
+        return cudaErrorNotSupported;
+    }
+    const CooperativeBoundaryScope scope;
+    cudaError_t native_status{cudaErrorUnknown};
+    bool was_invoked{};
+    bool has_native_effect{};
+    const auto status = state.cooperative_router->source_runtime_event_create(
+        gate, event,
+        [&] {
+            was_invoked = true;
+            native_status = original();
+            has_native_effect = native_status == cudaSuccess;
+            return has_native_effect ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
+        },
+        &has_native_effect);
+    return was_invoked && native_status != cudaSuccess ? native_status
+           : status == CUDA_SUCCESS                    ? native_status
+                                                       : cudaErrorUnknown;
+}
+
+cudaError_t intercept_cooperative_runtime_event_destroy(
+    cudaEvent_t event, const std::function<cudaError_t()>& original) {
+    static_assert(std::is_same_v<cudaEvent_t, CUevent>);
+    auto& gate = cooperative_process_call_gate();
+    if (!original) {
+        return cudaErrorInvalidValue;
+    }
+    if (!cooperative_runtime_preview_requested() || !gate.is_native_only_on_current_thread() ||
+        is_inside_driver_call() || g_is_inside_cooperative_boundary) {
+        return original();
+    }
+    auto& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router) {
+        return cudaErrorNotSupported;
+    }
+    const CooperativeBoundaryScope scope;
+    cudaError_t native_status{cudaErrorUnknown};
+    bool was_invoked{};
+    bool has_native_effect{};
+    const auto status = state.cooperative_router->source_event_destroy(
+        gate, event,
+        [&] {
+            was_invoked = true;
+            native_status = original();
+            has_native_effect = native_status == cudaSuccess;
+            // Effect signal only; never reinterpret Runtime's native error.
+            return has_native_effect ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
+        },
+        CudaSourceMemoryOrigin::kRuntime, &has_native_effect);
+    return was_invoked && native_status != cudaSuccess ? native_status
+           : status == CUDA_SUCCESS                    ? native_status
+                                                       : cudaErrorUnknown;
+}
+
+cudaError_t intercept_cooperative_runtime_memory_boundary(
+    const std::function<cudaError_t()>& operation, const bool& has_native_issue) {
+    auto& gate = cooperative_process_call_gate();
+    if (!cooperative_runtime_preview_requested() || !gate.is_native_only_on_current_thread() ||
+        is_inside_driver_call() || g_is_inside_cooperative_boundary) {
+        return operation();
+    }
+    auto& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router) {
+        return cudaErrorNotSupported;
+    }
+    const CooperativeBoundaryScope scope;
+    cudaError_t native_status{cudaErrorUnknown};
+    bool was_invoked{};
+    const auto status = state.cooperative_router->source_memory_metadata(
+        gate,
+        [&] {
+            was_invoked = true;
+            native_status = operation();
+            return native_status == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
+        },
+        CudaSourceMemoryOrigin::kRuntime, &has_native_issue);
+    return was_invoked && native_status != cudaSuccess ? native_status
+           : status == CUDA_SUCCESS                    ? native_status
+                                                       : cudaErrorUnknown;
+}
+
+cudaError_t intercept_cooperative_runtime_native_boundary(
+    const std::function<cudaError_t()>& operation) {
+    if (!cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary) {
+        return operation();
+    }
+    InterceptorState& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router || !state.persistent_kernels) {
+        return cudaErrorNotSupported;
+    }
+    const CooperativeBoundaryScope scope;
+    cudaError_t original = cudaErrorUnknown;
+    const auto boundary = state.cooperative_router->native_boundary(
+        [&] {
+            original = operation();
+            return CUDA_SUCCESS;
+        },
+        [] { return intercept_context_synchronize(); });
+    return boundary == CUDA_SUCCESS ? original : cudaErrorUnknown;
+}
+
+void* resolve_native_driver_function(const char* name, bool per_thread_default_stream,
+                                     int cuda_version) {
+    InterceptorState& state = get_state();
+    if (!ensure_initialized(state) || name == nullptr) {
+        return nullptr;
+    }
+    void* address = nullptr;
+    const auto flags = per_thread_default_stream ? CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM
+                                                 : CU_GET_PROC_ADDRESS_LEGACY_STREAM;
+    if (state.driver.get_proc_address(name, &address, cuda_version, flags) != CUDA_SUCCESS) {
+        return nullptr;
+    }
+    if (is_interceptor_driver_function(address)) {
+        report_diagnostic(
+            "[glimmer] native Driver lookup returned an interceptor; recursive dispatch "
+            "rejected\n");
+        return nullptr;
+    }
+    return address;
+}
+
+CUresult intercept_driver_stream_create(const std::function<CUresult()>& original) {
+    InterceptorState& state = get_state();
+    if (!should_route_cooperative(state) ||
+        !cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return intercept_cooperative_native_boundary(original);
+    }
+    CudaProcessNativeToken token;
+    CUcontext context{};
+    const auto ready = source_native_current_context(state, token, context);
+    if (ready != CUDA_SUCCESS) {
+        return ready;
+    }
+    const auto observed = state.cooperative_router->observe_native_session_context(context);
+    return observed == CUDA_SUCCESS ? original() : observed;
+}
+
+CUresult quarantine_cooperative_source_call(CUresult error) noexcept {
+    auto* router = cooperative_source_router();
+    return router ? router->quarantine_source_call(cooperative_process_call_gate(), error)
+                  : CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult intercept_driver_copy(CUdeviceptr destination, CUdeviceptr source, void* host,
+                               std::size_t memory_bytes, CUstream stream, unsigned int kind,
+                               bool per_thread_default_stream) {
+    if (kind > 2) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    static const auto native_copies = [] {
+        std::array<void*, 6> addresses{};
+        constexpr std::array<const char*, 3> names{"cuMemcpyHtoDAsync", "cuMemcpyDtoHAsync",
+                                                   "cuMemcpyDtoDAsync"};
+        for (std::size_t index = 0; index < names.size(); ++index) {
+            addresses[index * 2] = resolve_native_driver_function(names[index], false);
+            addresses[index * 2 + 1] = resolve_native_driver_function(names[index], true);
+        }
+        return addresses;
+    }();
+    void* address =
+        native_copies[static_cast<std::size_t>(kind) * 2 + (per_thread_default_stream ? 1 : 0)];
+    if (address == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    const auto invoke = [&] {
+        const NativeDriverCallScope scope;
+        const auto result = kind == 0 ? reinterpret_cast<decltype(&cuMemcpyHtoDAsync)>(address)(
+                                            destination, host, memory_bytes, stream)
+                            : kind == 1 ? reinterpret_cast<decltype(&cuMemcpyDtoHAsync)>(address)(
+                                              host, source, memory_bytes, stream)
+                                        : reinterpret_cast<decltype(&cuMemcpyDtoDAsync)>(address)(
+                                              destination, source, memory_bytes, stream);
+        return result;
+    };
+    InterceptorState& state = get_state();
+    if (!should_route_cooperative(state)) {
+        return invoke();
+    }
+    if (cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return source_native_stream_execution(state, stream, per_thread_default_stream, invoke);
+    }
+    std::shared_ptr<CudaCooperativeFrontend> frontend;
+    const auto ready = cooperative_frontend_current(state, frontend);
+    if (ready != CUDA_SUCCESS) {
+        return ready;
+    }
+    bool can_queue = false;
+    {
+        const NativeDriverCallScope scope;
+        CUcontext context{};
+        const auto& dispatch = state.cooperative_router->copy_range_dispatch();
+        can_queue = state.driver.context_get_current(&context) == CUDA_SUCCESS;
+        if (kind != 1) {
+            can_queue = can_queue && can_defer_cuda_copy_range(dispatch, context, destination,
+                                                               memory_bytes, CU_MEMORYTYPE_DEVICE);
+        }
+        if (kind != 0) {
+            can_queue = can_queue && can_defer_cuda_copy_range(dispatch, context, source,
+                                                               memory_bytes, CU_MEMORYTYPE_DEVICE);
+        }
+        if (kind != 2) {
+            can_queue = can_queue && can_defer_cuda_copy_range(dispatch, context,
+                                                               reinterpret_cast<CUdeviceptr>(host),
+                                                               memory_bytes, CU_MEMORYTYPE_HOST);
+        }
+    }
+    if (!can_queue) {
+        // Leave the native reentrancy scope before taking the ordered boundary.
+        return intercept_cooperative_native_boundary(invoke);
+    }
+    return frontend->copy(
+        stream, per_thread_default_stream,
+        CudaQueuedCopy{static_cast<CudaQueuedCopyKind>(kind), destination, source, host,
+                       memory_bytes, state.cooperative_router->resources()});
+}
+
+CUresult intercept_driver_uva_copy(CUdeviceptr destination, CUdeviceptr source,
+                                   std::size_t memory_bytes, CUstream stream,
+                                   bool per_thread_default_stream,
+                                   const std::function<CUresult()>& original) {
+    InterceptorState& state = get_state();
+    if (!should_route_cooperative(state)) {
+        return original();
+    }
+    if (cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return source_native_stream_execution(state, stream, per_thread_default_stream, original);
+    }
+    std::shared_ptr<CudaCooperativeFrontend> frontend;
+    const auto ready = cooperative_frontend_current(state, frontend);
+    if (ready != CUDA_SUCCESS) {
+        return ready;
+    }
+    CUmemorytype destination_type{};
+    CUmemorytype source_type{};
+    CUcontext current_context = nullptr;
+    bool can_queue = memory_bytes != 0 && destination != 0 && source != 0;
+    {
+        const NativeDriverCallScope scope;
+        const auto attribute = state.cooperative_router->pointer_attribute();
+        can_queue =
+            can_queue && state.driver.context_get_current(&current_context) == CUDA_SUCCESS &&
+            attribute(&destination_type, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, destination) ==
+                CUDA_SUCCESS &&
+            attribute(&source_type, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, source) == CUDA_SUCCESS;
+        const auto& dispatch = state.cooperative_router->copy_range_dispatch();
+        can_queue =
+            can_queue &&
+            can_defer_cuda_copy_range(dispatch, current_context, destination, memory_bytes,
+                                      destination_type) &&
+            can_defer_cuda_copy_range(dispatch, current_context, source, memory_bytes, source_type);
+    }
+    CudaQueuedCopy copy;
+    copy.memory_bytes = memory_bytes;
+    copy.resources = state.cooperative_router->resources();
+    if (can_queue && destination_type == CU_MEMORYTYPE_DEVICE &&
+        source_type == CU_MEMORYTYPE_HOST) {
+        copy.kind = CudaQueuedCopyKind::kHostToDevice;
+        copy.destination = destination;
+        // NOLINTNEXTLINE(performance-no-int-to-ptr): required CUDA UVA host address ABI.
+        copy.host_pointer = reinterpret_cast<void*>(source);
+    } else if (can_queue && destination_type == CU_MEMORYTYPE_HOST &&
+               source_type == CU_MEMORYTYPE_DEVICE) {
+        copy.kind = CudaQueuedCopyKind::kDeviceToHost;
+        copy.source = source;
+        // NOLINTNEXTLINE(performance-no-int-to-ptr): required CUDA UVA host address ABI.
+        copy.host_pointer = reinterpret_cast<void*>(destination);
+    } else if (can_queue && destination_type == CU_MEMORYTYPE_DEVICE &&
+               source_type == CU_MEMORYTYPE_DEVICE) {
+        copy.kind = CudaQueuedCopyKind::kDeviceToDevice;
+        copy.destination = destination;
+        copy.source = source;
+    } else {
+        return intercept_cooperative_native_boundary(original);
+    }
+    return frontend->copy(stream, per_thread_default_stream, std::move(copy));
+}
+
 }  // namespace glimmer::interceptor
 
 namespace glimmer::interceptor {
@@ -623,7 +2374,8 @@ namespace glimmer::interceptor {
 template <typename Allocate>
 cudaError_t intercept_runtime_malloc_impl(void** device_pointer, std::size_t memory_bytes,
                                           Allocate&& allocate, RuntimeFreeFunction release,
-                                          RuntimeGetDeviceFunction get_device) {
+                                          RuntimeGetDeviceFunction get_device,
+                                          AllocationProvenance provenance) {
     InterceptorState& state = get_state();
     if (device_pointer == nullptr) {
         return cudaErrorInvalidValue;
@@ -705,8 +2457,8 @@ cudaError_t intercept_runtime_malloc_impl(void** device_pointer, std::size_t mem
         return cleanup_result != cudaSuccess ? cleanup_result : cudaErrorUnknown;
     }
 
-    if (!state.allocations.record(make_allocation_identity(*device_pointer, *context),
-                                  memory_bytes)) {
+    if (!state.allocations.record(make_allocation_identity(*device_pointer, *context), memory_bytes,
+                                  AllocationScope::kContextBound, provenance)) {
         state.allocations.mark_accounting_degraded();
         const cudaError_t cleanup_result =
             release == nullptr ? cudaErrorUnknown : release(*device_pointer);
@@ -732,8 +2484,11 @@ cudaError_t intercept_runtime_malloc(void** device_pointer, std::size_t memory_b
     }
     return intercept_runtime_malloc_impl(
         device_pointer, memory_bytes,
-        [device_pointer, memory_bytes, allocate] { return allocate(device_pointer, memory_bytes); },
-        release, get_device);
+        [device_pointer, memory_bytes, allocate] {
+            mark_runtime_source_memory_issue();
+            return allocate(device_pointer, memory_bytes);
+        },
+        release, get_device, AllocationProvenance::kIndependentDevice);
 }
 
 cudaError_t intercept_runtime_malloc_managed(void** device_pointer, std::size_t memory_bytes,
@@ -747,9 +2502,10 @@ cudaError_t intercept_runtime_malloc_managed(void** device_pointer, std::size_t 
     return intercept_runtime_malloc_impl(
         device_pointer, memory_bytes,
         [device_pointer, memory_bytes, flags, allocate] {
+            mark_runtime_source_memory_issue();
             return allocate(device_pointer, memory_bytes, flags);
         },
-        release, get_device);
+        release, get_device, AllocationProvenance::kUnknown);
 }
 
 template <typename Allocate>
@@ -896,7 +2652,8 @@ cudaError_t intercept_runtime_malloc_pitch_impl(void** device_pointer, std::size
     }
 
     if (!state.allocations.record(make_allocation_identity(*device_pointer, *context),
-                                  *actual_bytes)) {
+                                  *actual_bytes, AllocationScope::kContextBound,
+                                  AllocationProvenance::kIndependentDevice)) {
         state.allocations.mark_accounting_degraded();
         const cudaError_t cleanup_result = cleanup_allocation();
         if (cleanup_result != cudaSuccess) {
@@ -924,6 +2681,7 @@ cudaError_t intercept_runtime_malloc_pitch(void** device_pointer, std::size_t* p
         device_pointer, pitch, width_bytes, height,
         [device_pointer, pitch, width_bytes, height, allocate](void**, std::size_t*, std::size_t,
                                                                std::size_t) {
+            mark_runtime_source_memory_issue();
             return allocate(device_pointer, pitch, width_bytes, height);
         },
         release, get_device);
@@ -954,6 +2712,7 @@ cudaError_t intercept_runtime_malloc_3d(struct cudaPitchedPtr* pitched_device_po
         &device_pointer, &pitch, extent.width, *row_count,
         [&allocation, &device_pointer, &pitch, extent, allocate](void**, std::size_t*, std::size_t,
                                                                  std::size_t) {
+            mark_runtime_source_memory_issue();
             const cudaError_t allocation_result = allocate(&allocation, extent);
             if (allocation_result == cudaSuccess) {
                 device_pointer = allocation.ptr;
@@ -973,18 +2732,23 @@ cudaError_t intercept_runtime_free(void* device_pointer, RuntimeFreeFunction rel
     if (release == nullptr) {
         return cudaErrorNotSupported;
     }
+    const auto invoke = [&] {
+        mark_runtime_source_memory_issue();
+        return release(device_pointer);
+    };
     if (!ensure_initialized(state)) {
-        return std::getenv("GLIMMER_MEMORY_LIMIT_BYTES") == nullptr ? release(device_pointer)
-                                                                    : cudaErrorUnknown;
+        return std::getenv("GLIMMER_MEMORY_LIMIT_BYTES") == nullptr ? invoke() : cudaErrorUnknown;
     }
 
-    if (state.quota_mode != QuotaMode::kEnabled) {
-        return release(device_pointer);
+    // A null release owns no allocation, even when the SDK binds its first
+    // context here. Keep the original call and its nested memory boundary.
+    if (state.quota_mode != QuotaMode::kEnabled || device_pointer == nullptr) {
+        return invoke();
     }
 
     const std::optional<ContextIdentity> context = capture_context_identity(state);
     if (!context.has_value()) {
-        const cudaError_t free_result = release(device_pointer);
+        const cudaError_t free_result = invoke();
         if (free_result == cudaSuccess) {
             state.allocations.mark_accounting_degraded();
             return cudaErrorUnknown;
@@ -1005,10 +2769,10 @@ cudaError_t intercept_runtime_free(void* device_pointer, RuntimeFreeFunction rel
     }
     if (release_status == AllocationRegistry::ReleaseStatus::kUnknown ||
         !release_ticket.has_value()) {
-        return release(device_pointer);
+        return invoke();
     }
 
-    const cudaError_t free_result = release(device_pointer);
+    const cudaError_t free_result = invoke();
     if (free_result != cudaSuccess) {
         state.allocations.cancel_release(*release_ticket);
         return free_result;
@@ -1199,9 +2963,348 @@ cudaError_t intercept_runtime_graph_add_mem_alloc_node(
     });
 }
 
+cudaError_t intercept_runtime_graph_instantiation(
+    cudaGraphExec_t* output, cudaGraph_t graph, bool should_prepare_effects,
+    const std::function<cudaError_t(cudaGraphExec_t*)>& original) {
+    static_assert(std::is_same_v<cudaGraph_t, CUgraph>);
+    static_assert(std::is_same_v<cudaGraphExec_t, CUgraphExec>);
+    if (!original) {
+        return cudaErrorNotSupported;
+    }
+    if (!cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary) {
+        return original(output);
+    }
+    auto& gate = cooperative_process_call_gate();
+    if (!gate.is_entered_by_current_thread() || gate.is_native_only_on_current_thread()) {
+        return cudaErrorNotSupported;
+    }
+    auto& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router) {
+        return cudaErrorNotSupported;
+    }
+    const CooperativeBoundaryScope boundary;
+    auto& router = *state.cooperative_router;
+    if (router.normal_owner_status() != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+    CudaNativeGraphReservation reservation;
+    if (output) {
+        const auto prepared =
+            router.prepare_graph(nullptr, graph, reservation, should_prepare_effects);
+        if (prepared != CUDA_SUCCESS) {
+            return prepared == CUDA_ERROR_OUT_OF_MEMORY ? cudaErrorMemoryAllocation
+                                                        : cudaErrorUnknown;
+        }
+    }
+    cudaError_t native_status{cudaErrorUnknown};
+    bool was_invoked{};
+    const auto owned = router.native_boundary(
+        [&] {
+            cudaGraphExec_t staged{};
+            {
+                const NativeDriverCallScope native;
+                was_invoked = true;
+                try {
+                    native_status = original(output ? &staged : nullptr);
+                } catch (...) {
+                    // A staged handle may already be an actual SDK effect.
+                    // Retain it as unprepared; never replay or guess cleanup.
+                    native_status = cudaErrorUnknown;
+                }
+            }
+            CUresult published{CUDA_SUCCESS};
+            if (output) {
+                std::optional<CUcontext> actual_context;
+                if (staged) {
+                    CUcontext current{};
+                    const auto queried = state.driver.context_get_current(&current);
+                    if (queried == CUDA_SUCCESS) {
+                        actual_context = current;
+                    }
+                }
+                published = router.graphs().publish(
+                    reservation, staged,
+                    native_status == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN,
+                    actual_context);
+                if (staged || native_status == cudaSuccess) {
+                    *output = staged;
+                }
+            }
+            return published;
+        },
+        [] { return intercept_context_synchronize(); });
+    return was_invoked && native_status != cudaSuccess ? native_status
+           : owned == CUDA_SUCCESS                     ? native_status
+                                                       : cudaErrorUnknown;
+}
+
+cudaError_t intercept_runtime_graph_exec_destroy(cudaGraphExec_t executable,
+                                                 const std::function<cudaError_t()>& original) {
+    static_assert(std::is_same_v<cudaGraphExec_t, CUgraphExec>);
+    if (!original) {
+        return cudaErrorNotSupported;
+    }
+    if (!cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary) {
+        return original();
+    }
+    auto& gate = cooperative_process_call_gate();
+    if (!gate.is_entered_by_current_thread() || gate.is_native_only_on_current_thread()) {
+        return cudaErrorNotSupported;
+    }
+    auto& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router) {
+        return cudaErrorNotSupported;
+    }
+    const CooperativeBoundaryScope boundary;
+    auto& graphs = state.cooperative_router->graphs();
+    graphs.invalidate(executable);
+    const NativeDriverCallScope native;
+    const auto status = original();
+    if (status == cudaSuccess) {
+        graphs.forget(executable);
+    }
+    return status;
+}
+
+cudaError_t intercept_runtime_graph_event_update(cudaGraphExec_t executable, cudaGraphNode_t node,
+                                                 cudaEvent_t event, bool is_record,
+                                                 const std::function<cudaError_t()>& original) {
+    static_assert(std::is_same_v<cudaGraphExec_t, CUgraphExec>);
+    static_assert(std::is_same_v<cudaGraphNode_t, CUgraphNode>);
+    static_assert(std::is_same_v<cudaEvent_t, CUevent>);
+    if (!original) return cudaErrorNotSupported;
+    if (!cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary)
+        return original();
+    auto& gate = cooperative_process_call_gate();
+    if (!gate.is_entered_by_current_thread() || gate.is_native_only_on_current_thread()) {
+        return cudaErrorNotSupported;
+    }
+    auto& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router) return cudaErrorNotSupported;
+    const CooperativeBoundaryScope boundary;
+    auto& router = *state.cooperative_router;
+    CudaNativeGraphReservation replacement;
+    if (executable) {
+        const auto prepared =
+            router.prepare_graph_event_update(executable, node, event, is_record, replacement);
+        if (prepared != CUDA_SUCCESS && prepared != CUDA_ERROR_INVALID_HANDLE) {
+            return prepared == CUDA_ERROR_OUT_OF_MEMORY ? cudaErrorMemoryAllocation
+                                                        : cudaErrorUnknown;
+        }
+    }
+    const NativeDriverCallScope native;
+    const auto status = original();
+    const auto published =
+        replacement ? router.graphs().publish_event_update(
+                          replacement, status == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN)
+                    : CUDA_SUCCESS;
+    return status != cudaSuccess || published == CUDA_SUCCESS ? status : cudaErrorUnknown;
+}
+
+cudaError_t intercept_runtime_graph_node_update(cudaGraphExec_t executable, cudaGraphNode_t node,
+                                                std::optional<CUgraphNodeType> expected_type,
+                                                const std::function<cudaError_t()>& original) {
+    static_assert(std::is_same_v<cudaGraphExec_t, CUgraphExec>);
+    static_assert(std::is_same_v<cudaGraphNode_t, CUgraphNode>);
+    if (!original) return cudaErrorNotSupported;
+    if (!cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary)
+        return original();
+    auto& gate = cooperative_process_call_gate();
+    if (!gate.is_entered_by_current_thread() || gate.is_native_only_on_current_thread())
+        return cudaErrorNotSupported;
+    auto& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router) return cudaErrorNotSupported;
+    const CooperativeBoundaryScope boundary;
+    auto& graphs = state.cooperative_router->graphs();
+    CudaNativeGraphReservation replacement;
+    if (executable) {
+        const auto prepared =
+            graphs.prepare_node_update(executable, node, expected_type, replacement);
+        if (prepared != CUDA_SUCCESS && prepared != CUDA_ERROR_INVALID_HANDLE)
+            return prepared == CUDA_ERROR_OUT_OF_MEMORY ? cudaErrorMemoryAllocation
+                                                        : cudaErrorUnknown;
+    }
+    const NativeDriverCallScope native;
+    const auto status = original();
+    const auto published =
+        replacement ? graphs.publish_event_update(
+                          replacement, status == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN)
+                    : CUDA_SUCCESS;
+    return status != cudaSuccess || published == CUDA_SUCCESS ? status : cudaErrorUnknown;
+}
+
+cudaError_t intercept_runtime_graph_update(cudaGraphExec_t executable, cudaGraph_t graph,
+                                           std::optional<cudaGraphNode_t> child_node,
+                                           const std::function<cudaError_t()>& original) {
+    static_assert(std::is_same_v<cudaGraphExec_t, CUgraphExec>);
+    static_assert(std::is_same_v<cudaGraph_t, CUgraph>);
+    static_assert(std::is_same_v<cudaGraphNode_t, CUgraphNode>);
+    if (!original) return cudaErrorNotSupported;
+    if (!cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary)
+        return original();
+    auto& gate = cooperative_process_call_gate();
+    if (!gate.is_entered_by_current_thread() || gate.is_native_only_on_current_thread())
+        return cudaErrorNotSupported;
+    auto& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router) return cudaErrorNotSupported;
+    const CooperativeBoundaryScope boundary;
+    auto& router = *state.cooperative_router;
+    CudaNativeGraphReservation replacement;
+    if (executable) {
+        const auto prepared =
+            router.prepare_graph_update(executable, graph, child_node, replacement);
+        if (prepared != CUDA_SUCCESS && prepared != CUDA_ERROR_INVALID_HANDLE)
+            return prepared == CUDA_ERROR_OUT_OF_MEMORY ? cudaErrorMemoryAllocation
+                                                        : cudaErrorUnknown;
+    }
+    const NativeDriverCallScope native;
+    const auto status = original();
+    const auto published =
+        replacement ? router.graphs().publish_event_update(
+                          replacement, status == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN)
+                    : CUDA_SUCCESS;
+    return status != cudaSuccess || published == CUDA_SUCCESS ? status : cudaErrorUnknown;
+}
+
+CUresult intercept_driver_capture(CUstream stream, bool is_ptds, CudaSourceCaptureKind kind,
+                                  const std::function<CUresult()>& original) {
+    if (!original) return CUDA_ERROR_NOT_SUPPORTED;
+    if (!cooperative_driver_preview_requested() || is_inside_driver_call() ||
+        is_inside_runtime_call())
+        return original();
+    auto& gate = cooperative_process_call_gate();
+    auto& state = get_state();
+    if (!gate.is_entered_by_current_thread() || !ensure_initialized(state) ||
+        !state.cooperative_router)
+        return CUDA_ERROR_NOT_SUPPORTED;
+    const CooperativeBoundaryScope boundary;
+    return state.cooperative_router->source_capture_root(gate, kind, [&](auto& dispatch) {
+        CUcontext context{};
+        CUresult queried{};
+        {
+            const NativeDriverCallScope native;
+            queried = is_ptds ? state.driver.stream_get_context_ptsz(stream, &context)
+                              : state.driver.stream_get_context(stream, &context);
+        }
+        if (queried == CUDA_ERROR_STREAM_CAPTURE_INVALIDATED &&
+            kind == CudaSourceCaptureKind::kEnd) {
+            context = nullptr;
+            queried = dispatch.lookup_origin_context(stream, is_ptds, context);
+        }
+        if (queried != CUDA_SUCCESS || !context)
+            return queried == CUDA_SUCCESS ? CUDA_ERROR_INVALID_CONTEXT : queried;
+        return dispatch.invoke(context, stream, is_ptds, kind, original);
+    });
+}
+
+cudaError_t intercept_runtime_capture(CudaSourceCaptureKind kind,
+                                      const std::function<cudaError_t()>& original) noexcept {
+    try {
+        if (!original) return cudaErrorNotSupported;
+        if (is_inside_runtime_call() || is_inside_driver_call()) return original();
+        if (!cooperative_runtime_preview_requested())
+            return cooperative_driver_preview_requested() ? cudaErrorNotSupported : original();
+        auto& gate = cooperative_process_call_gate();
+        auto& state = get_state();
+        if (!gate.is_entered_by_current_thread() || !ensure_initialized(state) ||
+            !state.cooperative_router)
+            return cudaErrorNotSupported;
+        const CooperativeBoundaryScope boundary;
+        RuntimeCaptureObservation observation;
+        cudaError_t native_status{cudaErrorUnknown};
+        const auto owned =
+            state.cooperative_router->source_capture_root(gate, kind, [&](auto& dispatch) {
+                return invoke_runtime_capture_original(
+                    [&](CUcontext context, CUstream stream, bool is_ptds,
+                        CudaSourceCaptureKind actual_kind, const auto& native) {
+                        return dispatch.invoke(context, stream, is_ptds, actual_kind, native);
+                    },
+                    original, observation, native_status,
+                    [&](CUstream stream, bool is_ptds, CUcontext& context) {
+                        return dispatch.lookup_origin_context(stream, is_ptds, context);
+                    });
+            });
+        if (observation.was_runtime_invoked && native_status != cudaSuccess) return native_status;
+        return owned == CUDA_SUCCESS && observation.was_runtime_invoked ? cudaSuccess
+                                                                        : cudaErrorUnknown;
+    } catch (...) {
+        return cudaErrorUnknown;
+    }
+}
+
+namespace {
+CUresult execute_cooperative_graph(InterceptorState& state, CUgraphExec executable, CUstream stream,
+                                   bool is_ptds, const std::function<CUresult()>& original) {
+    auto& router = *state.cooperative_router;
+    auto& gate = cooperative_process_call_gate();
+    if (!gate.is_native_only_on_current_thread())
+        return router.native_graph_execution(executable, stream, is_ptds, original);
+    CudaNativeGraphExecutable owned;
+    const auto found = router.graphs().lookup(executable, owned);
+    if (found != CUDA_SUCCESS) return found;
+    // Source admission drained logical producers. Native session/executor proof,
+    // not a normal queue prefix, retains the original graph's physical effects.
+    return source_native_stream_execution(
+        state, stream, is_ptds,
+        [&] {
+            CUcontext context{};
+            const auto current = state.driver.context_get_current(&context);
+            if (current != CUDA_SUCCESS || context != owned.context())
+                return current == CUDA_SUCCESS ? CUDA_ERROR_INVALID_CONTEXT : current;
+            const auto valid = router.graphs().is_current(owned);
+            return valid == CUDA_SUCCESS ? original() : valid;
+        },
+        nullptr, &owned);
+}
+}  // namespace
+
+cudaError_t execute_owned_runtime_graph(cudaGraphExec_t executable, cudaStream_t stream,
+                                        bool is_ptds,
+                                        const std::function<cudaError_t()>& original) noexcept {
+    static_assert(std::is_same_v<cudaGraphExec_t, CUgraphExec>);
+    static_assert(std::is_same_v<cudaStream_t, CUstream>);
+    try {
+        auto& gate = cooperative_process_call_gate();
+        if (!executable || !original) {
+            return cudaErrorInvalidValue;
+        }
+        if (!cooperative_runtime_preview_requested() || !gate.is_entered_by_current_thread() ||
+            is_inside_driver_call() || g_is_inside_cooperative_boundary) {
+            return cudaErrorNotSupported;
+        }
+        auto& state = get_state();
+        if (!ensure_initialized(state) || !state.cooperative_router) {
+            return cudaErrorNotSupported;
+        }
+        const CooperativeBoundaryScope boundary;
+        auto& router = *state.cooperative_router;
+        if (!gate.is_native_only_on_current_thread() &&
+            router.normal_owner_status() != CUDA_SUCCESS) {
+            return cudaErrorUnknown;
+        }
+        return invoke_runtime_graph_original(
+            [&](const auto& issue) {
+                return execute_cooperative_graph(state, executable, stream, is_ptds, issue);
+            },
+            original);
+    } catch (...) {
+        return cudaErrorUnknown;
+    }
+}
+
 cudaError_t intercept_runtime_graph_launch(const char* api_name, cudaGraphExec_t graph_exec,
                                            cudaStream_t stream, RuntimeGraphLaunchFunction launch,
                                            bool per_thread_default_stream) {
+    if (cooperative_driver_preview_requested()) {
+        if (!cooperative_runtime_preview_requested() || !launch) return cudaErrorNotSupported;
+        return execute_owned_runtime_graph(graph_exec, stream, per_thread_default_stream,
+                                           [&] { return launch(graph_exec, stream); });
+    }
     if (graph_exec == nullptr) {
         return cudaErrorInvalidValue;
     }
@@ -1213,6 +3316,14 @@ cudaError_t intercept_runtime_graph_launch(const char* api_name, cudaGraphExec_t
     glimmer::control::LaunchGateTiming gate_timing;
     std::optional<glimmer::core::TaskId> launch_task;
     if (scheduling_enforced) {
+        const auto capturing =
+            runtime_launch_stream_is_capturing(stream, per_thread_default_stream);
+        if (!capturing.has_value()) {
+            return cudaErrorNotSupported;
+        }
+        if (capturing.value()) {
+            return launch(graph_exec, stream);
+        }
         launch_task = acquire_launch_slot(trace_launch_timings ? &gate_timing : nullptr);
         if (!launch_task.has_value()) {
             return cudaErrorNotSupported;
@@ -1399,14 +3510,16 @@ cudaError_t intercept_runtime_mem_get_info(std::size_t* free_bytes, std::size_t*
 namespace glimmer::interceptor {
 
 template <typename AllocateFunction>
-CUresult intercept_tracked_allocation(CUdeviceptr* device_pointer, MemoryBytes memory_bytes,
-                                      AllocateFunction&& allocate) {
+CUresult intercept_tracked_allocation(
+    CUdeviceptr* device_pointer, MemoryBytes memory_bytes, AllocateFunction&& allocate,
+    bool is_private_progress = false,
+    AllocationProvenance provenance = AllocationProvenance::kUnknown) {
     InterceptorState& state = get_state();
     if (device_pointer == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
     }
-    if (glimmer::interceptor::is_inside_driver_call() ||
-        glimmer::interceptor::is_inside_runtime_call()) {
+    if (!is_private_progress && (glimmer::interceptor::is_inside_driver_call() ||
+                                 glimmer::interceptor::is_inside_runtime_call())) {
         return std::forward<AllocateFunction>(allocate)();
     }
     if (!ensure_initialized(state)) {
@@ -1442,8 +3555,23 @@ CUresult intercept_tracked_allocation(CUdeviceptr* device_pointer, MemoryBytes m
         return state.quota->is_healthy() ? CUDA_ERROR_OUT_OF_MEMORY : CUDA_ERROR_UNKNOWN;
     }
 
-    const CUresult allocation_result = std::forward<AllocateFunction>(allocate)();
+    CUresult allocation_result = CUDA_ERROR_UNKNOWN;
+    try {
+        allocation_result = std::forward<AllocateFunction>(allocate)();
+    } catch (...) {
+        if (is_private_progress) {
+            reservation->abandon();
+            state.allocations.mark_accounting_degraded();
+        }
+        throw;
+    }
     if (allocation_result != CUDA_SUCCESS) {
+        if (is_private_progress && *device_pointer != 0) {
+            // Native output ownership is ambiguous. Do not release its quota
+            // or automatically replay allocation/free through the pool.
+            reservation->abandon();
+            state.allocations.mark_accounting_degraded();
+        }
         return allocation_result;
     }
     if (*device_pointer == 0) {
@@ -1456,18 +3584,23 @@ CUresult intercept_tracked_allocation(CUdeviceptr* device_pointer, MemoryBytes m
         const CUresult cleanup_result = state.driver.mem_free(*device_pointer);
         if (cleanup_result != CUDA_SUCCESS) {
             reservation->abandon();
+        } else if (is_private_progress) {
+            *device_pointer = 0;
         }
         state.allocations.mark_accounting_degraded();
         return cleanup_result != CUDA_SUCCESS ? cleanup_result : CUDA_ERROR_UNKNOWN;
     }
 
-    if (!state.allocations.record(make_allocation_identity(*device_pointer, *context),
-                                  memory_bytes)) {
+    if (!state.allocations.record(make_allocation_identity(*device_pointer, *context), memory_bytes,
+                                  AllocationScope::kContextBound, provenance)) {
         state.allocations.mark_accounting_degraded();
         const CUresult cleanup_result = state.driver.mem_free(*device_pointer);
         if (cleanup_result != CUDA_SUCCESS) {
             state.allocations.mark_accounting_degraded();
             return cleanup_result;
+        }
+        if (is_private_progress) {
+            *device_pointer = 0;
         }
         if (state.quota == nullptr ||
             !state.quota->release(static_cast<DeviceId>(context->device), memory_bytes)) {
@@ -1477,6 +3610,25 @@ CUresult intercept_tracked_allocation(CUdeviceptr* device_pointer, MemoryBytes m
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
     return CUDA_SUCCESS;
+}
+
+CUresult allocate_cooperative_progress(CUdeviceptr* pointer, std::size_t memory_bytes) noexcept {
+    if (!pointer || memory_bytes == 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *pointer = 0;
+    InterceptorState* state = nullptr;
+    try {
+        state = &get_state();
+        return intercept_tracked_allocation(
+            pointer, memory_bytes, [&] { return state->driver.mem_alloc(pointer, memory_bytes); },
+            true, AllocationProvenance::kIndependentDevice);
+    } catch (...) {
+        if (state) {
+            state->allocations.mark_accounting_degraded();
+        }
+        return CUDA_ERROR_UNKNOWN;
+    }
 }
 
 CUresult cleanup_async_allocation(InterceptorState& state, CUdeviceptr device_pointer,
@@ -1797,16 +3949,20 @@ cudaError_t intercept_runtime_free_async(void* device_pointer, cudaStream_t stre
     if (release == nullptr) {
         return cudaErrorNotSupported;
     }
+    const auto ordered_release = [&] {
+        return intercept_cooperative_runtime_native_boundary(
+            [&] { return release(device_pointer, stream); });
+    };
     if (!ensure_initialized(state)) {
         return std::getenv("GLIMMER_MEMORY_LIMIT_BYTES") == nullptr
                    ? release(device_pointer, stream)
                    : cudaErrorUnknown;
     }
     if (state.quota_mode == QuotaMode::kDisabled) {
-        return release(device_pointer, stream);
+        return ordered_release();
     }
     if (state.quota_mode == QuotaMode::kInvalidConfiguration) {
-        return release(device_pointer, stream);
+        return ordered_release();
     }
     if (state.allocations.is_accounting_degraded() || state.quota == nullptr ||
         !state.quota->is_healthy()) {
@@ -1817,7 +3973,7 @@ cudaError_t intercept_runtime_free_async(void* device_pointer, cudaStream_t stre
     const std::optional<ContextIdentity> stream_identity =
         capture_stream_identity(state, driver_stream, false);
     if (!stream_identity.has_value()) {
-        const cudaError_t free_result = release(device_pointer, stream);
+        const cudaError_t free_result = ordered_release();
         if (free_result == cudaSuccess) {
             state.allocations.mark_accounting_degraded();
             return cudaErrorUnknown;
@@ -1839,9 +3995,35 @@ cudaError_t intercept_runtime_free_async(void* device_pointer, cudaStream_t stre
     }
     if (release_status == AllocationRegistry::ReleaseStatus::kUnknown ||
         !release_ticket.has_value()) {
-        return release(device_pointer, stream);
+        return ordered_release();
     }
-    const cudaError_t free_result = release(device_pointer, stream);
+    RuntimeQueuedRelease pending{*release_ticket};
+    const ReleaseExceptionGuard exception_guard(state.allocations, pending.ticket,
+                                                pending.has_owned_release);
+    cudaError_t free_result = cudaErrorUnknown;
+    if (cooperative_runtime_preview_requested() &&
+        can_queue_cooperative_release(state, *release_ticket)) {
+        std::shared_ptr<CudaCooperativeFrontend> frontend;
+        const auto ready = cooperative_frontend_current(state, frontend);
+        if (ready != CUDA_SUCCESS) {
+            state.allocations.cancel_release(*release_ticket);
+            return cudaErrorUnknown;
+        }
+        const RuntimeQueuedReleaseScope scope(pending);
+        free_result = release(device_pointer, stream);
+        if (free_result != cudaSuccess && pending.has_owned_release) {
+            // Native validation cannot undo a release already accepted by the queue.
+            state.allocations.mark_accounting_degraded();
+            return cudaErrorUnknown;
+        }
+        if (free_result == cudaSuccess && (!pending.was_consumed || !pending.has_owned_release)) {
+            state.allocations.mark_accounting_degraded();
+            report_diagnostic("[glimmer] Runtime async free bypassed its owned Driver release\n");
+            return cudaErrorUnknown;
+        }
+    } else {
+        free_result = ordered_release();
+    }
     if (free_result != cudaSuccess) {
         state.allocations.cancel_release(*release_ticket);
         return free_result;
@@ -1947,6 +4129,188 @@ cudaError_t intercept_runtime_stream_query(cudaStream_t stream, RuntimeStreamQue
     }
     finalize_async_releases(state, *summaries);
     return state.allocations.is_accounting_degraded() ? cudaErrorUnknown : query_result;
+}
+
+std::optional<cudaError_t> intercept_normal_runtime_device_completion(
+    const std::function<cudaError_t()>& original,
+    const RuntimeContextCompletionExecution& epoch_completion) {
+    if (!original || !cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary ||
+        cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return std::nullopt;
+    }
+    auto& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router) {
+        return std::nullopt;
+    }
+    const CooperativeBoundaryScope scope;
+    auto& router = *state.cooperative_router;
+    if (router.normal_owner_status() != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+    auto submitted = state.allocations.submitted_async_releases(true);
+    if (!submitted) {
+        return cudaErrorUnknown;  // No SDK issue or accounting mutation.
+    }
+    std::optional<cudaError_t> recovered;
+    if (epoch_completion || router.has_native_epoch_policy()) {
+        recovered = invoke_runtime_context_completion_original(
+            [&](const auto& completion) {
+                const auto original_completion = [&] {
+                    // Include only submissions joined before the owned SDK boundary.
+                    // No future release may be finalized by an earlier proof.
+                    submitted = state.allocations.submitted_async_releases(true);
+                    return submitted ? completion() : CUDA_ERROR_UNKNOWN;
+                };
+                return epoch_completion ? epoch_completion(original_completion)
+                                        : router.recover_current_native_epoch(
+                                              cooperative_process_call_gate(), original_completion);
+            },
+            original, [&] { router.quarantine_normal_launch(nullptr, CUDA_ERROR_UNKNOWN); });
+    }
+    const auto native_status = recovered ? *recovered : original();
+    if (native_status != cudaSuccess) {
+        return native_status;
+    }
+    CUcontext context{};
+    CUresult status{};
+    {
+        const NativeDriverCallScope native;
+        status = state.driver.context_get_current(&context);
+    }
+    if (status != CUDA_SUCCESS || !context) {
+        return cudaErrorUnknown;
+    }
+    std::shared_ptr<CudaCooperativeFrontend> owner;
+    status = router.existing_frontend(context, owner);
+    if (status == CUDA_SUCCESS && owner && !recovered) {
+        status = router.with_context(context, [&] { return owner->synchronize_context(); });
+    }
+    if (status != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+    if (state.quota_mode != QuotaMode::kEnabled) {
+        return native_status;
+    }
+    if (state.allocations.is_accounting_degraded()) {
+        return cudaErrorUnknown;
+    }
+    const auto summaries =
+        state.allocations.complete_submitted_context_releases(*submitted, context);
+    if (!summaries) {
+        state.allocations.mark_accounting_degraded();
+        return cudaErrorUnknown;
+    }
+    finalize_async_releases(state, *summaries);
+    return state.allocations.is_accounting_degraded() ? cudaErrorUnknown : native_status;
+}
+
+std::optional<cudaError_t> intercept_normal_runtime_stream_completion(
+    cudaStream_t stream, bool is_ptds, bool should_wait,
+    const std::function<cudaError_t()>& original) {
+    static_assert(std::is_same_v<cudaStream_t, CUstream>);
+    if (!original || !cooperative_runtime_preview_requested() || is_inside_driver_call() ||
+        g_is_inside_cooperative_boundary ||
+        cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return std::nullopt;
+    }
+    auto& state = get_state();
+    if (!state.cooperative_router) {
+        return std::nullopt;
+    }
+    const CooperativeBoundaryScope scope;
+    auto& router = *state.cooperative_router;
+    if (router.normal_owner_status() != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+    const auto submitted = state.allocations.submitted_async_releases();
+    if (!submitted) {
+        return cudaErrorUnknown;  // No original issue or accounting mutation.
+    }
+    const auto native_status = original();
+    if (native_status != cudaSuccess) {
+        return native_status;  // Pending query remains nonblocking, with native TLS.
+    }
+    CUcontext context{};
+    CUresult status{};
+    {
+        const NativeDriverCallScope native;
+        status = is_ptds ? state.driver.stream_get_context_ptsz(stream, &context)
+                         : state.driver.stream_get_context(stream, &context);
+    }
+    if (status != CUDA_SUCCESS || !context) {
+        return cudaErrorUnknown;
+    }
+    std::shared_ptr<CudaCooperativeFrontend> owner;
+    status = router.existing_frontend(context, owner);
+    bool has_binding{};
+    if (status == CUDA_SUCCESS && owner) {
+        status = router.with_context(context, [&] {
+            return owner->complete_stream_snapshot(stream, is_ptds, should_wait, has_binding);
+        });
+    }
+    if (status == CUDA_ERROR_NOT_READY) {
+        return cudaErrorNotReady;
+    }
+    if (status != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+    if (state.quota_mode != QuotaMode::kEnabled) {
+        return native_status;
+    }
+    if (state.allocations.is_accounting_degraded()) {
+        return cudaErrorUnknown;
+    }
+    if (submitted->empty()) {
+        return native_status;
+    }
+    status = router.with_context(context, [&] {
+        if (state.allocations.is_accounting_degraded()) {
+            return CUDA_ERROR_UNKNOWN;
+        }
+        const auto identity = capture_stream_identity(state, stream, is_ptds);
+        if (!identity || identity->context != context) {
+            return CUDA_ERROR_UNKNOWN;
+        }
+        const auto retire = [&](const AsyncStreamIdentity& proven) {
+            const auto summaries =
+                state.allocations.complete_submitted_async_releases(*submitted, proven);
+            if (!summaries) {
+                state.allocations.mark_accounting_degraded();
+                return CUDA_ERROR_UNKNOWN;
+            }
+            finalize_async_releases(state, *summaries);
+            return state.allocations.is_accounting_degraded() ? CUDA_ERROR_UNKNOWN : CUDA_SUCCESS;
+        };
+        auto completed = retire(make_async_stream_identity(stream, *identity, is_ptds));
+        if (completed != CUDA_SUCCESS || stream != nullptr || is_ptds) {
+            return completed;
+        }
+        // Runtime's existing null release namespace is caller-scoped even for
+        // legacy aliases. Do not let legacy readiness retire pending PTDS frees.
+        {
+            const NativeDriverCallScope native;
+            completed = state.driver.stream_query_ptsz(nullptr);
+        }
+        if (completed == CUDA_ERROR_NOT_READY) {
+            return CUDA_SUCCESS;  // Retain the ambiguous namespace without blocking this query.
+        }
+        if (completed != CUDA_SUCCESS) {
+            return completed;
+        }
+        if (owner) {
+            bool has_thread_binding{};
+            completed = owner->complete_stream_snapshot(nullptr, true, false, has_thread_binding);
+            if (completed == CUDA_ERROR_NOT_READY) {
+                return CUDA_SUCCESS;
+            }
+            if (completed != CUDA_SUCCESS) {
+                return completed;
+            }
+        }
+        return retire(make_runtime_async_stream_identity(stream, *identity));
+    });
+    return status == CUDA_SUCCESS ? native_status : cudaErrorUnknown;
 }
 
 cudaError_t intercept_runtime_stream_destroy(cudaStream_t stream,
@@ -3132,7 +5496,8 @@ CUresult intercept_mem_free_async(CUdeviceptr device_pointer, CUstream stream,
                                   bool per_thread_default_stream) {
     InterceptorState& state = get_state();
     if (glimmer::interceptor::is_inside_driver_call() ||
-        glimmer::interceptor::is_inside_runtime_call()) {
+        (glimmer::interceptor::is_inside_runtime_call() &&
+         !runtime_cooperative_driver_routing_is_enabled())) {
         return per_thread_default_stream ? state.driver.mem_free_async_ptsz(device_pointer, stream)
                                          : state.driver.mem_free_async(device_pointer, stream);
     }
@@ -3140,6 +5505,88 @@ CUresult intercept_mem_free_async(CUdeviceptr device_pointer, CUstream stream,
         (per_thread_default_stream ? !state.driver.has_mem_free_async_ptsz()
                                    : !state.driver.has_mem_free_async())) {
         return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state)) {
+        const auto ordered_release = [&] {
+            return intercept_cooperative_native_boundary([&] {
+                return intercept_mem_free_async(device_pointer, stream, per_thread_default_stream);
+            });
+        };
+        if (is_inside_runtime_call()) {
+            auto* pending = g_runtime_queued_release;
+            if (pending == nullptr) {
+                return ordered_release();
+            }
+            if (pending->was_consumed ||
+                pending->ticket.identity.device_pointer != device_pointer ||
+                !can_queue_cooperative_release(state, pending->ticket)) {
+                return CUDA_ERROR_NOT_SUPPORTED;
+            }
+            pending->was_consumed = true;
+            std::shared_ptr<CudaCooperativeFrontend> frontend;
+            const auto ready = cooperative_frontend_current(state, frontend);
+            if (ready != CUDA_SUCCESS) {
+                return ready;
+            }
+            const auto admission = queue_cooperative_release(
+                state, *frontend, stream, per_thread_default_stream, pending->ticket);
+            pending->has_owned_release = admission.has_owned_release;
+            return admission.status;
+        }
+        if (state.quota_mode != QuotaMode::kEnabled) {
+            return ordered_release();
+        }
+        if (state.allocations.is_accounting_degraded()) {
+            return CUDA_ERROR_UNKNOWN;
+        }
+        const auto context = capture_stream_identity(state, stream, per_thread_default_stream);
+        if (!context.has_value()) {
+            return ordered_release();
+        }
+        const auto async_stream =
+            make_async_stream_identity(stream, *context, per_thread_default_stream);
+        auto release_state = state.allocations.begin_async_release(
+            make_allocation_identity(device_pointer, *context), async_stream);
+        if (release_state.first == AllocationRegistry::ReleaseStatus::kUnknown) {
+            release_state = state.allocations.begin_async_release_by_pointer(
+                device_pointer, context->device, async_stream);
+        }
+        const auto& ticket = release_state.second;
+        if (!ticket.has_value()) {
+            return ordered_release();
+        }
+        bool has_owned_release = false;
+        const ReleaseExceptionGuard exception_guard(state.allocations, *ticket, has_owned_release);
+        if (!can_queue_cooperative_release(state, *ticket)) {
+            state.allocations.cancel_release(*ticket);
+            return ordered_release();
+        }
+        std::shared_ptr<CudaCooperativeFrontend> frontend;
+        const auto ready = cooperative_frontend_current(state, frontend);
+        if (ready != CUDA_SUCCESS) {
+            state.allocations.cancel_release(*ticket);
+            return ready;
+        }
+        const auto admission =
+            queue_cooperative_release(state, *frontend, stream, per_thread_default_stream, *ticket);
+        has_owned_release = admission.has_owned_release;
+        if (admission.status != CUDA_SUCCESS) {
+            if (admission.has_owned_release) {
+                state.allocations.mark_accounting_degraded();
+            } else {
+                state.allocations.cancel_release(*ticket);
+            }
+            return admission.status;
+        }
+        if (!admission.has_owned_release || !state.allocations.commit_async_release(*ticket)) {
+            state.allocations.mark_accounting_degraded();
+            return CUDA_ERROR_UNKNOWN;
+        }
+        return CUDA_SUCCESS;
+    }
+    if (is_inside_runtime_call()) {
+        return per_thread_default_stream ? state.driver.mem_free_async_ptsz(device_pointer, stream)
+                                         : state.driver.mem_free_async(device_pointer, stream);
     }
     if (state.quota_mode != QuotaMode::kEnabled) {
         return per_thread_default_stream ? state.driver.mem_free_async_ptsz(device_pointer, stream)
@@ -3197,7 +5644,8 @@ CUresult intercept_mem_free_async(CUdeviceptr device_pointer, CUstream stream,
 CUresult intercept_stream_query(CUstream stream, bool per_thread_default_stream) {
     InterceptorState& state = get_state();
     if (glimmer::interceptor::is_inside_driver_call() ||
-        glimmer::interceptor::is_inside_runtime_call()) {
+        (glimmer::interceptor::is_inside_runtime_call() &&
+         !runtime_cooperative_driver_routing_is_enabled())) {
         return per_thread_default_stream ? state.driver.stream_query_ptsz(stream)
                                          : state.driver.stream_query(stream);
     }
@@ -3207,6 +5655,18 @@ CUresult intercept_stream_query(CUstream stream, bool per_thread_default_stream)
         return CUDA_ERROR_NOT_SUPPORTED;
     }
 
+    if (should_route_cooperative(state) &&
+        !cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        std::shared_ptr<CudaCooperativeFrontend> frontend;
+        const auto ready = cooperative_frontend_current(state, frontend);
+        if (ready != CUDA_SUCCESS) {
+            return ready;
+        }
+        const auto logical = frontend->query_stream(stream, per_thread_default_stream);
+        if (logical != CUDA_SUCCESS) {
+            return logical;
+        }
+    }
     const CUresult query_result = per_thread_default_stream ? state.driver.stream_query_ptsz(stream)
                                                             : state.driver.stream_query(stream);
     if (query_result == CUDA_SUCCESS && state.quota_mode == QuotaMode::kEnabled) {
@@ -3232,7 +5692,8 @@ CUresult intercept_stream_query(CUstream stream, bool per_thread_default_stream)
 CUresult intercept_stream_synchronize(CUstream stream, bool per_thread_default_stream) {
     InterceptorState& state = get_state();
     if (glimmer::interceptor::is_inside_driver_call() ||
-        glimmer::interceptor::is_inside_runtime_call()) {
+        (glimmer::interceptor::is_inside_runtime_call() &&
+         !runtime_cooperative_driver_routing_is_enabled())) {
         return per_thread_default_stream ? state.driver.stream_synchronize_ptsz(stream)
                                          : state.driver.stream_synchronize(stream);
     }
@@ -3242,6 +5703,18 @@ CUresult intercept_stream_synchronize(CUstream stream, bool per_thread_default_s
         return CUDA_ERROR_NOT_SUPPORTED;
     }
 
+    if (should_route_cooperative(state) &&
+        !cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        std::shared_ptr<CudaCooperativeFrontend> frontend;
+        const auto ready = cooperative_frontend_current(state, frontend);
+        if (ready != CUDA_SUCCESS) {
+            return ready;
+        }
+        const auto logical = frontend->synchronize_stream(stream, per_thread_default_stream);
+        if (logical != CUDA_SUCCESS) {
+            return logical;
+        }
+    }
     const CUresult sync_result = per_thread_default_stream
                                      ? state.driver.stream_synchronize_ptsz(stream)
                                      : state.driver.stream_synchronize(stream);
@@ -3268,11 +5741,43 @@ CUresult intercept_stream_synchronize(CUstream stream, bool per_thread_default_s
 CUresult intercept_stream_destroy(CUstream stream) {
     InterceptorState& state = get_state();
     if (glimmer::interceptor::is_inside_driver_call() ||
-        glimmer::interceptor::is_inside_runtime_call()) {
+        (glimmer::interceptor::is_inside_runtime_call() &&
+         !runtime_cooperative_driver_routing_is_enabled())) {
         return state.driver.stream_destroy(stream);
     }
     if (!ensure_initialized(state) || !state.driver.has_stream_destroy()) {
         return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state) &&
+        cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return state.cooperative_router->source_stream_destroy(
+            cooperative_process_call_gate(), stream,
+            [&] { return state.driver.stream_destroy(stream); },
+            [&](CUcontext context) {
+                if (state.quota_mode != QuotaMode::kEnabled) {
+                    return CUDA_SUCCESS;
+                }
+                const AsyncStreamIdentity saved{.stream = stream, .context = context};
+                if (state.allocations.is_accounting_degraded() ||
+                    !state.allocations.detach_async_releases_for_stream(saved)) {
+                    state.allocations.mark_accounting_degraded();
+                    return CUDA_ERROR_UNKNOWN;
+                }
+                return CUDA_SUCCESS;
+            });
+    }
+    if (should_route_cooperative(state)) {
+        std::shared_ptr<CudaCooperativeFrontend> frontend;
+        const auto ready = cooperative_frontend_current(state, frontend);
+        if (ready != CUDA_SUCCESS) {
+            return ready;
+        }
+        const auto logical = frontend->close_stream(stream);
+        if (logical != CUDA_SUCCESS && logical != CUDA_ERROR_INVALID_HANDLE) {
+            return logical;
+        }
+        return intercept_cooperative_native_boundary(
+            [&] { return intercept_stream_destroy(stream); });
     }
 
     std::optional<AsyncStreamIdentity> async_stream;
@@ -3348,11 +5853,24 @@ CUresult intercept_stream_get_context(CUstream stream, CUcontext* context,
 CUresult intercept_context_synchronize() {
     InterceptorState& state = get_state();
     if (glimmer::interceptor::is_inside_driver_call() ||
-        glimmer::interceptor::is_inside_runtime_call()) {
+        (glimmer::interceptor::is_inside_runtime_call() &&
+         !runtime_cooperative_driver_routing_is_enabled())) {
         return state.driver.context_synchronize();
     }
     if (!ensure_initialized(state) || !state.driver.has_context_synchronize()) {
         return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state) &&
+        !cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        std::shared_ptr<CudaCooperativeFrontend> frontend;
+        const auto ready = cooperative_frontend_current(state, frontend);
+        if (ready != CUDA_SUCCESS) {
+            return ready;
+        }
+        const auto logical = frontend->synchronize_context();
+        if (logical != CUDA_SUCCESS) {
+            return logical;
+        }
     }
 
     const CUresult sync_result = state.driver.context_synchronize();
@@ -3374,6 +5892,274 @@ CUresult intercept_context_synchronize() {
         finalize_async_releases(state, *summaries);
     }
     return state.allocations.is_accounting_degraded() ? CUDA_ERROR_UNKNOWN : sync_result;
+}
+
+CUresult intercept_event_create(CUevent* event, unsigned int flags) {
+    InterceptorState& state = get_state();
+    if (!is_inside_driver_call() && !is_inside_runtime_call() && !ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state)) {
+        if (cooperative_process_call_gate().is_native_only_on_current_thread()) {
+            return source_native_event_create(state, event, flags);
+        }
+        if (event == nullptr || (flags & CU_EVENT_INTERPROCESS) != 0) {
+            return intercept_cooperative_native_boundary(
+                [&] { return state.driver.event_create(event, flags); });
+        }
+        std::shared_ptr<CudaCooperativeFrontend> frontend;
+        const auto ready = cooperative_frontend_current(state, frontend);
+        if (ready != CUDA_SUCCESS) {
+            return ready;
+        }
+        const auto created = state.driver.event_create(event, flags);
+        if (created != CUDA_SUCCESS) {
+            return created;
+        }
+        CUcontext context = nullptr;
+        const auto current = state.driver.context_get_current(&context);
+        return current == CUDA_SUCCESS ? state.cooperative_router->register_event(context, *event)
+                                       : current;
+    }
+    return state.driver.event_create(event, flags);
+}
+
+CUresult intercept_event_record(CUevent event, CUstream stream) {
+    InterceptorState& state = get_state();
+    if (!is_inside_driver_call() && !is_inside_runtime_call() && !ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state)) {
+        return cooperative_record(state, event, stream, false,
+                                  [&] { return state.driver.event_record(event, stream); });
+    }
+    return state.driver.event_record(event, stream);
+}
+
+CUresult intercept_event_query(CUevent event) {
+    InterceptorState& state = get_state();
+    if (!is_inside_driver_call() && !is_inside_runtime_call() && !ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state) &&
+        !cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        bool needs_native_boundary{};
+        const auto logical =
+            cooperative_event_completion(state, event, false, needs_native_boundary);
+        if (needs_native_boundary) {
+            return intercept_cooperative_native_boundary(
+                [&] { return state.driver.event_query(event); });
+        }
+        if (logical != CUDA_SUCCESS) {
+            return logical;
+        }
+    }
+    return state.driver.event_query(event);
+}
+
+CUresult intercept_event_destroy(CUevent event) {
+    InterceptorState& state = get_state();
+    if (!is_inside_driver_call() && !is_inside_runtime_call() && !ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state)) {
+        if (!state.cooperative_router) {
+            return CUDA_ERROR_NOT_SUPPORTED;
+        }
+        auto& gate = cooperative_process_call_gate();
+        if (gate.is_native_only_on_current_thread()) {
+            return state.cooperative_router->source_event_destroy(
+                gate, event, [&] { return state.driver.event_destroy(event); });
+        }
+        CudaEventProjection metadata;
+        if (state.cooperative_router->event_projection(event, metadata) == CUDA_SUCCESS &&
+            !metadata.allows_logical_binding()) {
+            const auto destroyed = state.driver.event_destroy(event);
+            return destroyed == CUDA_SUCCESS
+                       ? state.cooperative_router->retire_metadata_event(metadata)
+                       : destroyed;
+        }
+        CUcontext context = nullptr;
+        std::shared_ptr<CudaCooperativeFrontend> frontend;
+        const auto found = state.cooperative_router->event_frontend(event, context, frontend);
+        if (found == CUDA_ERROR_INVALID_HANDLE) {
+            return intercept_cooperative_native_boundary(
+                [&] { return state.driver.event_destroy(event); });
+        }
+        if (found != CUDA_SUCCESS) {
+            return found;
+        }
+        CudaEventProjection projection;
+        const auto projected = state.cooperative_router->event_projection(event, projection);
+        if (projected != CUDA_SUCCESS) {
+            return projected;
+        }
+        if (!projection.is_logical() && !projection.has_native_completion()) {
+            const auto completed =
+                intercept_cooperative_native_boundary([] { return CUDA_SUCCESS; });
+            if (completed != CUDA_SUCCESS) {
+                return completed;
+            }
+        }
+        const auto closed = state.cooperative_router->with_context(
+            context, [&] { return frontend->close_event(event); });
+        if (closed != CUDA_SUCCESS) {
+            return closed;
+        }
+        const auto destroyed = state.driver.event_destroy(event);
+        if (destroyed == CUDA_SUCCESS) {
+            state.cooperative_router->forget_event(event);
+        } else {
+            frontend->fail_native_boundary(destroyed);
+        }
+        return destroyed;
+    }
+    return state.driver.event_destroy(event);
+}
+
+CUresult intercept_event_record_ptsz(CUevent event, CUstream stream) {
+    InterceptorState& state = get_state();
+    if (!is_inside_driver_call() && !is_inside_runtime_call() && !ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state)) {
+        return cooperative_record(state, event, stream, true,
+                                  [&] { return state.driver.event_record_ptsz(event, stream); });
+    }
+    return state.driver.event_record_ptsz(event, stream);
+}
+
+CUresult intercept_event_record_with_flags(CUevent event, CUstream stream, unsigned int flags) {
+    InterceptorState& state = get_state();
+    if (!is_inside_driver_call() && !is_inside_runtime_call() && !ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state)) {
+        if (cooperative_process_call_gate().is_native_only_on_current_thread()) {
+            const CudaSourceEventOperation descriptor{CudaSourceEventOperation::Kind::kRecord,
+                                                      event, flags};
+            return source_native_stream_execution(
+                state, stream, false,
+                [&] { return state.driver.event_record_with_flags(event, stream, flags); },
+                &descriptor);
+        }
+        if (flags == 0) {
+            return cooperative_record(state, event, stream, false, [&] {
+                return state.driver.event_record_with_flags(event, stream, flags);
+            });
+        }
+        return intercept_cooperative_native_boundary(
+            [&] { return state.driver.event_record_with_flags(event, stream, flags); });
+    }
+    return state.driver.event_record_with_flags(event, stream, flags);
+}
+
+CUresult intercept_event_record_with_flags_ptsz(CUevent event, CUstream stream,
+                                                unsigned int flags) {
+    InterceptorState& state = get_state();
+    if (!is_inside_driver_call() && !is_inside_runtime_call() && !ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state)) {
+        if (cooperative_process_call_gate().is_native_only_on_current_thread()) {
+            const CudaSourceEventOperation descriptor{CudaSourceEventOperation::Kind::kRecord,
+                                                      event, flags};
+            return source_native_stream_execution(
+                state, stream, true,
+                [&] { return state.driver.event_record_with_flags_ptsz(event, stream, flags); },
+                &descriptor);
+        }
+        if (flags == 0) {
+            return cooperative_record(state, event, stream, true, [&] {
+                return state.driver.event_record_with_flags_ptsz(event, stream, flags);
+            });
+        }
+        return intercept_cooperative_native_boundary(
+            [&] { return state.driver.event_record_with_flags_ptsz(event, stream, flags); });
+    }
+    return state.driver.event_record_with_flags_ptsz(event, stream, flags);
+}
+
+CUresult intercept_event_synchronize(CUevent event) {
+    InterceptorState& state = get_state();
+    if (!is_inside_driver_call() && !is_inside_runtime_call() && !ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state) &&
+        !cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        bool needs_native_boundary{};
+        const auto logical =
+            cooperative_event_completion(state, event, true, needs_native_boundary);
+        if (needs_native_boundary) {
+            return intercept_cooperative_native_boundary(
+                [&] { return state.driver.event_synchronize(event); });
+        }
+        if (logical != CUDA_SUCCESS) {
+            return logical;
+        }
+    }
+    return state.driver.event_synchronize(event);
+}
+
+CUresult intercept_event_elapsed_time(float* milliseconds, CUevent start, CUevent end) {
+    InterceptorState& state = get_state();
+    if (!is_inside_driver_call() && !is_inside_runtime_call() && !ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state) &&
+        !cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        for (CUevent event : {start, end}) {
+            bool needs_native_boundary{};
+            const auto logical =
+                cooperative_event_completion(state, event, false, needs_native_boundary);
+            if (needs_native_boundary) {
+                return intercept_cooperative_native_boundary(
+                    [&] { return state.driver.event_elapsed_time(milliseconds, start, end); });
+            }
+            if (logical != CUDA_SUCCESS) {
+                return logical;
+            }
+        }
+    }
+    return state.driver.event_elapsed_time(milliseconds, start, end);
+}
+
+CUresult intercept_stream_wait_event(CUstream stream, CUevent event, unsigned int flags) {
+    InterceptorState& state = get_state();
+    if (!is_inside_driver_call() && !is_inside_runtime_call() && !ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state)) {
+        const auto original = [&] { return state.driver.stream_wait_event(stream, event, flags); };
+        if (cooperative_process_call_gate().is_native_only_on_current_thread()) {
+            const CudaSourceEventOperation descriptor{CudaSourceEventOperation::Kind::kWait, event,
+                                                      flags};
+            return source_native_stream_execution(state, stream, false, original, &descriptor);
+        }
+        return flags == 0 ? cooperative_wait(state, stream, event, false, original)
+                          : intercept_cooperative_native_boundary(original);
+    }
+    return state.driver.stream_wait_event(stream, event, flags);
+}
+
+CUresult intercept_stream_wait_event_ptsz(CUstream stream, CUevent event, unsigned int flags) {
+    InterceptorState& state = get_state();
+    if (!is_inside_driver_call() && !is_inside_runtime_call() && !ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state)) {
+        const auto original = [&] {
+            return state.driver.stream_wait_event_ptsz(stream, event, flags);
+        };
+        if (cooperative_process_call_gate().is_native_only_on_current_thread()) {
+            const CudaSourceEventOperation descriptor{CudaSourceEventOperation::Kind::kWait, event,
+                                                      flags};
+            return source_native_stream_execution(state, stream, true, original, &descriptor);
+        }
+        return flags == 0 ? cooperative_wait(state, stream, event, true, original)
+                          : intercept_cooperative_native_boundary(original);
+    }
+    return state.driver.stream_wait_event_ptsz(stream, event, flags);
 }
 
 CUresult intercept_init(unsigned int flags) {
@@ -3493,9 +6279,37 @@ bool launch_scheduling_is_enforced() noexcept {
     try {
         InterceptorState& state = get_state();
         ensure_state_initialized(state);
-        return state.scheduler_mode == glimmer::core::SchedulerMode::kEnforce;
+        return state.scheduler_mode == glimmer::core::SchedulerMode::kEnforce &&
+               !state.is_cooperative_requested;
     } catch (...) {
         return false;
+    }
+}
+
+std::optional<bool> launch_stream_is_capturing(CUstream stream,
+                                               bool per_thread_default_stream) noexcept {
+    try {
+        InterceptorState& state = get_state();
+        if (!ensure_initialized(state)) {
+            return std::nullopt;
+        }
+        CUstreamCaptureStatus status = CU_STREAM_CAPTURE_STATUS_NONE;
+        if (state.driver.stream_capture_status(stream, &status, per_thread_default_stream) !=
+            CUDA_SUCCESS) {
+            report_diagnostic("[glimmer] launch admission rejected: stream capture query failed\n");
+            return std::nullopt;
+        }
+        switch (status) {
+            case CU_STREAM_CAPTURE_STATUS_NONE:
+                return false;
+            case CU_STREAM_CAPTURE_STATUS_ACTIVE:
+            case CU_STREAM_CAPTURE_STATUS_INVALIDATED:
+                return true;
+            default:
+                return std::nullopt;
+        }
+    } catch (...) {
+        return std::nullopt;
     }
 }
 
@@ -3642,8 +6456,8 @@ namespace {
 
 template <typename Available, typename Invoke>
 CUresult intercept_driver_kernel_launch(InterceptorState& state,
-                                        const KernelLaunchObservation& observation,
-                                        CUstream completion_stream, Available&& available,
+                                        const KernelLaunchObservation& observation, CUstream stream,
+                                        bool per_thread_default_stream, Available&& available,
                                         Invoke&& invoke) {
     if (glimmer::interceptor::is_inside_driver_call() ||
         glimmer::interceptor::is_inside_runtime_call()) {
@@ -3661,6 +6475,13 @@ CUresult intercept_driver_kernel_launch(InterceptorState& state,
     glimmer::control::LaunchGateTiming gate_timing;
     std::optional<glimmer::core::TaskId> launch_task;
     if (launch_scheduling_is_enforced()) {
+        const auto capturing = launch_stream_is_capturing(stream, per_thread_default_stream);
+        if (!capturing.has_value()) {
+            return CUDA_ERROR_NOT_SUPPORTED;
+        }
+        if (capturing.value()) {
+            return invoke();
+        }
         launch_task = acquire_launch_slot(trace_launch_timings ? &gate_timing : nullptr);
         if (!launch_task.has_value()) {
             return CUDA_ERROR_NOT_SUPPORTED;
@@ -3683,7 +6504,9 @@ CUresult intercept_driver_kernel_launch(InterceptorState& state,
         const auto event_tracking_started = trace_launch_timings
                                                 ? std::chrono::steady_clock::now()
                                                 : std::chrono::steady_clock::time_point{};
-        event_tracking_succeeded = track_launch_completion(launch_task.value(), completion_stream);
+        event_tracking_succeeded = track_launch_completion(
+            launch_task.value(),
+            per_thread_default_stream && stream == nullptr ? CU_STREAM_PER_THREAD : stream);
         if (trace_launch_timings) {
             event_tracking_nanoseconds =
                 elapsed_nanoseconds(event_tracking_started, std::chrono::steady_clock::now());
@@ -3711,6 +6534,457 @@ CUresult intercept_driver_kernel_launch(InterceptorState& state,
 
 }  // namespace
 
+CUresult intercept_module_load_data(CUmodule* module, const void* image, bool uses_extended_loader,
+                                    unsigned int option_count, CUjit_option* options,
+                                    void** option_values) {
+    InterceptorState& state = get_state();
+    const auto invoke = [&] {
+        return uses_extended_loader ? state.driver.module_load_data_ex(module, image, option_count,
+                                                                       options, option_values)
+                                    : state.driver.module_load_data(module, image);
+    };
+    if (is_inside_driver_call() || is_inside_runtime_call()) {
+        return invoke();
+    }
+    if (!ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (should_route_cooperative(state) &&
+        cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return intercept_cooperative_module_boundary([&] {
+            return state.persistent_kernels ? state.persistent_kernels->load_source_module(
+                                                  module, image, uses_extended_loader, option_count,
+                                                  options, option_values)
+                                            : invoke();
+        });
+    }
+    const auto load = [&] {
+        return state.persistent_kernels == nullptr
+                   ? invoke()
+                   : state.persistent_kernels->load_module(module, image, uses_extended_loader,
+                                                           option_count, options, option_values);
+    };
+    if (should_route_cooperative(state)) {
+        std::shared_ptr<CudaCooperativeFrontend> frontend;
+        const auto result = cooperative_frontend_current(state, frontend);
+        if (result != CUDA_SUCCESS) {
+            return result;
+        }
+        return intercept_cooperative_native_boundary(load);
+    }
+    return load();
+}
+
+std::optional<RuntimeCooperativeLaunch> prepare_runtime_cooperative_launch(
+    const void* function, dim3 grid, dim3 block, std::size_t shared_memory_bytes,
+    RuntimeFuncGetNameFunction get_name, RuntimeGetFuncBySymbolFunction get_function) {
+    if (function == nullptr || get_name == nullptr || get_function == nullptr) {
+        return std::nullopt;
+    }
+    InterceptorState& state = get_state();
+    if (!ensure_initialized(state) || !state.cooperative_router || !state.persistent_kernels) {
+        return std::nullopt;
+    }
+    CUcontext context = nullptr;
+    if (state.driver.context_get_current(&context) != CUDA_SUCCESS || context == nullptr) {
+        return std::nullopt;
+    }
+    const auto image_path = loaded_image_path(function);
+    if (!image_path) {
+        return std::nullopt;
+    }
+    std::error_code path_error;
+    const auto path = std::filesystem::absolute(*image_path, path_error);
+    if (path_error) {
+        return std::nullopt;
+    }
+    const auto binary_path = path.string();
+    std::optional<RuntimeCooperativeLaunch> prepared;
+    const auto prepare = [&]() -> cudaError_t {
+        const char* name = nullptr;
+        cudaFunction_t original = nullptr;
+        if (get_name(&name, function) != cudaSuccess || name == nullptr ||
+            get_function(&original, function) != cudaSuccess || original == nullptr) {
+            return cudaSuccess;
+        }
+        // The selected Toolkit declares both types as CUfunc_st*. No opaque
+        // host-function or Runtime stream/event handle is cast to a Driver ABI.
+        RuntimeCooperativeLaunch plan{
+            original, std::nullopt, {grid.x, grid.y, grid.z}, {block.x, block.y, block.z}};
+        plan.context = context;
+        plan.shared_memory_bytes = shared_memory_bytes;
+        if (!state.persistent_kernels->module_source_is_prepared(original)) {
+            const auto ready = intercept_cooperative_runtime_native_boundary([&] {
+                state.persistent_kernels->prepare_module_source(original);
+                return cudaSuccess;
+            });
+            if (ready != cudaSuccess) return ready;
+        }
+        plan.binary_variant = state.persistent_kernels->mapped_binary_kernel(original);
+        plan.gemm_variant = state.persistent_kernels->mapped_gemm_kernel(original);
+        const auto variant = state.persistent_kernels->runtime_kernel(
+            context, function, name, binary_path, GLIMMER_CUOBJDUMP_PATH, original);
+        const auto shape = state.persistent_kernels->validated_launch_shape(
+            plan.grid, plan.block, PtxExecutionKind::kPreemptive);
+        int resident_blocks = 0;
+        CUcontext actual_context = nullptr;
+        if (shared_memory_bytes == 0 && variant && variant->function != nullptr && shape &&
+            variant->execution_kind == PtxExecutionKind::kPreemptive &&
+            state.driver.context_get_current(&actual_context) == CUDA_SUCCESS &&
+            actual_context == context &&
+            state.driver.occupancy(&resident_blocks, variant->function,
+                                   static_cast<int>(shape->block_threads), 0) == CUDA_SUCCESS &&
+            resident_blocks > 0) {
+            plan.variant = CooperativeKernelVariant{
+                context, variant->function, variant->parameter_layout, *shape,
+                std::min(state.persistent_worker_blocks, shape->logical_blocks)};
+        }
+        prepared = std::move(plan);
+        return cudaSuccess;
+    };
+    if (state.persistent_kernels->runtime_cooperative_source_is_prepared(context, binary_path)) {
+        if (prepare() != cudaSuccess) return std::nullopt;
+    } else {
+        std::shared_ptr<CudaCooperativeFrontend> frontend;
+        if (cooperative_frontend_current(state, frontend) != CUDA_SUCCESS ||
+            intercept_cooperative_runtime_native_boundary(prepare) != cudaSuccess) {
+            return std::nullopt;
+        }
+    }
+    return prepared;
+}
+
+void quarantine_runtime_cooperative_launch(CUcontext context) noexcept {
+    auto& state = get_state();
+    if (state.cooperative_router)
+        state.cooperative_router->quarantine_normal_launch(context, CUDA_ERROR_UNKNOWN);
+}
+
+std::optional<RuntimePersistentLaunch> prepare_runtime_persistent_launch(
+    const void* function, dim3 grid, dim3 block, std::size_t shared_memory_bytes,
+    cudaStream_t stream, bool per_thread_default_stream, RuntimeFuncGetNameFunction get_name,
+    RuntimeGetFuncBySymbolFunction get_function) {
+    try {
+        InterceptorState& state = get_state();
+        if (!ensure_initialized(state) || !state.is_runtime_persistent_enabled ||
+            state.persistent_kernels == nullptr || function == nullptr || get_name == nullptr ||
+            get_function == nullptr || grid.x == 0 || grid.y == 0 || grid.z == 0 || block.x == 0 ||
+            block.y == 0 || block.z == 0 || shared_memory_bytes != 0 ||
+            !state.driver.has_runtime_persistent_api()) {
+            return std::nullopt;
+        }
+        CUcontext context = nullptr;
+        CUstreamCaptureStatus capture_status = CU_STREAM_CAPTURE_STATUS_NONE;
+        if (state.driver.context_get_current(&context) != CUDA_SUCCESS || context == nullptr ||
+            state.driver.stream_capture_status(reinterpret_cast<CUstream>(stream), &capture_status,
+                                               per_thread_default_stream) != CUDA_SUCCESS ||
+            capture_status != CU_STREAM_CAPTURE_STATUS_NONE) {
+            return std::nullopt;
+        }
+        const char* name = nullptr;
+        if (get_name(&name, function) != cudaSuccess || name == nullptr) {
+            return std::nullopt;
+        }
+        const auto image_path = loaded_image_path(function);
+        if (!image_path) {
+            return std::nullopt;
+        }
+        std::error_code path_error;
+        const auto binary_path = std::filesystem::absolute(*image_path, path_error);
+        if (path_error) {
+            return std::nullopt;
+        }
+        const auto variant = state.persistent_kernels->runtime_kernel(
+            context, function, name, binary_path.string(), GLIMMER_CUOBJDUMP_PATH);
+        if (!variant.has_value() || variant->execution_kind == PtxExecutionKind::kPreemptive) {
+            return std::nullopt;
+        }
+        const auto shape = state.persistent_kernels->validated_launch_shape(
+            {grid.x, grid.y, grid.z}, {block.x, block.y, block.z}, variant->execution_kind);
+        if (!shape.has_value()) {
+            return std::nullopt;
+        }
+        CUfunction device_function = nullptr;
+        int resident_blocks = 0;
+        if (state.driver.kernel_get_function(&device_function, variant->kernel) != CUDA_SUCCESS ||
+            state.driver.occupancy(&resident_blocks, device_function,
+                                   static_cast<int>(shape->block_threads), 0) != CUDA_SUCCESS ||
+            resident_blocks <= 0) {
+            return std::nullopt;
+        }
+        cudaFunction_t original_function = nullptr;
+        if (get_function(&original_function, function) != cudaSuccess ||
+            original_function == nullptr) {
+            return std::nullopt;
+        }
+        CUcontext launch_context = nullptr;
+        if (state.driver.context_get_current(&launch_context) != CUDA_SUCCESS ||
+            launch_context != context) {
+            return std::nullopt;
+        }
+        return RuntimePersistentLaunch{reinterpret_cast<CUfunction>(original_function),
+                                       device_function,
+                                       state.persistent_worker_blocks,
+                                       variant->parameter_count,
+                                       variant->execution_kind,
+                                       shape->logical_blocks};
+    } catch (...) {
+        // No launch has happened; metadata/tool failures retain the original Runtime path.
+        return std::nullopt;
+    }
+}
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): trace schema names distinct block counts.
+void report_runtime_persistent_launch(unsigned int logical_blocks,
+                                      unsigned int worker_blocks) noexcept {
+    try {
+        if (!get_state().trace_kernel_launches) {
+            return;
+        }
+        std::array<char, 160> message{};
+        const auto written =
+            std::snprintf(message.data(), message.size(),
+                          "[glimmer] persistent_runtime logical_blocks=%u worker_blocks=%u\n",
+                          logical_blocks, worker_blocks);
+        if (written > 0 && static_cast<std::size_t>(written) < message.size()) {
+            report_diagnostic(message.data());
+        }
+    } catch (...) {
+    }
+}
+
+cudaError_t intercept_runtime_device_reset(RuntimeDeviceResetFunction reset) {
+    if (reset == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    if (cooperative_runtime_preview_requested() &&
+        (is_inside_driver_call() || g_is_inside_cooperative_boundary)) {
+        return reset();
+    }
+    InterceptorState& state = get_state();
+    CUcontext context = nullptr;
+    const bool is_preview = cooperative_runtime_preview_requested();
+    if (is_preview && !is_inside_driver_call() && !g_is_inside_cooperative_boundary) {
+        if (cooperative_process_call_gate().is_native_only_on_current_thread()) {
+            return cudaErrorNotSupported;
+        }
+        if (!ensure_initialized(state) || !state.cooperative_router || !state.persistent_kernels ||
+            state.allocations.is_accounting_degraded() ||
+            state.cooperative_router->normal_owner_status() != CUDA_SUCCESS) {
+            return cudaErrorUnknown;
+        }
+        const auto current_status = state.driver.context_get_current(&context);
+        if (current_status != CUDA_SUCCESS && current_status != CUDA_ERROR_NOT_INITIALIZED) {
+            return cudaErrorUnknown;
+        }
+        if (current_status == CUDA_ERROR_NOT_INITIALIZED) {
+            context = nullptr;  // Failed Driver output cannot identify a reset owner.
+        }
+        const CooperativeBoundaryScope scope;
+        bool is_primary_context = false;
+        if (!context) {
+            // The qualified SDK leaves an unbound caller's active primary and
+            // resources alive. Success is not destruction proof. Cold Runtime
+            // initialization and last-error behavior remain owned by the SDK.
+            return reset();
+        } else if (state.quota_mode == QuotaMode::kEnabled) {
+            if (state.driver.current_context_is_active_primary(context, is_primary_context) !=
+                CUDA_SUCCESS) {
+                // Uncertain identity/reference ownership cannot authorize reset
+                // or a later retry that could release unproven allocation quota.
+                state.allocations.mark_accounting_degraded();
+                return cudaErrorUnknown;
+            }
+        }
+        cudaError_t native_result = cudaErrorUnknown;
+        bool was_called = false;
+        const auto closed = state.cooperative_router->close_context(context, [&] {
+            // Private retirement may require the reset target; actual SDK reset
+            // must still run on the original bound caller.
+            const auto retired = state.cooperative_router->with_context(context, [&] {
+                state.persistent_kernels->forget_context(context);
+                return CUDA_SUCCESS;
+            });
+            if (retired != CUDA_SUCCESS) {
+                return retired;
+            }
+            was_called = true;
+            native_result = reset();
+            return native_result == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
+        });
+        if (!was_called) {
+            return cudaErrorUnknown;
+        }
+        if (native_result != cudaSuccess) {
+            return native_result;
+        }
+        if (closed != CUDA_SUCCESS) {
+            return cudaErrorUnknown;
+        }
+        if (state.quota_mode == QuotaMode::kEnabled && is_primary_context) {
+            const auto summaries = state.allocations.erase_context_by_device(context);
+            if (!summaries) {
+                state.allocations.mark_accounting_degraded();
+                return cudaErrorUnknown;
+            }
+            finalize_async_releases(state, *summaries);
+            if (state.allocations.is_accounting_degraded()) {
+                return cudaErrorUnknown;
+            }
+        }
+        return native_result;
+    }
+    const bool has_context = ensure_initialized(state) && state.persistent_kernels != nullptr &&
+                             state.driver.context_get_current(&context) == CUDA_SUCCESS;
+    const auto result = reset();
+    if (result == cudaSuccess && has_context && context != nullptr) {
+        state.persistent_kernels->forget_context(context);
+    }
+    return result;
+}
+
+CUresult intercept_library_load_data(CUlibrary* library, const void* image, CUjit_option* options,
+                                     void** option_values, unsigned int option_count,
+                                     CUlibraryOption* library_options, void** library_option_values,
+                                     unsigned int library_option_count) {
+    InterceptorState& state = get_state();
+    const auto original = [&] {
+        return state.driver.library_load_data(library, image, options, option_values, option_count,
+                                              library_options, library_option_values,
+                                              library_option_count);
+    };
+    if (is_inside_driver_call()) return original();
+    ensure_state_initialized(state);
+    return intercept_cooperative_module_boundary([&] {
+        const auto result = original();
+        const int saved_errno = errno;
+        if (result == CUDA_SUCCESS && library && state.persistent_kernels) {
+            static_assert(sizeof(CUlibraryOption) == sizeof(std::uint32_t));
+            static_assert(CU_LIBRARY_BINARY_IS_PRESERVED == 1);
+            state.persistent_kernels->observe_library_source(
+                *library, qualified_library_source_options(option_count, library_options,
+                                                           library_option_count)
+                              ? image
+                              : nullptr);
+        }
+        errno = saved_errno;
+        return result;
+    });
+}
+
+CUresult intercept_library_load_from_file(CUlibrary* library, const char* path,
+                                          CUjit_option* options, void** option_values,
+                                          unsigned int option_count,
+                                          CUlibraryOption* library_options,
+                                          void** library_option_values,
+                                          unsigned int library_option_count) {
+    InterceptorState& state = get_state();
+    const auto original = [&] {
+        return state.driver.library_load_from_file(library, path, options, option_values,
+                                                   option_count, library_options,
+                                                   library_option_values, library_option_count);
+    };
+    if (is_inside_driver_call()) return original();
+    ensure_state_initialized(state);
+    return intercept_cooperative_module_boundary([&] {
+        const auto result = original();
+        const int saved_errno = errno;
+        if (result == CUDA_SUCCESS && library && state.persistent_kernels)
+            state.persistent_kernels->retire_library_source(*library);
+        errno = saved_errno;
+        return result;
+    });
+}
+
+CUresult intercept_library_get_module(CUmodule* module, CUlibrary library) {
+    InterceptorState& state = get_state();
+    if (is_inside_driver_call()) return state.driver.library_get_module(module, library);
+    ensure_state_initialized(state);
+    const auto result = state.driver.library_get_module(module, library);
+    const int saved_errno = errno;
+    if (result == CUDA_SUCCESS && module && state.persistent_kernels) {
+        CUcontext context{};
+        if (state.driver.context_get_current(&context) != CUDA_SUCCESS) context = nullptr;
+        state.persistent_kernels->observe_library_module(library, *module, context);
+    }
+    errno = saved_errno;
+    return result;
+}
+
+CUresult intercept_library_unload(CUlibrary library) {
+    InterceptorState& state = get_state();
+    if (is_inside_driver_call()) return state.driver.library_unload(library);
+    ensure_state_initialized(state);
+    const auto original = [&] {
+        const auto result = state.driver.library_unload(library);
+        const int saved_errno = errno;
+        // An attempted unload is not permission to reuse uncertain associations.
+        if (state.persistent_kernels) state.persistent_kernels->retire_library_source(library);
+        errno = saved_errno;
+        return result;
+    };
+    if (cooperative_process_call_gate().is_native_only_on_current_thread())
+        return intercept_cooperative_module_boundary(original);
+    if (!state.is_cooperative_requested || g_is_inside_cooperative_boundary) return original();
+    if (!state.cooperative_router || !state.persistent_kernels) return CUDA_ERROR_NOT_SUPPORTED;
+    // Libraries span contexts. This Driver boundary must also drain in a
+    // Driver-only preview and when invoked by a Runtime-native SDK frame.
+    const CooperativeBoundaryScope scope;
+    return state.cooperative_router->native_boundary(
+        original, [] { return intercept_context_synchronize(); });
+}
+
+CUresult intercept_module_get_function(CUfunction* function, CUmodule module, const char* name) {
+    InterceptorState& state = get_state();
+    if (is_inside_driver_call()) {
+        return state.driver.module_get_function(function, module, name);
+    }
+    if (!ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (is_inside_runtime_call()) {
+        // The SDK's original lookup may run during Runtime-native preparation.
+        // Retain identity only; private code loading requires a later drained boundary.
+        return state.persistent_kernels
+                   ? state.persistent_kernels->get_source_function(function, module, name)
+                   : state.driver.module_get_function(function, module, name);
+    }
+    if (should_route_cooperative(state) &&
+        !cooperative_process_call_gate().is_native_only_on_current_thread() &&
+        state.persistent_kernels &&
+        state.persistent_kernels->module_lookup_is_prepared(module, name)) {
+        // Original SDK validation remains once. Private eager lookup is already
+        // complete, so a warm function must not drain accepted low work.
+        return state.persistent_kernels->get_source_function(function, module, name);
+    }
+    return intercept_cooperative_module_boundary([&] {
+        if (!state.persistent_kernels) {
+            return state.driver.module_get_function(function, module, name);
+        }
+        return cooperative_process_call_gate().is_native_only_on_current_thread()
+                   ? state.persistent_kernels->get_source_function(function, module, name)
+                   : state.persistent_kernels->get_function(function, module, name);
+    });
+}
+
+CUresult intercept_module_unload(CUmodule module) {
+    InterceptorState& state = get_state();
+    if (is_inside_driver_call() || is_inside_runtime_call()) {
+        return state.driver.module_unload(module);
+    }
+    if (!ensure_initialized(state)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return intercept_cooperative_module_boundary([&] {
+        if (!state.persistent_kernels) {
+            return state.driver.module_unload(module);
+        }
+        return cooperative_process_call_gate().is_native_only_on_current_thread()
+                   ? state.persistent_kernels->unload_source_module(module)
+                   : state.persistent_kernels->unload_module(module);
+    });
+}
+
 CUresult intercept_launch_kernel(CUfunction function, unsigned int grid_dim_x,
                                  unsigned int grid_dim_y, unsigned int grid_dim_z,
                                  unsigned int block_dim_x, unsigned int block_dim_y,
@@ -3728,15 +7002,217 @@ CUresult intercept_launch_kernel(CUfunction function, unsigned int grid_dim_x,
         .block_dim_z = block_dim_z,
         .shared_memory_bytes = shared_memory_bytes,
         .stream = stream};
-    const CUstream completion_stream =
-        per_thread_default_stream && stream == nullptr ? CU_STREAM_PER_THREAD : stream;
+    ensure_state_initialized(state);
+    if (runtime_native_kernel_execution_is_pending() && is_inside_runtime_call() &&
+        !is_inside_driver_call()) {
+        const auto matched = dispatch_runtime_native_kernel(
+            function, stream,
+            {{grid_dim_x, grid_dim_y, grid_dim_z},
+             {block_dim_x, block_dim_y, block_dim_z},
+             shared_memory_bytes,
+             per_thread_default_stream},
+            [&] {
+                return per_thread_default_stream
+                           ? state.driver.launch_kernel_ptsz(function, grid_dim_x, grid_dim_y,
+                                                             grid_dim_z, block_dim_x, block_dim_y,
+                                                             block_dim_z, shared_memory_bytes,
+                                                             stream, kernel_parameters, extra)
+                           : state.driver.launch_kernel(function, grid_dim_x, grid_dim_y,
+                                                        grid_dim_z, block_dim_x, block_dim_y,
+                                                        block_dim_z, shared_memory_bytes, stream,
+                                                        kernel_parameters, extra);
+            });
+        if (matched) return *matched;
+    }
+    if (should_route_cooperative(state)) {
+        if (cooperative_process_call_gate().is_native_only_on_current_thread()) {
+            const auto execute = [&] {
+                return source_native_stream_execution(
+                    state, stream, per_thread_default_stream, [&] {
+                        return per_thread_default_stream
+                                   ? state.driver.launch_kernel_ptsz(
+                                         function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x,
+                                         block_dim_y, block_dim_z, shared_memory_bytes, stream,
+                                         kernel_parameters, extra)
+                                   : state.driver.launch_kernel(
+                                         function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x,
+                                         block_dim_y, block_dim_z, shared_memory_bytes, stream,
+                                         kernel_parameters, extra);
+                    });
+            };
+            const auto matched =
+                dispatch_runtime_source_kernel(function,
+                                               {{grid_dim_x, grid_dim_y, grid_dim_z},
+                                                {block_dim_x, block_dim_y, block_dim_z},
+                                                shared_memory_bytes,
+                                                per_thread_default_stream},
+                                               execute);
+            const auto result = matched ? *matched : execute();
+            if (result == CUDA_SUCCESS) {
+                report_kernel_launch_observed(observation);
+            }
+            return result;
+        }
+        std::shared_ptr<CudaCooperativeFrontend> frontend;
+        const auto ready = cooperative_frontend_current(state, frontend);
+        if (ready != CUDA_SUCCESS) {
+            return ready;
+        }
+        const std::array<unsigned int, 3> grid{grid_dim_x, grid_dim_y, grid_dim_z};
+        const std::array<unsigned int, 3> block{block_dim_x, block_dim_y, block_dim_z};
+        std::optional<CooperativeKernelVariant> variant;
+        std::optional<MappedBinaryKernelVariant> mapped;
+        std::optional<MappedGemmKernelVariant> gemm;
+        std::optional<CudaQueuedKernel> binary_kernel;
+        CUcontext binary_context{};
+        if (is_inside_runtime_call()) {
+            const auto plan = consume_runtime_cooperative_launch(
+                function, {grid, block, shared_memory_bytes, per_thread_default_stream});
+            if (!plan) {
+                return CUDA_ERROR_NOT_SUPPORTED;
+            }
+            if (extra == nullptr) {
+                variant = plan->variant;
+                mapped = plan->binary_variant;
+                gemm = plan->gemm_variant;
+            }
+        } else if (extra == nullptr) {
+            if (!state.persistent_kernels->module_source_is_prepared(function)) {
+                const auto prepared = intercept_cooperative_native_boundary([&] {
+                    state.persistent_kernels->prepare_module_source(function);
+                    return CUDA_SUCCESS;
+                });
+                if (prepared != CUDA_SUCCESS) {
+                    return prepared;
+                }
+            }
+            variant = state.persistent_kernels->cooperative_kernel(
+                function, grid, block, shared_memory_bytes, stream, per_thread_default_stream);
+            mapped = state.persistent_kernels->mapped_binary_kernel(function);
+            gemm = state.persistent_kernels->mapped_gemm_kernel(function);
+        }
+        if (extra == nullptr && !variant && shared_memory_bytes == 0) {
+            try {
+                CUstreamCaptureStatus capture = CU_STREAM_CAPTURE_STATUS_NONE;
+                int resident{};
+                if (mapped && state.driver.context_get_current(&binary_context) == CUDA_SUCCESS &&
+                    binary_context == mapped->context &&
+                    state.driver.stream_capture_status(stream, &capture,
+                                                       per_thread_default_stream) == CUDA_SUCCESS &&
+                    capture == CU_STREAM_CAPTURE_STATUS_NONE &&
+                    state.driver.occupancy(&resident, mapped->function, 128, 0) == CUDA_SUCCESS &&
+                    resident > 0) {
+                    struct Owners {
+                        std::shared_ptr<void> module;
+                        std::shared_ptr<void> context;
+                    };
+                    auto context_owner = state.cooperative_router->resources();
+                    if (mapped->resources && context_owner) {
+                        auto owners = std::make_shared<Owners>(
+                            Owners{mapped->resources, std::move(context_owner)});
+                        binary_kernel = prepare_mapped_add_slices(
+                            mapped->function, grid, block, kernel_parameters, std::move(owners),
+                            state.trace_kernel_launches, mapped->mapping);
+                    }
+                }
+            } catch (...) {
+                // No private kernel was accepted or issued; preserve native fallback.
+            }
+        }
+        if (extra == nullptr && !variant && !binary_kernel && gemm && shared_memory_bytes == 0) {
+            try {
+                CUdevice device{};
+                CUstreamCaptureStatus capture = CU_STREAM_CAPTURE_STATUS_NONE;
+                int resident{};
+                if (state.driver.context_get_current(&binary_context) == CUDA_SUCCESS &&
+                    binary_context == gemm->context &&
+                    state.driver.context_get_device(&device) == CUDA_SUCCESS &&
+                    state.driver.stream_capture_status(stream, &capture,
+                                                       per_thread_default_stream) == CUDA_SUCCESS &&
+                    capture == CU_STREAM_CAPTURE_STATUS_NONE &&
+                    state.driver.occupancy(&resident, gemm->function, 256, 0) == CUDA_SUCCESS &&
+                    resident > 0) {
+                    struct Owners {
+                        std::shared_ptr<void> module;
+                        std::shared_ptr<void> context;
+                    };
+                    auto context_owner = state.cooperative_router->resources();
+                    if (gemm->resources && context_owner) {
+                        auto owners = std::make_shared<Owners>(
+                            Owners{gemm->resources, std::move(context_owner)});
+                        // End the private native scope before frontend issue or
+                        // fallback; it must not bypass logical stream ordering.
+                        const NativeDriverCallScope native;
+                        binary_kernel = prepare_checked_mapped_gemm_slices(
+                            gemm->function, grid, block, kernel_parameters, std::move(owners),
+                            state.cooperative_router->copy_range_dispatch(), state.allocations,
+                            binary_context, device, state.trace_kernel_launches, gemm->mapping);
+                    }
+                }
+            } catch (...) {
+                // Optional preparation has not accepted or issued any kernel.
+            }
+        }
+        if (gemm && state.trace_kernel_launches) {
+            const auto saved_errno = errno;
+            report_diagnostic(binary_kernel ? "[glimmer] gemm_candidate prepared=1\n"
+                                            : "[glimmer] gemm_candidate prepared=0\n");
+            errno = saved_errno;
+        }
+        const auto result =
+            binary_kernel.has_value()
+                ? frontend->launch_sliced(binary_context, stream, per_thread_default_stream,
+                                          std::move(*binary_kernel))
+            : variant.has_value()
+                ? frontend->launch(*variant, stream, per_thread_default_stream, grid, block,
+                                   kernel_parameters, state.cooperative_router->resources())
+                : state.cooperative_router->native_execution(
+                      cooperative_process_call_gate(), frontend, stream, per_thread_default_stream,
+                      [&] {
+                          return per_thread_default_stream
+                                     ? state.driver.launch_kernel_ptsz(
+                                           function, grid_dim_x, grid_dim_y, grid_dim_z,
+                                           block_dim_x, block_dim_y, block_dim_z,
+                                           shared_memory_bytes, stream, kernel_parameters, extra)
+                                     : state.driver.launch_kernel(
+                                           function, grid_dim_x, grid_dim_y, grid_dim_z,
+                                           block_dim_x, block_dim_y, block_dim_z,
+                                           shared_memory_bytes, stream, kernel_parameters, extra);
+                      });
+        if (is_inside_runtime_call()) complete_runtime_cooperative_launch(result);
+        if (result == CUDA_SUCCESS) {
+            report_kernel_launch_observed(observation);
+        }
+        return result;
+    }
     return intercept_driver_kernel_launch(
-        state, observation, completion_stream,
+        state, observation, stream, per_thread_default_stream,
         [&] {
             return per_thread_default_stream ? state.driver.has_launch_kernel_ptsz()
                                              : state.driver.has_launch_kernel();
         },
         [&] {
+            if (!is_inside_driver_call() && is_inside_runtime_call()) {
+                const auto replacement = consume_runtime_driver_replacement(function);
+                if (replacement.has_value()) {
+                    return per_thread_default_stream
+                               ? state.driver.launch_kernel_ptsz(
+                                     replacement->persistent, replacement->worker_blocks, 1, 1,
+                                     block_dim_x, block_dim_y, block_dim_z, shared_memory_bytes,
+                                     stream, replacement->arguments, nullptr)
+                               : state.driver.launch_kernel(
+                                     replacement->persistent, replacement->worker_blocks, 1, 1,
+                                     block_dim_x, block_dim_y, block_dim_z, shared_memory_bytes,
+                                     stream, replacement->arguments, nullptr);
+                }
+            }
+            if (state.persistent_kernels != nullptr && !is_inside_driver_call() &&
+                !is_inside_runtime_call()) {
+                return state.persistent_kernels->launch(
+                    function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y,
+                    block_dim_z, shared_memory_bytes, stream, kernel_parameters, extra,
+                    per_thread_default_stream);
+            }
             return per_thread_default_stream
                        ? state.driver.launch_kernel_ptsz(
                              function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y,
@@ -3764,11 +7240,47 @@ CUresult intercept_launch_kernel_ex(const CUlaunchConfig* config, CUfunction fun
         .block_dim_z = config->blockDimZ,
         .shared_memory_bytes = config->sharedMemBytes,
         .stream = config->hStream};
-    const CUstream completion_stream = per_thread_default_stream && config->hStream == nullptr
-                                           ? CU_STREAM_PER_THREAD
-                                           : config->hStream;
+    ensure_state_initialized(state);
+    if (should_route_cooperative(state)) {
+        if (cooperative_process_call_gate().is_native_only_on_current_thread()) {
+            const auto execute = [&] {
+                return source_native_stream_execution(
+                    state, config->hStream, per_thread_default_stream, [&] {
+                        return state.driver.launch_kernel_ex(config, function, kernel_parameters,
+                                                             extra, per_thread_default_stream);
+                    });
+            };
+            const auto matched = dispatch_runtime_source_kernel(
+                function,
+                {{config->gridDimX, config->gridDimY, config->gridDimZ},
+                 {config->blockDimX, config->blockDimY, config->blockDimZ},
+                 config->sharedMemBytes,
+                 per_thread_default_stream},
+                execute);
+            const auto result = matched ? *matched : execute();
+            if (result == CUDA_SUCCESS) {
+                report_kernel_launch_observed(observation);
+            }
+            return result;
+        }
+        std::shared_ptr<CudaCooperativeFrontend> frontend;
+        const auto ready = cooperative_frontend_current(state, frontend);
+        if (ready != CUDA_SUCCESS) {
+            return ready;
+        }
+        const auto result = state.cooperative_router->native_execution(
+            cooperative_process_call_gate(), frontend, config->hStream, per_thread_default_stream,
+            [&] {
+                return state.driver.launch_kernel_ex(config, function, kernel_parameters, extra,
+                                                     per_thread_default_stream);
+            });
+        if (result == CUDA_SUCCESS) {
+            report_kernel_launch_observed(observation);
+        }
+        return result;
+    }
     return intercept_driver_kernel_launch(
-        state, observation, completion_stream,
+        state, observation, config->hStream, per_thread_default_stream,
         [&] { return state.driver.has_launch_kernel_ex(per_thread_default_stream); },
         [&] {
             return state.driver.launch_kernel_ex(config, function, kernel_parameters, extra,
@@ -3794,6 +7306,12 @@ CUresult intercept_graph_launch(CUgraphExec graph_exec, CUstream stream,
     if (!ensure_initialized(state)) {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
+    if (should_route_cooperative(state)) {
+        if (!state.cooperative_router) return CUDA_ERROR_NOT_SUPPORTED;
+        const CooperativeBoundaryScope boundary;
+        return execute_cooperative_graph(state, graph_exec, stream, per_thread_default_stream,
+                                         invoke);
+    }
     const bool launch_available = per_thread_default_stream ? state.driver.has_graph_launch_ptsz()
                                                             : state.driver.has_graph_launch();
     if (!launch_available) {
@@ -3804,6 +7322,13 @@ CUresult intercept_graph_launch(CUgraphExec graph_exec, CUstream stream,
     glimmer::control::LaunchGateTiming gate_timing;
     std::optional<glimmer::core::TaskId> launch_task;
     if (launch_scheduling_is_enforced()) {
+        const auto capturing = launch_stream_is_capturing(stream, per_thread_default_stream);
+        if (!capturing.has_value()) {
+            return CUDA_ERROR_NOT_SUPPORTED;
+        }
+        if (capturing.value()) {
+            return invoke();
+        }
         launch_task = acquire_launch_slot(trace_launch_timings ? &gate_timing : nullptr);
         if (!launch_task.has_value()) {
             return CUDA_ERROR_NOT_SUPPORTED;
@@ -3860,9 +7385,11 @@ CUresult intercept_graph_launch(CUgraphExec graph_exec, CUstream stream,
 CUresult intercept_mem_alloc(CUdeviceptr* device_pointer, std::size_t memory_bytes) {
     InterceptorState& state = get_state();
     return intercept_tracked_allocation(
-        device_pointer, memory_bytes, [&state, device_pointer, memory_bytes] {
+        device_pointer, memory_bytes,
+        [&state, device_pointer, memory_bytes] {
             return state.driver.mem_alloc(device_pointer, memory_bytes);
-        });
+        },
+        false, AllocationProvenance::kIndependentDevice);
 }
 
 CUresult intercept_mem_alloc_managed(CUdeviceptr* device_pointer, std::size_t memory_bytes,
@@ -4022,7 +7549,8 @@ CUresult intercept_mem_alloc_pitch(CUdeviceptr* device_pointer, std::size_t* pit
     }
 
     if (!state.allocations.record(make_allocation_identity(*device_pointer, *context),
-                                  *actual_bytes)) {
+                                  *actual_bytes, AllocationScope::kContextBound,
+                                  AllocationProvenance::kIndependentDevice)) {
         state.allocations.mark_accounting_degraded();
         const CUresult cleanup_result = state.driver.mem_free(*device_pointer);
         if (cleanup_result != CUDA_SUCCESS) {
@@ -4039,26 +7567,28 @@ CUresult intercept_mem_alloc_pitch(CUdeviceptr* device_pointer, std::size_t* pit
     return CUDA_SUCCESS;
 }
 
-CUresult intercept_mem_free(CUdeviceptr device_pointer) {
-    InterceptorState& state = get_state();
-    if (glimmer::interceptor::is_inside_driver_call() ||
-        glimmer::interceptor::is_inside_runtime_call()) {
-        return state.driver.mem_free(device_pointer);
-    }
-    if (!ensure_initialized(state)) {
-        return CUDA_ERROR_UNKNOWN;
-    }
-
+CudaCooperativeReleaseResult release_tracked_pointer(InterceptorState& state,
+                                                     CUdeviceptr device_pointer,
+                                                     bool is_private_progress) {
+    const auto native_free = [&] {
+        const auto result = state.driver.mem_free(device_pointer);
+        if (result != CUDA_SUCCESS && is_private_progress) {
+            state.allocations.mark_accounting_degraded();
+        }
+        return CudaCooperativeReleaseResult{result, result == CUDA_SUCCESS
+                                                        ? CudaNativeReleaseState::kReleased
+                                                        : CudaNativeReleaseState::kUncertain};
+    };
     if (state.quota_mode != QuotaMode::kEnabled) {
-        return state.driver.mem_free(device_pointer);
+        return native_free();
     }
 
     const std::optional<ContextIdentity> context = capture_context_identity(state);
     if (!context.has_value()) {
-        const CUresult free_result = state.driver.mem_free(device_pointer);
-        if (free_result == CUDA_SUCCESS) {
+        auto free_result = native_free();
+        if (free_result.status == CUDA_SUCCESS) {
             state.allocations.mark_accounting_degraded();
-            return CUDA_ERROR_UNKNOWN;
+            free_result.status = CUDA_ERROR_UNKNOWN;
         }
         return free_result;
     }
@@ -4070,15 +7600,15 @@ CUresult intercept_mem_free(CUdeviceptr device_pointer) {
     }
     const auto [release_status, release_ticket] = release_state;
     if (release_status == AllocationRegistry::ReleaseStatus::kInProgress) {
-        return CUDA_ERROR_INVALID_VALUE;
+        return {CUDA_ERROR_INVALID_VALUE, CudaNativeReleaseState::kRetained};
     }
     if (release_status == AllocationRegistry::ReleaseStatus::kUnknown ||
         !release_ticket.has_value()) {
-        return state.driver.mem_free(device_pointer);
+        return native_free();
     }
 
-    const CUresult free_result = state.driver.mem_free(device_pointer);
-    if (free_result != CUDA_SUCCESS) {
+    auto free_result = native_free();
+    if (free_result.status != CUDA_SUCCESS) {
         state.allocations.cancel_release(*release_ticket);
         return free_result;
     }
@@ -4090,9 +7620,37 @@ CUresult intercept_mem_free(CUdeviceptr device_pointer) {
     const bool is_completed = state.allocations.complete_release(*release_ticket);
     if (!is_released || !is_completed) {
         state.allocations.mark_accounting_degraded();
+        free_result.status = CUDA_ERROR_UNKNOWN;
+    }
+    return free_result;
+}
+
+CUresult intercept_mem_free(CUdeviceptr device_pointer) {
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return state.driver.mem_free(device_pointer);
+    }
+    if (!ensure_initialized(state)) {
         return CUDA_ERROR_UNKNOWN;
     }
-    return CUDA_SUCCESS;
+    return release_tracked_pointer(state, device_pointer, false).status;
+}
+
+CudaCooperativeReleaseResult release_cooperative_progress(CUdeviceptr pointer) noexcept {
+    InterceptorState* state = nullptr;
+    try {
+        state = &get_state();
+        if (!ensure_initialized(*state)) {
+            return {CUDA_ERROR_UNKNOWN, CudaNativeReleaseState::kRetained};
+        }
+        return release_tracked_pointer(*state, pointer, true);
+    } catch (...) {
+        if (state) {
+            state->allocations.mark_accounting_degraded();
+        }
+        return {CUDA_ERROR_UNKNOWN, CudaNativeReleaseState::kUncertain};
+    }
 }
 
 CUresult intercept_context_get_current(CUcontext* context) {
@@ -4125,37 +7683,194 @@ CUresult intercept_context_get_device(CUdevice* device) {
     return state.driver.context_get_device(device);
 }
 
-CUresult intercept_context_destroy(CUcontext context) {
-    InterceptorState& state = get_state();
-    if (glimmer::interceptor::is_inside_driver_call() ||
-        glimmer::interceptor::is_inside_runtime_call()) {
-        return state.driver.context_destroy(context);
+CUresult intercept_primary_context_release(CUdevice device, bool is_modern) {
+    auto& state = get_state();
+    const auto original = [&] { return state.driver.primary_context_release(device, is_modern); };
+    if (is_inside_driver_call() || g_is_inside_cooperative_boundary) {
+        return original();
     }
     if (!ensure_initialized(state)) {
         return CUDA_ERROR_UNKNOWN;
     }
-    if (!state.driver.has_context_destroy()) {
+    if (!state.driver.has_primary_context_release(is_modern)) {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
-    if (state.quota_mode != QuotaMode::kEnabled) {
-        return state.driver.context_destroy(context);
+    if (!should_route_cooperative(state)) {
+        return original();
     }
-
-    const CUresult destroy_result = state.driver.context_destroy(context);
-    if (destroy_result != CUDA_SUCCESS) {
-        return destroy_result;
+    auto& gate = cooperative_process_call_gate();
+    const ProcessCallGate::Call call(gate);
+    if (call.is_native_only()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
     }
+    if (!state.cooperative_router || !state.persistent_kernels ||
+        state.allocations.is_accounting_degraded()) {
+        return CUDA_ERROR_UNKNOWN;
+    }
+    const CooperativeBoundaryScope boundary;
+    CUresult native_result = CUDA_ERROR_UNKNOWN;
+    bool was_called{};
+    bool has_uncertain_lifetime{};
+    const auto result = state.cooperative_router->release_primary_context(
+        gate, device,
+        [&] {
+            was_called = true;
+            native_result = original();
+            return native_result;
+        },
+        [&](CUcontext target) {
+            const auto retired = state.persistent_kernels->forget_context_checked(target);
+            if (retired != CUDA_SUCCESS) {
+                return retired;
+            }
+            if (state.quota_mode == QuotaMode::kEnabled) {
+                const auto summaries = state.allocations.erase_context_by_device(target);
+                if (!summaries) {
+                    state.allocations.mark_accounting_degraded();
+                    return CUDA_ERROR_UNKNOWN;
+                }
+                finalize_async_releases(state, *summaries);
+                if (state.allocations.is_accounting_degraded()) {
+                    return CUDA_ERROR_UNKNOWN;
+                }
+            }
+            return CUDA_SUCCESS;
+        },
+        has_uncertain_lifetime);
+    if (has_uncertain_lifetime) {
+        // Failed native effects and internal lifetime proof retain usage. Do not
+        // let a later memory operation turn unknown ownership into free quota.
+        state.allocations.mark_accounting_degraded();
+    }
+    return was_called && native_result != CUDA_SUCCESS ? native_result : result;
+}
 
-    const auto summaries = state.allocations.erase_context_by_device(context);
-    if (!summaries.has_value()) {
+CUresult intercept_primary_context_reset(CUdevice device, bool is_modern) {
+    auto& state = get_state();
+    const auto original = [&] { return state.driver.primary_context_reset(device, is_modern); };
+    if (is_inside_driver_call() || g_is_inside_cooperative_boundary) {
+        return original();
+    }
+    if (!ensure_initialized(state)) {
+        return CUDA_ERROR_UNKNOWN;
+    }
+    if (!state.driver.has_primary_context_reset(is_modern)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (!should_route_cooperative(state)) {
+        return original();
+    }
+    if (cooperative_process_call_gate().is_native_only_on_current_thread()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (!state.cooperative_router || !state.persistent_kernels ||
+        state.allocations.is_accounting_degraded() ||
+        state.cooperative_router->normal_owner_status() != CUDA_SUCCESS) {
+        return CUDA_ERROR_UNKNOWN;
+    }
+    CUcontext target{};
+    const auto identity = state.driver.active_primary_context(device, target);
+    if (identity != CUDA_SUCCESS) {
+        if (identity == CUDA_ERROR_INVALID_DEVICE || identity == CUDA_ERROR_NOT_INITIALIZED) {
+            // Proven invalid/cold validation cannot destroy an existing owner.
+            return original();
+        }
         state.allocations.mark_accounting_degraded();
         return CUDA_ERROR_UNKNOWN;
     }
-    finalize_async_releases(state, *summaries);
-    if (state.allocations.is_accounting_degraded()) {
+    if (!target) {
+        return original();
+    }
+    const CooperativeBoundaryScope boundary;
+    CUresult native_result = CUDA_ERROR_UNKNOWN;
+    bool was_called{};
+    const auto closed = state.cooperative_router->close_context(target, [&] {
+        const auto retired = state.cooperative_router->with_context(target, [&] {
+            state.persistent_kernels->forget_context(target);
+            return CUDA_SUCCESS;
+        });
+        if (retired != CUDA_SUCCESS) {
+            return retired;
+        }
+        // The native reset runs on its SDK/Driver caller, not the temporary
+        // private cleanup target. Its original post-reset context is untouched.
+        was_called = true;
+        native_result = original();
+        return native_result;
+    });
+    if (!was_called || native_result != CUDA_SUCCESS) {
+        return was_called ? native_result : closed;
+    }
+    if (closed != CUDA_SUCCESS) {
+        return closed;
+    }
+    if (state.quota_mode == QuotaMode::kEnabled) {
+        const auto summaries = state.allocations.erase_context_by_device(target);
+        if (!summaries) {
+            state.allocations.mark_accounting_degraded();
+            return CUDA_ERROR_UNKNOWN;
+        }
+        finalize_async_releases(state, *summaries);
+        if (state.allocations.is_accounting_degraded()) {
+            return CUDA_ERROR_UNKNOWN;
+        }
+    }
+    return native_result;
+}
+
+CUresult intercept_context_destroy(CUcontext context, bool is_modern) {
+    InterceptorState& state = get_state();
+    if (glimmer::interceptor::is_inside_driver_call() ||
+        glimmer::interceptor::is_inside_runtime_call()) {
+        return state.driver.context_destroy(context, is_modern);
+    }
+    if (!ensure_initialized(state)) {
         return CUDA_ERROR_UNKNOWN;
     }
-    return CUDA_SUCCESS;
+    if (!state.driver.has_context_destroy(is_modern)) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    const auto retire_destroyed = [&](CUcontext target) {
+        if (state.persistent_kernels) {
+            const auto retired = state.persistent_kernels->forget_context_checked(target);
+            if (retired != CUDA_SUCCESS) {
+                state.allocations.mark_accounting_degraded();
+                return retired;
+            }
+        }
+        if (state.quota_mode == QuotaMode::kEnabled) {
+            const auto summaries = state.allocations.erase_context_by_device(target);
+            if (!summaries) {
+                state.allocations.mark_accounting_degraded();
+                return CUDA_ERROR_UNKNOWN;
+            }
+            finalize_async_releases(state, *summaries);
+            if (state.allocations.is_accounting_degraded()) {
+                return CUDA_ERROR_UNKNOWN;
+            }
+        }
+        return CUDA_SUCCESS;
+    };
+    if (should_route_cooperative(state)) {
+        if (!state.cooperative_router || state.allocations.is_accounting_degraded()) {
+            return CUDA_ERROR_UNKNOWN;
+        }
+        const CooperativeBoundaryScope scope;
+        CudaContextDestroyDisposition disposition;
+        const auto result = state.cooperative_router->destroy_context(
+            cooperative_process_call_gate(), context,
+            [&] { return state.driver.context_destroy(context, is_modern); }, retire_destroyed,
+            is_modern, disposition);
+        if (disposition.has_uncertain_lifetime) {
+            state.allocations.mark_accounting_degraded();
+        }
+        return result;
+    }
+    const CUresult destroy_result = state.driver.context_destroy(context, is_modern);
+    if (destroy_result != CUDA_SUCCESS) {
+        return destroy_result;
+    }
+    return retire_destroyed(context);
 }
 
 CUresult intercept_mem_get_info(std::size_t* free_bytes, std::size_t* total_bytes) {
@@ -4243,6 +7958,18 @@ CUresult intercept_device_total_mem(std::size_t* total_bytes, CUdevice device) {
     return CUDA_SUCCESS;
 }
 
+bool initialize_runtime_driver_lookup() {
+    // Runtime may query the Driver before entering any intercepted Runtime API.
+    // Initialize outside RuntimeCallScope so its lookup does not use an empty dispatch table.
+    auto& state = get_state();
+    if (is_inside_driver_call()) {
+        // Publish only original Driver symbols. A first trusted SDK lookup
+        // must not initialize the cooperative owner or import private actors.
+        return initialize_native_driver_dispatch(state);
+    }
+    return ensure_initialized(state);
+}
+
 CUresult intercept_get_proc_address(const char* symbol, void** function_pointer, int cuda_version,
                                     cuuint64_t flags) {
     InterceptorState& state = get_state();
@@ -4251,7 +7978,13 @@ CUresult intercept_get_proc_address(const char* symbol, void** function_pointer,
     }
     if (glimmer::interceptor::is_inside_driver_call() ||
         glimmer::interceptor::is_inside_runtime_call()) {
-        return state.driver.get_proc_address(symbol, function_pointer, cuda_version, flags);
+        const auto result =
+            state.driver.get_proc_address(symbol, function_pointer, cuda_version, flags);
+        if (result == CUDA_SUCCESS) {
+            replace_runtime_proc_address(state.driver, symbol, function_pointer, flags,
+                                         cuda_version);
+        }
+        return result;
     }
     if (!ensure_initialized(state) || !state.driver.has_get_proc_address()) {
         return CUDA_ERROR_NOT_SUPPORTED;
@@ -4267,7 +8000,7 @@ CUresult intercept_get_proc_address(const char* symbol, void** function_pointer,
         return result;
     }
 
-    if (void* intercepted_symbol = find_proc_address_interceptor(symbol, flags);
+    if (void* intercepted_symbol = find_proc_address_interceptor(symbol, flags, cuda_version);
         intercepted_symbol != nullptr) {
         *function_pointer = intercepted_symbol;
     }
@@ -4283,14 +8016,18 @@ CUresult intercept_get_proc_address_v2(const char* symbol, void** function_point
     }
     if (glimmer::interceptor::is_inside_driver_call() ||
         glimmer::interceptor::is_inside_runtime_call()) {
+        CUresult result = CUDA_ERROR_NOT_SUPPORTED;
         if (state.driver.has_get_proc_address_v2()) {
-            return state.driver.get_proc_address_v2(symbol, function_pointer, cuda_version, flags,
-                                                    symbol_status);
+            result = state.driver.get_proc_address_v2(symbol, function_pointer, cuda_version, flags,
+                                                      symbol_status);
+        } else if (state.driver.has_get_proc_address()) {
+            result = state.driver.get_proc_address(symbol, function_pointer, cuda_version, flags);
         }
-        if (!state.driver.has_get_proc_address()) {
-            return CUDA_ERROR_NOT_SUPPORTED;
+        if (result == CUDA_SUCCESS) {
+            replace_runtime_proc_address(state.driver, symbol, function_pointer, flags,
+                                         cuda_version);
         }
-        return state.driver.get_proc_address(symbol, function_pointer, cuda_version, flags);
+        return result;
     }
     if (!ensure_initialized(state) ||
         (!state.driver.has_get_proc_address() && !state.driver.has_get_proc_address_v2())) {
@@ -4356,7 +8093,7 @@ CUresult intercept_get_proc_address_v2(const char* symbol, void** function_point
         return result;
     }
 
-    if (void* intercepted_symbol = find_proc_address_interceptor(symbol, flags);
+    if (void* intercepted_symbol = find_proc_address_interceptor(symbol, flags, cuda_version);
         intercepted_symbol != nullptr) {
         *function_pointer = intercepted_symbol;
     }

@@ -5,6 +5,7 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -16,11 +17,178 @@ EXAMPLE = pathlib.Path(__file__).resolve().parents[2] / "examples/framework_work
 sys.path.insert(0, str(EXAMPLE))
 
 from analyze_cuda_profile import analyze_database, analyze_sqlite, distribution, interval_summary
+import pytorch_smoke as smoke
 from pytorch_smoke import cuda_profile_range
 import run_launch_profile as runner
+import run_slo_validation as slo
 
 
 class LaunchProfileTest(unittest.TestCase):
+    def test_colocation_output_ownership_preserves_prior_results(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            example = root / "examples/framework_workloads/pytorch_smoke"
+            example.mkdir(parents=True)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            shutil.copyfile(EXAMPLE / "run_pytorch_priority.sh", example / "run_pytorch_priority.sh")
+            shutil.copyfile(EXAMPLE.parents[2] / "scripts/artifact_paths.py", scripts / "artifact_paths.py")
+            (example / "pytorch_smoke.py").write_text("import sys\nprint('fixture failure')\nsys.exit(1)\n")
+            legacy = example / "output/co-location-native/training.csv"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text("original\n")
+            environment = {key: value for key, value in os.environ.items()
+                           if key not in ("LD_PRELOAD", "LD_AUDIT")}
+            command = ["bash", str(example / "run_pytorch_priority.sh"), "--mode", "native",
+                       "--python", sys.executable]
+
+            def run(*arguments):
+                return subprocess.run(command + list(arguments), capture_output=True, text=True,
+                                      timeout=10, env=environment)
+
+            self.assertEqual(run("--help").returncode, 0)
+            self.assertEqual(run("--mode", "invalid").returncode, 2)
+            self.assertFalse((root / "artifacts").exists())
+            for _ in range(2):
+                self.assertEqual(run().returncode, 1)
+            attempts = list((root / "artifacts/runs/pytorch-colocation-native").glob("attempt-*"))
+            self.assertEqual(len(attempts), 2)
+            for attempt in attempts:
+                self.assertTrue((attempt / "run.json").is_file())
+                self.assertTrue((attempt / ".glimmer-pytorch-priority").is_dir())
+                self.assertTrue((attempt / "training.log").exists())
+            self.assertEqual(legacy.read_text(), "original\n")
+
+            names = ("training.ready", "inference.ready", "start.signal", "training.status",
+                     "inference.status", "training.log", "inference.log", "control-service.log",
+                     "control-metrics.txt", "training.csv", "inference.csv", "colocation.json",
+                     "start.tmp", "colocation.tmp")
+            for index, name in enumerate(names):
+                directory = root / f"conflict-{index}"
+                directory.mkdir()
+                target = directory / name
+                if name == "colocation.tmp":
+                    target.symlink_to(root / "missing")
+                else:
+                    target.write_text("preserve\n")
+                result = run("--output-dir", str(directory))
+                with self.subTest(name=name):
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertFalse((directory / ".glimmer-pytorch-priority").exists())
+                    if target.is_symlink():
+                        self.assertTrue(target.is_symlink())
+                    else:
+                        self.assertEqual(target.read_text(), "preserve\n")
+
+            explicit = root / "batch"
+            explicit.mkdir()
+            for name in ("command.json", "runner.log"):
+                (explicit / name).write_text("caller data\n")
+            self.assertEqual(run("--output-dir", str(explicit)).returncode, 1)
+            self.assertTrue((explicit / ".glimmer-pytorch-priority").is_dir())
+            self.assertTrue((explicit / "training.log").is_file())
+            self.assertEqual((explicit / "command.json").read_text(), "caller data\n")
+            self.assertEqual((explicit / "runner.log").read_text(), "caller data\n")
+            previous_log = (explicit / "training.log").read_text()
+            self.assertEqual(run("--output-dir", str(explicit)).returncode, 2)
+            self.assertEqual((explicit / "training.log").read_text(), previous_log)
+
+            claimed = root / "claimed"
+            claimed.mkdir()
+            (claimed / ".glimmer-pytorch-priority").mkdir()
+            self.assertEqual(run("--output-dir", str(claimed)).returncode, 2)
+            self.assertFalse((claimed / "training.log").exists())
+
+    def test_smoke_outputs_are_new_and_existing_outputs_are_preserved(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            example = root / "examples/framework_workloads/pytorch_smoke"
+            example.mkdir(parents=True)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            shutil.copyfile(EXAMPLE / "run_pytorch_smoke.sh", example / "run_pytorch_smoke.sh")
+            shutil.copyfile(EXAMPLE.parents[2] / "scripts/artifact_paths.py", scripts / "artifact_paths.py")
+            (example / "pytorch_smoke.py").write_text(
+                "import argparse, os, pathlib, sys\n"
+                "p = argparse.ArgumentParser()\n"
+                "p.add_argument('--role')\n"
+                "p.add_argument('--output', type=pathlib.Path)\n"
+                "a, _ = p.parse_known_args()\n"
+                "with open(os.environ['SMOKE_TEST_LOG'], 'a') as log: log.write('run\\n')\n"
+                "if os.environ.get('SMOKE_TEST_FAIL'): sys.exit(1)\n"
+                "with a.output.open('x') as f: f.write('measurement\\n')\n"
+            )
+            legacy = example / "output/native-inference.csv"
+            legacy.parent.mkdir()
+            legacy.write_text("original\n")
+            log = root / "workloads.log"
+            environment = {key: value for key, value in os.environ.items()
+                           if key not in ("LD_PRELOAD", "LD_AUDIT")}
+            environment["SMOKE_TEST_LOG"] = str(log)
+            command = ["bash", str(example / "run_pytorch_smoke.sh"), "--python", sys.executable]
+
+            def run(*arguments, env=environment):
+                return subprocess.run(command + list(arguments), capture_output=True, text=True,
+                                      timeout=10, env=env)
+
+            self.assertEqual(run("--help").returncode, 0)
+            self.assertEqual(run("--mode", "invalid").returncode, 2)
+            for forwarded in (("--output=elsewhere.csv",), ("--out=elsewhere.csv",),
+                              ("--out", "elsewhere.csv")):
+                self.assertEqual(run("--", *forwarded).returncode, 2)
+            self.assertFalse((root / "artifacts").exists())
+            self.assertFalse(log.exists())
+            for _ in range(2):
+                result = run()
+                self.assertEqual(result.returncode, 0, result.stderr)
+            attempts = list((root / "artifacts/runs/pytorch-smoke").glob("attempt-*"))
+            self.assertEqual(len(attempts), 2)
+            for attempt in attempts:
+                self.assertTrue((attempt / "run.json").is_file())
+                self.assertEqual((attempt / "native-inference.csv").read_text(), "measurement\n")
+            self.assertEqual(legacy.read_text(), "original\n")
+
+            explicit = root / "chosen.csv"
+            self.assertEqual(run("--output", str(explicit)).returncode, 0)
+            self.assertEqual(explicit.read_text(), "measurement\n")
+            self.assertEqual(run("--output", str(explicit)).returncode, 2)
+            dangling = root / "dangling.csv"
+            dangling.symlink_to(root / "missing.csv")
+            self.assertEqual(run("--output", str(dangling)).returncode, 2)
+            self.assertEqual(log.read_text().splitlines(), ["run"] * 3)
+            self.assertTrue(dangling.is_symlink())
+
+            failing_environment = dict(environment, SMOKE_TEST_FAIL="1")
+            self.assertEqual(run(env=failing_environment).returncode, 1)
+            attempts = list((root / "artifacts/runs/pytorch-smoke").glob("attempt-*"))
+            self.assertEqual(len(attempts), 3)
+            self.assertTrue(all((attempt / "run.json").is_file() for attempt in attempts))
+
+    def test_direct_smoke_rejects_existing_outputs_before_import_and_at_write(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            existing = root / "existing.csv"
+            existing.write_text("original\n")
+            dangling = root / "dangling.csv"
+            dangling.symlink_to(root / "missing.csv")
+            for output in (existing, dangling):
+                with self.subTest(output=output), mock.patch.object(sys, "argv", ["smoke", "--output", str(output)]), \
+                        mock.patch.object(smoke, "import_torch") as import_torch, redirect_stderr(io.StringIO()):
+                    self.assertEqual(smoke.main(), 2)
+                    import_torch.assert_not_called()
+                with self.assertRaises(FileExistsError):
+                    smoke.write_measurements(output, [{"value": 1}])
+            for arguments in (("--out", str(root / "new.csv")), ("--out=new.csv",)):
+                with mock.patch.object(sys, "argv", ["smoke", *arguments]), \
+                        redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as failure:
+                    smoke.parse_args()
+                self.assertEqual(failure.exception.code, 2)
+            self.assertEqual(existing.read_text(), "original\n")
+            self.assertTrue(dangling.is_symlink())
+            fresh = root / "new.csv"
+            smoke.write_measurements(fresh, [{"value": 1}])
+            self.assertIn("1", fresh.read_text())
+
     def test_smoke_trace_flag_combinations_keep_env_options_before_assignments(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -227,14 +395,73 @@ class LaunchProfileTest(unittest.TestCase):
             self.assertIn("--cuda-trace-all-apis=true", command)
             self.assertEqual(command[-1], "--profile-cuda")
             self.assertEqual(command[command.index("--warmup") + 1], "6")
-            self.assertFalse(any("LD_PRELOAD" in item for item in command[:command.index("env")]))
+            target = next(index for index, item in enumerate(command)
+                          if pathlib.Path(item).name == "env")
+            self.assertTrue(pathlib.Path(command[target]).is_absolute())
+            self.assertFalse(any("LD_PRELOAD" in item for item in command[:target]))
             self.assertEqual(any(item.startswith("LD_PRELOAD=") for item in command), mode != "native")
             self.assertFalse(any("GLIMMER_TRACE" in item for item in command))
+
+    def test_default_api_trace_is_explicit_and_target_resolution_is_checked(self):
+        args = runner.parse_args(["--mode", "native", "--cuda-api-trace", "default"])
+        command = runner.profile_command(args, pathlib.Path("/tmp/profile"))
+        self.assertNotIn("--cuda-trace-all-apis=true", command)
+        self.assertNotIn("--cuda-event-trace=false", command)
+        with mock.patch.object(runner.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(ValueError, "target executable"):
+                runner.profile_command(args, pathlib.Path("/tmp/profile"))
+
+    def test_cooperative_flags_are_explicit_and_only_reach_the_target(self):
+        for mode in ("local", "remote"):
+            args = runner.parse_args(["--mode", mode, "--cooperative-preview",
+                                      "--persistent-worker-blocks", "80"])
+            command = runner.profile_command(args, pathlib.Path("/tmp/profile"), "/tmp/service.sock")
+            target = next(index for index, item in enumerate(command)
+                          if pathlib.Path(item).name == "env")
+            self.assertFalse(any("GLIMMER_" in item for item in command[:target]))
+            for value in ("GLIMMER_COOPERATIVE_DRIVER_PREVIEW=1",
+                          "GLIMMER_COOPERATIVE_RUNTIME_PREVIEW=1",
+                          "GLIMMER_PERSISTENT_WORKER_BLOCKS=80"):
+                self.assertEqual(command.count(value), 1)
+                self.assertGreater(command.index(value), target)
+            self.assertIn("GLIMMER_MAX_CONCURRENT_KERNELS=2", command)
+            self.assertIn("GLIMMER_SCHEDULER_BATCH_SIZE=1", command)
+        self.assertEqual(runner.parse_args(["--cooperative-preview"]).persistent_worker_blocks, 3)
+
+    def test_remote_service_keeps_existing_authenticated_execution_protocol(self):
+        for preview in (False, True):
+            args = runner.parse_args(["--mode", "remote"] +
+                                     (["--cooperative-preview"] if preview else []))
+            process = mock.Mock()
+            process.poll.return_value = None
+            stats = "GLIMMER_TASK_V1 STATS 1 0 0 1 0 0 4294967296 0 0 2 256"
+            with tempfile.TemporaryDirectory() as temporary, \
+                    mock.patch.object(pathlib.Path, "is_socket", return_value=True), \
+                    mock.patch("run_overhead_baseline.subprocess.Popen", return_value=process) as start, \
+                    mock.patch("run_overhead_baseline.subprocess.run", return_value=mock.Mock(stdout=stats)):
+                directory = pathlib.Path(temporary)
+                with runner.remote_service(args, directory) as socket:
+                    self.assertTrue(socket.endswith("control.sock"))
+                    command = start.call_args.args[0]
+                    self.assertIn("--bind-leases-to-process", command)
+                    self.assertEqual(command[command.index("--execution-mode") + 1], "remote")
+                    self.assertNotIn("--cooperative-execution", command)
+                    self.assertEqual(json.loads((directory / "service-command.json").read_text()), command)
+                self.assertEqual((directory / "service-stats.txt").read_text(), stats)
+                process.terminate.assert_called_once()
 
     def test_arguments_reject_baseline_analysis_and_unbounded_capture(self):
         for options in (["--analyze-only", "/tmp/results"], ["--repetitions", "2"],
                         ["--duration-seconds", "11"], ["--duration-seconds", "nan"],
-                        ["--mode", "bad"], ["--warmup", "-1"]):
+                        ["--mode", "bad"], ["--warmup", "-1"], ["--cuda-api-trace", "silent"],
+                        ["--mode", "native", "--cooperative-preview"],
+                        ["--mode", "quota", "--cooperative-preview"],
+                        ["--mode", "preload", "--cooperative-preview"],
+                        ["--persistent-worker-blocks", "3"],
+                        ["--cooperative-preview", "--persistent-worker-blocks", "0"],
+                        ["--cooperative-preview", "--persistent-worker-blocks", "-1"],
+                        ["--cooperative-preview", "--persistent-worker-blocks", "65537"],
+                        ["--cooperative-preview", "--persistent-worker-blocks", "nan"]):
             with self.subTest(options=options), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 runner.parse_args(options)
 
@@ -248,10 +475,35 @@ class LaunchProfileTest(unittest.TestCase):
             output = pathlib.Path(temporary) / "output"
             self.assertEqual(runner.main(["--mode", "native", "--output-dir", str(output)]), 1)
             manifest = (output / "manifest.json").read_text()
+            failure = (output / "failure.json").read_text()
             self.assertFalse(json.loads(manifest)["collection_complete"])
-            self.assertIn("capture failed", (output / "failure.json").read_text())
+            self.assertIn("capture failed", failure)
             self.assertEqual(runner.main(["--mode", "native", "--output-dir", str(output)]), 1)
             self.assertEqual((output / "manifest.json").read_text(), manifest)
+            self.assertEqual((output / "failure.json").read_text(), failure)
+
+    def test_default_profile_attempts_are_separate_from_timing_results(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project = pathlib.Path(temporary) / "project"
+            project.mkdir()
+            resolve = slo.artifact_paths.resolve_artifact_root
+            with mock.patch.object(slo.artifact_paths, "resolve_artifact_root",
+                                   side_effect=lambda name, **options: resolve(
+                                       name, **{**options, "project_root": project})), \
+                    mock.patch.object(runner, "optimized_build", return_value={}), \
+                    mock.patch.object(runner.shutil, "which", return_value="nsys"), \
+                    mock.patch.object(runner.subprocess, "run", return_value=mock.Mock(stdout="Nsight test")), \
+                    mock.patch.object(runner, "artifact_hashes", return_value={}), \
+                    mock.patch.object(runner, "run_bounded", side_effect=RuntimeError("capture failed")), \
+                    redirect_stderr(io.StringIO()):
+                self.assertEqual(runner.main(["--mode", "native"]), 1)
+                self.assertEqual(runner.main(["--mode", "native"]), 1)
+            attempts = list((project / "artifacts/profiles/pytorch-launch-profile").glob("attempt-*"))
+            self.assertEqual(len(attempts), 2)
+            for attempt in attempts:
+                self.assertEqual(json.loads((attempt / "run.json").read_text())["category"], "profiles")
+                self.assertIn("capture failed", (attempt / "failure.json").read_text())
+            self.assertFalse((project / "artifacts/runs").exists())
 
     def test_profiled_workload_metadata_and_quota_are_required(self):
         args = runner.parse_args([])

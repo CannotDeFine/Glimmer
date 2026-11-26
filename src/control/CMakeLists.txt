@@ -1,37 +1,19 @@
 add_library(glimmer_control
-    async_cooperative_launch_gate.cc
-    cooperative_launch_gate.cc
     execution_protocol.cc
-    internal/control_request_sequence.cc
-    internal/versioned_remote_launch_gate.cc
-    internal/local_control_wake.cc
-    internal/owned_control_exchange.cc
-    internal/remote_control_operation.cc
-    internal/prepared_control_future.cc
-    internal/process_control_mailbox.cc
-    internal/owner_pumped_control_state.cc
-    internal/shared_control_channel.cc
-    execution_socket.cc
-    internal/process_identity.cc
-    execution_dnn_legacy_protocol.cc
-    execution_dnn_protocol.cc
-    execution_dnn_backend_protocol.cc
-    execution_nccl_protocol.cc
     execution_blas_protocol.cc
     execution_function_protocol.cc
     execution_jit_protocol.cc
     execution_pointer_protocol.cc
     execution_process_memory_protocol.cc
     execution_graph_protocol.cc
-    native_epoch_protocol.cc
-    task_execution_protocol.cc
-    task_execution_admission.cc
-    task_execution_endpoint.cc
-    shared_task_control_client.cc
-    unix_socket_task_execution_server.cc
-    internal/execution_admission_state.cc
-    internal/execution_cooperative_admission.cc
-    internal/execution_native_epoch_admission.cc
+    execution_nccl_protocol.cc
+    execution_dnn_protocol.cc
+    execution_dnn_legacy_protocol.cc
+    execution_dnn_backend_protocol.cc
+    execution_socket.cc
+    cooperative_admission.cc
+    cooperative_launch_gate.cc
+    async_cooperative_launch_gate.cc
     composite_quota.cc
     device_capacity_quota.cc
     internal/socket_line_reader.cc
@@ -40,7 +22,28 @@ add_library(glimmer_control
     internal/task_recovery_client.cc
     internal/task_recovery_endpoint.cc
     internal/task_recovery_protocol.cc
+    internal/shared_control_channel.cc
+    internal/owned_control_exchange.cc
+    internal/control_request_sequence.cc
+    internal/versioned_remote_launch_gate.cc
+    internal/remote_control_operation.cc
+    internal/process_control_mailbox.cc
+    internal/local_control_wake.cc
+    internal/prepared_control_future.cc
+    internal/owner_pumped_control_state.cc
+    internal/execution_admission_state.cc
+    internal/execution_cooperative_admission.cc
+    internal/execution_native_epoch_admission.cc
+    internal/process_identity.cc
     launch_gate.cc
+    native_epoch_admission.cc
+    native_epoch_endpoint.cc
+    native_epoch_protocol.cc
+    task_execution_protocol.cc
+    task_execution_admission.cc
+    task_execution_endpoint.cc
+    shared_task_control_client.cc
+    unix_socket_task_execution_server.cc
     process_memory_quota.cc
     shared_memory_quota.cc
     task_admission.cc

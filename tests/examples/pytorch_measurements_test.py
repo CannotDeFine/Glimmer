@@ -3,7 +3,10 @@
 import argparse
 import csv
 import json
+import os
 import pathlib
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,12 +16,166 @@ EXAMPLE = pathlib.Path(__file__).resolve().parents[2] / "examples/framework_work
 sys.path.insert(0, str(EXAMPLE))
 
 from measurements import (MEASUREMENT_VERSION, summarize_colocation, summarize_samples, summarize_solo,
-                          validate_scheduler_metrics)
+                          validate_scheduler_metrics, workload_identity)
 from run_slo_validation import (COMPARISON_VERSION, CONFIGURATIONS, SOLO_ROLES, add_solo_baselines,
                                 aggregate, benchmark_environment, build_command, write_aggregate)
+from pytorch_smoke import build_model, configure_cnn_backend, parse_args, validate_positive
 
 
 class MeasurementTest(unittest.TestCase):
+    def test_priority_launcher_selects_matching_control_service(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            example = root / "examples/framework_workloads/pytorch_smoke"
+            example.mkdir(parents=True)
+            shutil.copyfile(EXAMPLE / "run_pytorch_priority.sh", example / "run_pytorch_priority.sh")
+            (example / "pytorch_smoke.py").write_text("import sys\nsys.exit(1)\n")
+            build = root / "build"
+            (build / "lib").mkdir(parents=True)
+            (build / "lib/libglimmer_cuda_interceptor.so").touch()
+            binary = build / "bin"
+            binary.mkdir()
+            (binary / "glimmer_control_client").touch()
+            mock_service = (
+                "#!/usr/bin/env python3\n"
+                "import json, os, socket, sys, time\n"
+                "with open(os.environ['GLIMMER_TEST_SERVICE_LOG'], 'w') as output:\n"
+                "    json.dump(sys.argv, output)\n"
+                "server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+                "server.bind(sys.argv[sys.argv.index('--socket') + 1])\n"
+                "server.listen()\n"
+                "time.sleep(30)\n"
+            )
+            for name in ("glimmer_control_service", "glimmer_task_execution_service"):
+                executable = binary / name
+                executable.write_text(mock_service)
+                executable.chmod(0o755)
+            log = root / "service.json"
+            environment = {key: value for key, value in os.environ.items()
+                           if key not in ("LD_PRELOAD", "LD_AUDIT")}
+            environment["GLIMMER_TEST_SERVICE_LOG"] = str(log)
+            cases = (
+                ([], "glimmer_control_service"),
+                (["--cooperative-preview"], "glimmer_task_execution_service"),
+                (["--cooperative-preview", "--native-epoch-max-calls", "8",
+                  "--native-epoch-prefix-calls", "2", "--native-epoch-pending-prefixes", "2",
+                  "--native-epoch-acceptance-us", "2000"], "glimmer_task_execution_service"),
+            )
+            for index, (extra, expected) in enumerate(cases):
+                command = ["bash", str(example / "run_pytorch_priority.sh"), "--mode", "priority",
+                           "--python", sys.executable, "--build-dir", str(build),
+                           "--output-dir", str(root / f"output-{index}"), *extra]
+                result = subprocess.run(command, capture_output=True, text=True, timeout=10,
+                                        env=environment)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                arguments = json.loads(log.read_text())
+                self.assertEqual(pathlib.Path(arguments[0]).name, expected)
+                self.assertEqual("--execution-mode" in arguments, index == 0)
+                self.assertEqual("--bind-leases-to-process" in arguments, index == 0)
+                self.assertEqual("--native-epoch-max-calls" in arguments, index == 2)
+
+    def test_cnn_backend_is_explicit_and_cannot_silently_disable_cudnn(self):
+        torch = mock.Mock()
+        torch.backends.cudnn.version.return_value = 91002
+        self.assertEqual(configure_cnn_backend(torch, "cpu"), "unused")
+        self.assertEqual(torch.mock_calls, [])
+        self.assertEqual(configure_cnn_backend(torch, "cuda"), "91002")
+        self.assertFalse(torch.backends.cudnn.benchmark)
+        self.assertFalse(torch.backends.cudnn.allow_tf32)
+        self.assertFalse(torch.backends.cuda.matmul.allow_tf32)
+        self.assertTrue(torch.backends.cudnn.deterministic)
+        torch.backends.cudnn.enabled = False
+        with self.assertRaises(RuntimeError):
+            configure_cnn_backend(torch, "cuda")
+        torch.backends.cudnn.enabled = True
+        torch.backends.cudnn.is_available.return_value = False
+        with self.assertRaises(RuntimeError):
+            configure_cnn_backend(torch, "cuda")
+        torch.backends.cudnn.is_available.return_value = True
+        torch.backends.cudnn.version.return_value = None
+        with self.assertRaises(RuntimeError):
+            configure_cnn_backend(torch, "cuda")
+
+    def test_cnn_model_has_fixed_shapes_and_mlp_keeps_its_default(self):
+        torch = mock.Mock()
+        build_model(torch, 1024, 4096, "cuda", "float32", "cnn")
+        self.assertEqual(torch.nn.Conv2d.call_args_list,
+                         [mock.call(3, 16, 3, padding=1), mock.call(16, 32, 3, padding=1)])
+        torch.nn.AdaptiveAvgPool2d.assert_called_once_with(1)
+        torch.nn.Linear.assert_called_once_with(32, 10)
+        torch.reset_mock()
+        build_model(torch, 1024, 4096, "cuda", "float32")
+        torch.nn.Conv2d.assert_not_called()
+        self.assertEqual(torch.nn.Linear.call_args_list, [mock.call(1024, 4096), mock.call(4096, 1024)])
+        with self.assertRaises(ValueError):
+            build_model(torch, 1024, 4096, "cuda", "float32", "unknown")
+
+    def test_cnn_rejects_misleading_mlp_options_and_unqualified_precision(self):
+        for options in ([], ["--dtype", "float16"], ["--hidden-size", "64"],
+                        ["--intermediate-size", "10"]):
+            with mock.patch.object(sys, "argv", ["smoke", "--workload", "cnn", *options]):
+                args = parse_args()
+            if options:
+                with self.assertRaises(ValueError):
+                    validate_positive(args)
+            else:
+                validate_positive(args)
+
+    def test_workload_identity_requires_complete_known_versions(self):
+        self.assertEqual(workload_identity({}), ("mlp", "mlp_v1", "unused"))
+        cnn = {"workload": "cnn", "workload_version": "cnn_v1", "cudnn_version": "91002"}
+        self.assertEqual(workload_identity(cnn), ("cnn", "cnn_v1", "91002"))
+        for bad in ({"workload": "cnn"}, {**cnn, "workload_version": "mlp_v1"},
+                    {**cnn, "cudnn_version": "unused"}, {**cnn, "cudnn_version": "0"},
+                    {**cnn, "workload": "unknown"}, {"workload_version": "cnn_v1"}):
+            with self.subTest(record=bad), self.assertRaises(ValueError):
+                workload_identity(bad)
+
+    def test_mixed_cnn_and_mlp_workers_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            self.write_pair(root)
+            status = root / "inference.status"
+            status.write_text(status.read_text() +
+                              "workload=cnn\nworkload_version=cnn_v1\ncudnn_version=91002\n")
+            with self.assertRaisesRegex(ValueError, "workload"):
+                summarize_colocation(root)
+
+    def test_cnn_baselines_cannot_mix_workloads_or_cudnn_versions(self):
+        for field, value in (("workload", "mlp"), ("workload_version", "cnn_v2"),
+                             ("cudnn_version", "91003")):
+            rows, solo = self.matched_rows()
+            for row in [*rows, *solo]:
+                row.update(workload="cnn", workload_version="cnn_v1", cudnn_version="91002")
+            add_solo_baselines(aggregate(rows), rows, solo, 2)
+            solo[0][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                add_solo_baselines(aggregate(rows), rows, solo, 2)
+
+    def test_cnn_round_trip_requires_a_matching_manifest(self):
+        rows, solo = self.matched_rows()
+        for row in [*rows, *solo]:
+            row.update(workload="cnn", workload_version="cnn_v1", cudnn_version="91002")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            for filename, data in (("summary.csv", rows), ("solo_summary.csv", solo)):
+                with (root / filename).open("w", newline="") as stream:
+                    writer = csv.DictWriter(stream, fieldnames=data[0].keys())
+                    writer.writeheader()
+                    writer.writerows(data)
+            manifest = {"comparison_version": COMPARISON_VERSION,
+                        "arguments": {"repetitions": 2, "workload": "cnn"}}
+            (root / "manifest.json").write_text(json.dumps(manifest))
+            write_aggregate(root)
+            for filename in ("aggregate.json", "solo_aggregate.json"):
+                for row in json.loads((root / filename).read_text()):
+                    self.assertEqual(workload_identity(row), ("cnn", "cnn_v1", "91002"))
+            for name in ("mlp", "unknown"):
+                manifest["arguments"]["workload"] = name
+                (root / "manifest.json").write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError, "manifest"):
+                    write_aggregate(root)
+
     def test_scheduler_failures_cannot_pass_model_validation(self):
         valid = "GLIMMER_TASK_V1 METRICS 10 0 0 10 0 0 4096 0 0 2 256 100 10 200 20"
         validate_scheduler_metrics(valid)
@@ -128,6 +285,17 @@ class MeasurementTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "profiled"):
                 summarize_solo(root, "training")
             with self.assertRaisesRegex(ValueError, "profiled"):
+                summarize_colocation(root)
+
+    def test_cudnn_logged_rows_are_not_accepted_as_performance_results(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            self.write_pair(root, deadline=11_000_000)
+            status = root / "training.status"
+            status.write_text(status.read_text() + "cudnn_logging_configured=1\n")
+            with self.assertRaisesRegex(ValueError, "logging"):
+                summarize_solo(root, "training")
+            with self.assertRaisesRegex(ValueError, "logging"):
                 summarize_colocation(root)
 
     def test_solo_uses_deadline_and_the_same_wall_clock_accounting(self):
@@ -269,8 +437,68 @@ class MeasurementTest(unittest.TestCase):
             else:
                 self.assertEqual(command[command.index("--training-work-units") + 1], "2")
         with mock.patch.dict("os.environ", {"GLIMMER_SCHEDULER_MODE": "enforce", "LD_PRELOAD": "hook.so",
-                                            "LD_DEBUG": "all", "CUDA_VISIBLE_DEVICES": "0"}, clear=True):
+                                            "LD_DEBUG": "all", "CUDA_VISIBLE_DEVICES": "0",
+                                            "CUDNN_LOGLEVEL_DBG": "3", "CUDNN_LOGDEST_DBG": "stderr",
+                                            "CUDNN_FRONTEND_LOG_INFO": "1"}, clear=True):
             self.assertEqual(benchmark_environment(), {"CUDA_VISIBLE_DEVICES": "0"})
+        args.workload = "cnn"
+        for name in (*SOLO_ROLES, *CONFIGURATIONS):
+            command = build_command(name, args, pathlib.Path("test-output"))
+            self.assertEqual(command[command.index("--workload") + 1], "cnn")
+        for options in (["--workload", "unknown"], ["--workload"]):
+            result = subprocess.run(["bash", str(EXAMPLE / "run_pytorch_priority.sh"), *options],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_public_native_epoch_launcher_is_explicit(self):
+        args = argparse.Namespace(duration_seconds=60, warmup=10, batch_size=32, hidden_size=1024,
+                                  training_work_units=2, inference_target_ms=2, python="python3",
+                                  build_dir=pathlib.Path("build/cuda-perf"),
+                                  adaptive_slo_target_queue_us=500, adaptive_slo_window=8,
+                                  cooperative_preview=True, persistent_worker_blocks=3,
+                                  native_epoch_max_calls=8, native_epoch_prefix_calls=2,
+                                  native_epoch_pending_prefixes=2, native_epoch_acceptance_us=2000)
+        for name in (*SOLO_ROLES, *CONFIGURATIONS):
+            command = build_command(name, args, pathlib.Path("test-output"))
+            expected = name not in SOLO_ROLES and name != "native"
+            self.assertEqual("--native-epoch-max-calls" in command, expected)
+            if expected:
+                self.assertEqual(command[command.index("--native-epoch-acceptance-us") + 1], "2000")
+        complete = ["--cooperative-preview", "--native-epoch-max-calls", "8",
+                    "--native-epoch-prefix-calls", "2", "--native-epoch-pending-prefixes", "2",
+                    "--native-epoch-acceptance-us", "2000"]
+        rejected = [["--native-epoch-max-calls", "8"],
+                    ["--cooperative-preview", "--native-epoch-max-calls", ""], complete[:-2],
+                    [*complete, "--mode", "native"],
+                    [*complete, "--native-epoch-prefix-calls", "9"],
+                    [*complete, "--native-epoch-pending-prefixes", "17"],
+                    [*complete, "--native-epoch-acceptance-us", "1000001"],
+                    [*complete, "--native-epoch-max-calls", "18446744073709551616"]]
+        for options in rejected:
+            result = subprocess.run(["bash", str(EXAMPLE / "run_pytorch_priority.sh"), *options],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_cooperative_configuration_is_explicit_and_never_changes_native_baselines(self):
+        args = argparse.Namespace(duration_seconds=60, warmup=10, batch_size=32, hidden_size=1024,
+                                  training_work_units=2, inference_target_ms=2, python="python3",
+                                  build_dir=pathlib.Path("build/cuda-perf"),
+                                  adaptive_slo_target_queue_us=500, adaptive_slo_window=8,
+                                  cooperative_preview=True, persistent_worker_blocks=80)
+        for name in (*SOLO_ROLES, *CONFIGURATIONS):
+            command = build_command(name, args, pathlib.Path("test-output"))
+            expected = name not in SOLO_ROLES and name != "native"
+            self.assertEqual("--cooperative-preview" in command, expected)
+            if expected:
+                self.assertEqual(command[command.index("--persistent-worker-blocks") + 1], "80")
+        for options in (["--mode", "native", "--cooperative-preview"],
+                        ["--cooperative-preview", "--training-launch-batch-size", "2"],
+                        ["--cooperative-preview", "--inference-launch-batch-size", "2"],
+                        ["--persistent-worker-blocks", "0"],
+                        ["--persistent-worker-blocks", "65537"]):
+            result = subprocess.run(["bash", str(EXAMPLE / "run_pytorch_priority.sh"), *options],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 2, result.stderr)
 
 
 if __name__ == "__main__":

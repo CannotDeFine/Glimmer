@@ -1,10 +1,161 @@
 #pragma once
 
+#include "ptx_transform.h"
+#include "persistent_kernel.h"
+#include "cuda_source_capture.h"
+
 #include <cuda_runtime_api.h>
+#include <cuda.h>
 
 #include <cstddef>
+#include <optional>
+#include <functional>
+#include <array>
 
 namespace glimmer::interceptor {
+
+// Diagnostic-only conventional Runtime routing. The first use pins selection;
+// this does not authorize a launch or relax ordinary Driver-leaf permissions.
+enum class RuntimeProfilingBoundaryMode { kDisabled, kEnabled, kInvalid };
+[[nodiscard]] RuntimeProfilingBoundaryMode runtime_profiling_boundary_mode() noexcept;
+
+// Select a base constructor only from the chosen original SDK's ELF version.
+// Default lookup examines RTLD_NEXT, not our compile-time default alias.
+[[nodiscard]] void* runtime_graph_constructor_lookup(void* handle) noexcept;
+[[nodiscard]] void* runtime_graph_constructor_version(const char* version) noexcept;
+[[nodiscard]] void* runtime_graph_update_lookup(void* handle) noexcept;
+[[nodiscard]] void* runtime_graph_update_version(const char* version) noexcept;
+
+using RuntimeCaptureDispatch = std::function<CUresult(
+    CUcontext, CUstream, bool, CudaSourceCaptureKind, const std::function<CUresult()>&)>;
+using RuntimeCaptureContextLookup = std::function<CUresult(CUstream, bool, CUcontext&)>;
+[[nodiscard]] cudaError_t intercept_runtime_capture(
+    CudaSourceCaptureKind kind, const std::function<cudaError_t()>& original) noexcept;
+struct RuntimeSourceKernelShape {
+    std::array<unsigned int, 3> grid;
+    std::array<unsigned int, 3> block;
+    std::size_t shared_memory_bytes{};
+    bool is_ptds{};
+    bool operator==(const RuntimeSourceKernelShape&) const = default;
+};
+// Lexical source permission: no Runtime handle conversion or deferred arguments.
+[[nodiscard]] cudaError_t invoke_runtime_source_kernel_original(
+    const RuntimeSourceKernelShape& shape, const std::function<cudaError_t()>& original,
+    const std::function<void()>& quarantine) noexcept;
+[[nodiscard]] std::optional<CUresult> dispatch_runtime_source_kernel(
+    CUfunction function, const RuntimeSourceKernelShape& shape,
+    const std::function<CUresult()>& execute) noexcept;
+// Actual Driver leaf observation only; never constructed from Runtime handles.
+struct RuntimeCaptureObservation {
+    CUcontext context{};
+    CUstream stream{};
+    CUgraph graph{};
+    bool is_ptds{};
+    bool was_runtime_invoked{};
+    unsigned int original_driver_calls{};
+};
+// Internal root callback assembly. Requires the admitted shared gate's native
+// phase and lends one caller-bound callback only during real Runtime invocation.
+// Runtime status stays separate from the CUresult owner signal; no enum casts.
+[[nodiscard]] CUresult invoke_runtime_capture_original(
+    const RuntimeCaptureDispatch& dispatch, const std::function<cudaError_t()>& original,
+    RuntimeCaptureObservation& observation, cudaError_t& native_status,
+    const RuntimeCaptureContextLookup& lookup = {}) noexcept;
+// Missing permission returns no value, retaining ordinary wrapper behavior.
+[[nodiscard]] std::optional<CUresult> dispatch_runtime_capture_origin(
+    CUstream stream, bool is_ptds, CudaSourceCaptureKind kind,
+    const std::function<CUresult()>& original, CUgraph* native_graph = nullptr) noexcept;
+
+// Synchronous, caller-bound ownership adapter. Execution must guard original
+// issue with its physically owned native Driver scope and may not retain it.
+// Runtime errors remain distinct from the CUresult ownership signal.
+using RuntimeGraphExecution = std::function<CUresult(const std::function<CUresult()>&)>;
+[[nodiscard]] cudaError_t invoke_runtime_graph_original(
+    const RuntimeGraphExecution& execution, const std::function<cudaError_t()>& original) noexcept;
+// Context-wide completion only. Null ownership may decline before any effect.
+// An accepted original is caller-bound, native-scoped and exactly once under
+// the admitted process transition; actual Runtime enums remain authoritative.
+using RuntimeContextCompletionExecution =
+    std::function<std::optional<CUresult>(const std::function<CUresult()>&)>;
+[[nodiscard]] std::optional<cudaError_t> invoke_runtime_context_completion_original(
+    const RuntimeContextCompletionExecution& execution,
+    const std::function<cudaError_t()>& original, const std::function<void()>& quarantine) noexcept;
+// Registered executable and bound caller. Normal replay retains exact event
+// dependencies/epochs; source replay currently requires event-free effects.
+[[nodiscard]] cudaError_t execute_owned_runtime_graph(
+    cudaGraphExec_t executable, cudaStream_t stream, bool is_ptds,
+    const std::function<cudaError_t()>& original) noexcept;
+// Stable constructor/destructor roots; original invocation owns Runtime scope.
+// Construction stages only the write-only executable and observes SDK context.
+[[nodiscard]] cudaError_t intercept_runtime_graph_instantiation(
+    cudaGraphExec_t* output, cudaGraph_t graph, bool should_prepare_effects,
+    const std::function<cudaError_t(cudaGraphExec_t*)>& original);
+[[nodiscard]] cudaError_t intercept_runtime_graph_exec_destroy(
+    cudaGraphExec_t executable, const std::function<cudaError_t()>& original);
+[[nodiscard]] cudaError_t intercept_runtime_graph_event_update(
+    cudaGraphExec_t executable, cudaGraphNode_t node, cudaEvent_t event, bool is_record,
+    const std::function<cudaError_t()>& original);
+[[nodiscard]] cudaError_t intercept_runtime_graph_node_update(
+    cudaGraphExec_t executable, cudaGraphNode_t node, std::optional<CUgraphNodeType> expected_type,
+    const std::function<cudaError_t()>& original);
+
+[[nodiscard]] cudaError_t intercept_runtime_graph_update(
+    cudaGraphExec_t executable, cudaGraph_t graph, std::optional<cudaGraphNode_t> child_node,
+    const std::function<cudaError_t()>& original);
+
+// Use Runtime's native query to preserve lazy context binding on new threads.
+[[nodiscard]] std::optional<bool> runtime_launch_stream_is_capturing(
+    cudaStream_t stream, bool per_thread_default_stream) noexcept;
+[[nodiscard]] bool cooperative_runtime_preview_requested() noexcept;
+[[nodiscard]] bool runtime_cooperative_driver_routing_is_enabled() noexcept;
+[[nodiscard]] cudaError_t intercept_cooperative_runtime_native_boundary(
+    const std::function<cudaError_t()>& operation);
+[[nodiscard]] cudaError_t intercept_cooperative_runtime_memory_boundary(
+    const std::function<cudaError_t()>& operation, const bool& has_native_issue);
+// SDK-documented identical event type, exact source retirement and separate
+// Runtime status. Original runs once under lexical Driver-routing exclusion.
+[[nodiscard]] cudaError_t intercept_cooperative_runtime_event_destroy(
+    cudaEvent_t event, const std::function<cudaError_t()>& original);
+[[nodiscard]] cudaError_t intercept_cooperative_runtime_event_create(
+    cudaEvent_t* event, unsigned int flags, const std::function<cudaError_t()>& original);
+[[nodiscard]] std::optional<cudaError_t> intercept_normal_runtime_event_create(
+    cudaEvent_t* event, unsigned int flags, const std::function<cudaError_t()>& original);
+[[nodiscard]] cudaError_t intercept_cooperative_runtime_event_record(
+    cudaEvent_t event, cudaStream_t stream, bool is_ptds, unsigned int flags,
+    const std::function<cudaError_t()>& original);
+// Normal root: metadata-only rows retire without CUDA; logical actors use an
+// exact drained process boundary. No source transition permission is inferred.
+[[nodiscard]] std::optional<cudaError_t> intercept_normal_runtime_event_destroy(
+    cudaEvent_t event, const std::function<cudaError_t()>& original);
+[[nodiscard]] std::optional<cudaError_t> intercept_normal_runtime_event_completion(
+    cudaEvent_t event, bool should_wait, const std::function<cudaError_t()>& original);
+// Read-only timing: check logical readiness before the SDK samples timestamps;
+// stage its write-only output until native validation and both observations pass.
+// Shared status/output contract; callbacks own readiness and original dispatch.
+[[nodiscard]] cudaError_t measure_runtime_event_timing(
+    float* milliseconds, cudaEvent_t start, cudaEvent_t end,
+    const std::function<CUresult(CUevent)>& observe,
+    const std::function<cudaError_t(float*)>& original);
+[[nodiscard]] std::optional<cudaError_t> intercept_normal_runtime_event_elapsed_time(
+    float* milliseconds, cudaEvent_t start, cudaEvent_t end,
+    const std::function<cudaError_t(float*)>& original);
+[[nodiscard]] std::optional<cudaError_t> intercept_normal_runtime_event_record(
+    cudaEvent_t event, cudaStream_t stream, bool is_ptds,
+    const std::function<cudaError_t()>& original);
+[[nodiscard]] std::optional<cudaError_t> intercept_normal_runtime_event_wait(
+    cudaStream_t stream, cudaEvent_t event, bool is_ptds, unsigned int flags,
+    const std::function<cudaError_t()>& original);
+[[nodiscard]] std::optional<cudaError_t> intercept_normal_runtime_stream_completion(
+    cudaStream_t stream, bool is_ptds, bool should_wait,
+    const std::function<cudaError_t()>& original);
+[[nodiscard]] std::optional<cudaError_t> intercept_normal_runtime_device_completion(
+    const std::function<cudaError_t()>& original,
+    const RuntimeContextCompletionExecution& epoch_completion = {});
+// Source uses exact retained pause; normal uses the drained process boundary.
+// Caller-thread SDK effect/context proof, without cached Driver callback reliance.
+[[nodiscard]] cudaError_t intercept_cooperative_runtime_stream_destroy(
+    cudaStream_t stream, const std::function<cudaError_t()>& original);
+void mark_runtime_source_memory_issue() noexcept;
 
 using RuntimeMallocFunction = cudaError_t (*)(void** device_pointer, std::size_t memory_bytes);
 using RuntimeMallocManagedFunction = cudaError_t (*)(void** device_pointer,
@@ -71,6 +222,64 @@ using RuntimeMallocFromPoolAsyncFunction = cudaError_t (*)(void** device_pointer
                                                            cudaMemPool_t pool, cudaStream_t stream);
 using RuntimeFreeAsyncFunction = cudaError_t (*)(void* device_pointer, cudaStream_t stream);
 using RuntimeDeviceSynchronizeFunction = cudaError_t (*)();
+using RuntimeDeviceResetFunction = cudaError_t (*)();
+using RuntimeFuncGetNameFunction = cudaError_t (*)(const char**, const void*);
+using RuntimeGetFuncBySymbolFunction = cudaError_t (*)(cudaFunction_t*, const void*);
+
+struct RuntimeCooperativeLaunch {
+    CUfunction original = nullptr;
+    std::optional<CooperativeKernelVariant> variant;
+    std::array<unsigned int, 3> grid{};
+    std::array<unsigned int, 3> block{};
+    std::optional<MappedBinaryKernelVariant> binary_variant{};
+    std::optional<MappedGemmKernelVariant> gemm_variant{};
+    CUcontext context{};
+    std::size_t shared_memory_bytes{};
+};
+// Borrowed normal permission on the shared process Call. SDK Driver leaves
+// supply typed streams; neither Runtime handles nor arguments are converted.
+using RuntimeNativeKernelExecution =
+    std::function<CUresult(CUfunction, CUstream, bool, const std::function<CUresult()>&)>;
+[[nodiscard]] cudaError_t invoke_runtime_cooperative_launch_original(
+    RuntimeCooperativeLaunch plan, bool is_ptds, const std::function<cudaError_t()>& original,
+    const std::function<void()>& quarantine,
+    const RuntimeNativeKernelExecution& native_execution = {}) noexcept;
+void quarantine_runtime_cooperative_launch(CUcontext context) noexcept;
+[[nodiscard]] bool runtime_native_kernel_execution_is_pending() noexcept;
+[[nodiscard]] std::optional<CUresult> dispatch_runtime_native_kernel(
+    CUfunction function, CUstream stream, const RuntimeSourceKernelShape& shape,
+    const std::function<CUresult()>& original) noexcept;
+[[nodiscard]] std::optional<RuntimeCooperativeLaunch> prepare_runtime_cooperative_launch(
+    const void* function, dim3 grid, dim3 block, std::size_t shared_memory_bytes,
+    RuntimeFuncGetNameFunction get_name, RuntimeGetFuncBySymbolFunction get_function);
+[[nodiscard]] bool runtime_cooperative_launch_is_pending() noexcept;
+[[nodiscard]] std::optional<RuntimeCooperativeLaunch> consume_runtime_cooperative_launch(
+    CUfunction function, const RuntimeSourceKernelShape& shape) noexcept;
+void complete_runtime_cooperative_launch(CUresult status) noexcept;
+
+struct RuntimePersistentLaunch {
+    CUfunction original = nullptr;
+    CUfunction persistent = nullptr;
+    unsigned int worker_blocks = 0;
+    std::size_t parameter_count = 0;
+    PtxExecutionKind execution_kind = PtxExecutionKind::kStatic;
+    unsigned int logical_blocks = 0;
+};
+
+[[nodiscard]] std::optional<RuntimePersistentLaunch> prepare_runtime_persistent_launch(
+    const void* function, dim3 grid, dim3 block, std::size_t shared_memory_bytes,
+    cudaStream_t stream, bool per_thread_default_stream, RuntimeFuncGetNameFunction get_name,
+    RuntimeGetFuncBySymbolFunction get_function);
+struct RuntimeDriverReplacement {
+    CUfunction persistent = nullptr;
+    unsigned int worker_blocks = 0;
+    void** arguments = nullptr;
+};
+[[nodiscard]] std::optional<RuntimeDriverReplacement> consume_runtime_driver_replacement(
+    CUfunction function) noexcept;
+void report_runtime_persistent_launch(unsigned int logical_blocks,
+                                      unsigned int worker_blocks) noexcept;
+[[nodiscard]] cudaError_t intercept_runtime_device_reset(RuntimeDeviceResetFunction reset);
 using RuntimeStreamSynchronizeFunction = cudaError_t (*)(cudaStream_t stream);
 using RuntimeStreamQueryFunction = cudaError_t (*)(cudaStream_t stream);
 using RuntimeStreamDestroyFunction = cudaError_t (*)(cudaStream_t stream);
@@ -112,6 +321,13 @@ using RuntimeMemPoolImportPointerFunction = cudaError_t (*)(void** pointer_out, 
                                                             cudaMemPoolPtrExportData* share_data);
 
 [[nodiscard]] bool is_inside_runtime_call() noexcept;
+[[nodiscard]] bool runtime_persistent_lookup_is_enabled() noexcept;
+[[nodiscard]] bool initialize_runtime_driver_lookup();
+[[nodiscard]] CUresult runtime_driver_get_proc_address(const char* symbol, void** address,
+                                                       int version, cuuint64_t flags);
+[[nodiscard]] CUresult runtime_driver_get_proc_address_v2(const char* symbol, void** address,
+                                                          int version, cuuint64_t flags,
+                                                          CUdriverProcAddressQueryResult* status);
 
 [[nodiscard]] cudaError_t intercept_runtime_malloc(void** device_pointer, std::size_t memory_bytes,
                                                    RuntimeMallocFunction allocate,

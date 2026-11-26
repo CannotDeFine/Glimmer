@@ -1,57 +1,43 @@
 # Examples
 
-Each workload is self-contained: its directory owns the executable source and
-any generated artifacts it produces. These programs are ordinary CUDA
-applications for hardware integration validation, except for the explicit task
-backend demonstration, which intentionally links the scheduler-controlled
-backend. They demonstrate API coverage, accounting, and task-boundary behavior,
-not throughput benchmarks.
+[Project home](../README.md) / [Documentation](../docs/README.md) / Examples
 
-## Directory layout
+Choose an example by the execution path you want to use. For your own
+application, start with [Usage](../docs/USAGE.md).
 
-| Directory | Purpose |
-| --- | --- |
-| `cuda_workloads/` | Real-GPU CUDA Runtime workload matrix containing the synchronous baseline plus asynchronous/pool, managed, pitched, and multi-stream paths. |
-| `priority_demo/` | Transparent mixed-load demonstration with high-priority inference and low-priority training CUDA processes. |
-| `framework_workloads/` | Optional framework-level workloads, currently a PyTorch CUDA MLP smoke test that runs outside the CMake build. |
-| `cuda_task_backend/` | Explicit Driver-API task-boundary demo that submits PTX kernels through the scheduler-controlled CUDA backend. |
+## Launch admission
 
-## CUDA workloads
+These programs run ordinary CUDA or framework code without Glimmer API calls.
+The launch-admission preload schedules covered work while CUDA execution stays
+in the application process.
 
-The CUDA workloads are built only by the `cuda-gpu` preset because they require
-a CUDA compiler and a compatible GPU runtime. They are intentionally normal
-CUDA applications: they do not include Glimmer headers or call Glimmer APIs.
-Use the synchronous baseline to compare the same allocation and kernel path
-with and without `LD_PRELOAD`.
+- [Priority demo](priority_demo/README.md): two synthetic, model-shaped CUDA
+  workloads with different scheduling priorities.
+- [CUDA workload matrix](cuda_workloads/README.md): allocation, accounting,
+  streams and memory-lifetime examples.
+- [PyTorch workloads](framework_workloads/pytorch_smoke/README.md): MLP and CNN
+  workloads, including training/inference co-location.
 
-See [`cuda_workloads/README.md`](cuda_workloads/README.md) for baseline build
-and run commands and the complete workload matrix. The matrix covers
-stream-ordered and pool
-allocation, managed memory, pitched memory, and concurrent streams. The
-shared-tenant multi-process boundary remains a dedicated GPU integration test
-because it must coordinate process lifetimes and quota ownership explicitly.
+The `cuda-gpu` preset builds the CUDA workload executables and enables hardware
+checks. `cuda-lint` and `cuda-perf` also enable workload builds. PyTorch uses its
+own optional Python environment, outside the CMake build.
 
-See [`cuda_task_backend/README.md`](cuda_task_backend/README.md) for the
-explicit scheduler-controlled Driver-API task examples. They are intentionally
-separate from the transparent preload workloads: the caller owns the kernel
-descriptor and keeps its referenced CUDA resources alive while the controller
-drives scheduler admission, weighted tenant dispatch, and CUDA event
-completion.
+## Explicit tasks
 
-The workload programs are built by the `cuda-gpu` preset and are registered as
-optional GPU tests when CUDA hardware testing is enabled. Do not commit build
-directories or temporary CSV files.
+The [CUDA task backend](cuda_task_backend/README.md) deliberately submits task
+descriptors through Glimmer. It demonstrates application-owned resource
+lifetimes and scheduler-controlled dispatch, not transparent interception.
 
-## Framework workloads
+## Isolated GEMM comparison
 
-`framework_workloads/` contains programs that exercise Glimmer from the point
-of view of a real framework. They are intentionally outside the core CMake
-build because the framework installation belongs to the host environment. The
-PyTorch smoke workload compares native, observe, and enforce modes and reports
-latency distributions, throughput, memory peak, and framework/CUDA versions.
-Its synchronized co-location runner starts real inference and training
-processes together and verifies the physical GPU UUID and positive execution
-overlap before reporting a priority result. It can also record an explicit
-inference latency target and the control service's queue-wait/service-time
-metrics for repeatable experiments.
-See [`framework_workloads/pytorch_smoke/README.md`](framework_workloads/pytorch_smoke/README.md).
+The [GEMM comparison](gemm_comparison/README.md) compares native cuBLAS, CUTLASS
+and persistent CUTLASS kernels. It is a separate diagnostic target with strict
+correctness and full-device coverage gates, not an application launcher.
+
+## Interpreting results
+
+Examples demonstrate bounded behavior, not complete framework compatibility or
+performance guarantees. Correct output, overlapping process lifetimes, actual
+GPU concurrency and full-device saturation are different observations.
+The launch-admission examples do not enable the centralized-execution frontend;
+see [compatibility](../docs/CUDA_API_COVERAGE.md) before changing paths.

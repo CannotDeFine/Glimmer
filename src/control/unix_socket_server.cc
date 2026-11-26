@@ -2,12 +2,12 @@
 
 #include "internal/socket_line_reader.h"
 #include "internal/socket_path.h"
+#include "internal/process_identity.h"
+#include "internal/shared_control_channel.h"
 
-#include <charconv>
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
-#include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -45,58 +45,6 @@ enum class PollResult : std::uint8_t { kReady, kTimedOut, kError };
     }
 }
 
-[[nodiscard]] bool read_process_start_time(std::uint32_t pid,
-                                           std::uint64_t* start_time_ticks) noexcept {
-    if (pid == 0 || start_time_ticks == nullptr) {
-        return false;
-    }
-    try {
-        const std::string path = "/proc/" + std::to_string(pid) + "/stat";
-        const int file_descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-        if (file_descriptor < 0) {
-            return false;
-        }
-        char buffer[4096]{};
-        const ssize_t bytes_read = ::read(file_descriptor, buffer, sizeof(buffer) - 1);
-        static_cast<void>(::close(file_descriptor));
-        if (bytes_read <= 0) {
-            return false;
-        }
-
-        const std::string_view stat_line(buffer, static_cast<std::size_t>(bytes_read));
-        const std::size_t command_end = stat_line.rfind(')');
-        if (command_end == std::string_view::npos || command_end + 2 > stat_line.size()) {
-            return false;
-        }
-        std::size_t offset = command_end + 2;
-        for (unsigned int field = 3; field <= 22; ++field) {
-            while (offset < stat_line.size() && stat_line[offset] == ' ') {
-                ++offset;
-            }
-            if (offset == stat_line.size()) {
-                return false;
-            }
-            const std::size_t token_start = offset;
-            while (offset < stat_line.size() && stat_line[offset] != ' ') {
-                ++offset;
-            }
-            if (field == 22) {
-                std::uint64_t parsed = 0;
-                const auto result = std::from_chars(stat_line.data() + token_start,
-                                                    stat_line.data() + offset, parsed);
-                if (result.ec != std::errc{} || result.ptr != stat_line.data() + offset) {
-                    return false;
-                }
-                *start_time_ticks = parsed;
-                return true;
-            }
-        }
-    } catch (...) {
-        return false;
-    }
-    return false;
-}
-
 }  // namespace
 
 UnixSocketControlServer::UnixSocketControlServer(TaskControlEndpoint& endpoint,
@@ -119,6 +67,9 @@ bool UnixSocketControlServer::start() noexcept {
     if (path_status == 0 || errno != ENOENT) {
         return false;
     }
+
+    service_incarnation_ = config_.enable_shared_memory ? internal::new_service_incarnation()
+                                                        : internal::ServiceIncarnation{};
 
     const int socket_fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (socket_fd < 0) {
@@ -157,6 +108,7 @@ bool UnixSocketControlServer::start() noexcept {
     listen_fd_ = socket_fd;
     stopping_.store(false, std::memory_order_release);
     served_request_count_.store(0, std::memory_order_release);
+    shared_memory_request_count_.store(0, std::memory_order_release);
     return true;
 }
 
@@ -260,8 +212,29 @@ bool UnixSocketControlServer::handle_client(int client_fd) noexcept {
     }
     bool handled_request = false;
     internal::SocketLineReader reader(client_fd);
+    internal::SharedControlChannel channel;
     while (!stopping_.load(std::memory_order_acquire)) {
         std::string request;
+        if (channel.active()) {
+            const auto status = channel.receive_request(client_fd, config_.io_timeout_ms, request);
+            if (status == internal::SharedControlReadStatus::kIdle) {
+                continue;
+            }
+            if (status != internal::SharedControlReadStatus::kLine) {
+                break;
+            }
+            const auto response = endpoint_.handle(request, peer);
+            if (!response.has_value() ||
+                !(channel.sends_reply_hints()
+                      ? channel.publish_response_with_hint(client_fd, *response)
+                      : channel.publish_response(*response))) {
+                break;
+            }
+            handled_request = true;
+            served_request_count_.fetch_add(1, std::memory_order_release);
+            shared_memory_request_count_.fetch_add(1, std::memory_order_release);
+            continue;
+        }
         const auto status = reader.read_line(request, config_.io_timeout_ms, &stopping_);
         if (status == internal::SocketLineStatus::kIdle) {
             // An authenticated connection may be idle during long CUDA work.
@@ -270,6 +243,26 @@ bool UnixSocketControlServer::handle_client(int client_fd) noexcept {
         if (status != internal::SocketLineStatus::kLine &&
             status != internal::SocketLineStatus::kTooLong) {
             break;
+        }
+        if (request == internal::kSharedControlOpen || request == internal::kOwnerControlOpen) {
+            const bool has_reply_hints = request == internal::kOwnerControlOpen;
+            const auto mode = has_reply_hints ? internal::SharedControlMode::kReplyHintV3
+                                              : internal::SharedControlMode::kV2;
+            if (!config_.enable_shared_memory ||
+                !channel.create_server(service_incarnation_, mode)) {
+                if (!write_response(client_fd, has_reply_hints
+                                                   ? internal::kOwnerControlUnsupported
+                                                   : internal::kSharedControlUnsupported)) {
+                    break;
+                }
+                continue;
+            }
+            if (!write_response(client_fd, has_reply_hints ? internal::kOwnerControlReady
+                                                           : internal::kSharedControlReady) ||
+                !channel.send_offer(client_fd, std::chrono::milliseconds(config_.io_timeout_ms))) {
+                break;
+            }
+            continue;
         }
         const auto response = endpoint_.handle(request, peer);
         if (!response.has_value() || !write_response(client_fd, response.value())) {
@@ -284,6 +277,10 @@ bool UnixSocketControlServer::handle_client(int client_fd) noexcept {
         }
     }
     return handled_request;
+}
+
+std::uint64_t UnixSocketControlServer::shared_memory_request_count() const noexcept {
+    return shared_memory_request_count_.load(std::memory_order_acquire);
 }
 
 bool UnixSocketControlServer::authenticate_client(int client_fd,
@@ -312,7 +309,7 @@ bool UnixSocketControlServer::authenticate_client(int client_fd,
 }
 
 bool UnixSocketControlServer::write_response(int client_fd,
-                                             const std::string& response) const noexcept {
+                                             std::string_view response) const noexcept {
     std::size_t offset = 0;
     while (offset < response.size()) {
         if (wait_for_io(client_fd, PollEvent::kWrite, config_.io_timeout_ms) !=

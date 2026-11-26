@@ -106,6 +106,14 @@ if [[ "$role" != "inference" && "$role" != "training" ]]; then
     usage >&2
     exit 2
 fi
+for argument in "${python_args[@]}"; do
+    case "${argument%%=*}" in
+        --o|--ou|--out|--outp|--outpu|--output)
+            echo "specify --output before --, not in the forwarded arguments" >&2
+            exit 2
+            ;;
+    esac
+done
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 if [[ "$build_dir" != /* ]]; then
@@ -136,15 +144,20 @@ elif ! command -v "$python_executable" >/dev/null 2>&1; then
 fi
 
 if [[ -z "$output_file" ]]; then
-    output_file="$repo_dir/examples/framework_workloads/pytorch_smoke/output/${mode}-${role}.csv"
+    attempt_dir="$(env -u LD_PRELOAD -u LD_AUDIT "$python_executable" -B \
+        "$repo_dir/scripts/artifact_paths.py" --name pytorch-smoke --category runs)"
+    output_file="$attempt_dir/${mode}-${role}.csv"
+elif [[ -e "$output_file" || -L "$output_file" ]]; then
+    echo "output already exists: $output_file" >&2
+    exit 2
 fi
 mkdir -p "$(dirname "$output_file")"
 
 common_args=(
     "$script"
     --role "$role"
-    --output "$output_file"
     "${python_args[@]}"
+    --output "$output_file"
 )
 if ((trace)); then
     trace_environment=(GLIMMER_TRACE_KERNEL_LAUNCHES=1)

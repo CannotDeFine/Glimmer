@@ -2,6 +2,7 @@ add_library(glimmer_project_options INTERFACE)
 add_library(Glimmer::project_options ALIAS glimmer_project_options)
 
 target_compile_features(glimmer_project_options INTERFACE cxx_std_20)
+target_include_directories(glimmer_project_options INTERFACE "${PROJECT_SOURCE_DIR}/include")
 
 option(GLIMMER_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(GLIMMER_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)

@@ -1,5 +1,7 @@
 # Development Lifecycle and Code Review
 
+[Project home](../README.md) / [Documentation](../docs/README.md) / Development lifecycle
+
 This document defines the minimum lifecycle for every Glimmer change. It is
 intended to keep the single `main` branch buildable while making correctness,
 test evidence, and review decisions explicit. The rules apply to code, tests,
@@ -10,6 +12,7 @@ build configuration, dependencies, documentation, and operational changes.
 - Prefer small, complete, reversible changes over large batches of work.
 - Review behavior and risk, not just formatting or line count.
 - Treat tests and documentation as part of the change, not follow-up work.
+- Keep rules useful, consistent and practical to check; avoid duplicate policy.
 - Do not claim support for a platform, CUDA path, or workload without evidence.
 - Keep the repository Linux-only and preserve the module boundaries in
   [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -18,37 +21,18 @@ build configuration, dependencies, documentation, and operational changes.
 
 ## Lifecycle
 
-Every change moves through the following states. `Blocked` means that progress
-requires an external decision or dependency; `Deferred` means the work is
-intentionally postponed with a documented reason.
-
-```text
-Proposed -> Designed -> Implemented -> Verified -> Reviewed -> Integrated -> Released
-    |           |            |            |           |            |
-    +--------- Blocked or Deferred at any gate when its exit criteria are unmet
-```
-
-| Stage | Required output | Exit criteria |
-| --- | --- | --- |
-| Proposed | Scope, non-goals, acceptance criteria, risk, and rollback plan. | The problem and observable result are unambiguous. |
-| Designed | Affected modules, interfaces, data flow, and decisions. | Architecture and dependency impacts are understood. |
-| Implemented | Source, tests, build wiring, and documentation for the logical change. | The change is complete enough to build and review as one unit. |
-| Verified | Reproducible commands and their results. | Required build, test, lint, sanitizer, format, and hardware checks pass or are explicitly recorded as unavailable. |
-| Reviewed | Review findings with severity and disposition. | No unresolved Blocker or Major findings remain; every accepted risk is documented. |
-| Integrated | One intentional commit on `main`. | The staged diff contains only the reviewed change and the commit is independently identifiable. |
-| Released | User-facing notes, migration details, and smoke-test evidence when applicable. | The delivered behavior and its operational limits are documented. |
+Scope the change, implement it with its checks and documentation, verify it,
+then review the result. Scale the written plan and evidence to the risk: a
+small documentation fix does not need the same record as a CUDA ABI change.
+Keep unavailable checks and unresolved risks visible; do not call them passed.
 
 ## Stage 1: Propose the change
 
-Before editing files, write a short change brief in the issue, task notes, or
-working document. It must answer:
-
-- What problem or user-visible behavior is being changed?
-- What is explicitly out of scope?
-- What are the acceptance criteria and failure conditions?
-- Which modules, public interfaces, ABI boundaries, or resource-accounting
-  rules may be affected?
-- What is the risk of regression and how can the change be rolled back?
+Before editing, identify the problem, scope, acceptance criteria and affected
+interfaces. For changes involving concurrency, resource accounting, CUDA,
+hardware measurements or compatibility, also record risks, failure conditions,
+resource budget and rollback in the issue or task notes. Keep the record brief;
+a small change does not require a separate document.
 
 Classify the change before implementation:
 
@@ -57,38 +41,20 @@ Classify the change before implementation:
 | Documentation-only | Identify the affected rule or user workflow and verify links and wording. |
 | Internal code change | Identify ownership, error paths, concurrency behavior, and tests. |
 | Behavior or API change | Define compatibility, rejection behavior, regression tests, and documentation updates. |
-| Module or dependency change | Read [ARCHITECTURE.md](ARCHITECTURE.md) and [DEPENDENCY_MANAGEMENT.md](DEPENDENCY_MANAGEMENT.md) before editing. |
+| Module or dependency change | Read [ARCHITECTURE.md](ARCHITECTURE.md), affected API contracts, and [DEPENDENCY_MANAGEMENT.md](DEPENDENCY_MANAGEMENT.md) before editing. |
 | CUDA/interceptor change | Define the intercepted symbol paths, ABI signatures, reentrancy behavior, quota effects, and GPU/no-GPU test plan. |
 
-Do not begin implementation when the acceptance criteria or ownership model is
-still ambiguous. Resolve the ambiguity or mark the work `Blocked`.
+Resolve unclear acceptance criteria or ownership before implementing them.
 
 ## Stage 2: Design before implementation
 
-Read the project rules relevant to the change:
-
-- [CODING_GUIDELINES.md](CODING_GUIDELINES.md) for source-level behavior,
-  ownership, logging, assertions, and concurrency.
-- [TESTING.md](TESTING.md) for the required test level and failure-path
-  coverage.
-- [ARCHITECTURE.md](ARCHITECTURE.md) for module boundaries
-  and dependency direction.
-- [DEPENDENCY_MANAGEMENT.md](DEPENDENCY_MANAGEMENT.md) before changing a
-  dependency.
-- [CUDA_API_COVERAGE.md](CUDA_API_COVERAGE.md) before changing interceptor
-  coverage or compatibility claims.
-
-The design must identify the affected module and its contract. For a new
-cross-module interface, a changed dependency direction, or a changed accepted
-architecture decision, update the architecture guide before implementation. The design
-must also state:
-
-- input validation and external error mapping;
-- ownership and cleanup on success, rejection, cancellation, and partial
-  initialization;
-- synchronization, lock ordering, and reentrancy constraints;
-- logging and assertion behavior;
-- the tests that will demonstrate the acceptance criteria.
+Use the relevant [coding](CODING_GUIDELINES.md), [testing](TESTING.md),
+[architecture](ARCHITECTURE.md), [dependency](DEPENDENCY_MANAGEMENT.md) and
+[CUDA compatibility](CUDA_API_COVERAGE.md) guides. For affected interfaces,
+identify ownership, input validation, error mapping, cleanup, concurrency and
+reentrancy boundaries, and the checks that demonstrate the intended behavior.
+Update the architecture guide when a module responsibility, cross-module
+contract or dependency direction changes.
 
 ## Stage 3: Implement the smallest complete change
 
@@ -102,170 +68,114 @@ must also state:
   behavior and pass on the new behavior when practical.
 - Keep high-frequency interceptor paths reentrant and free of accidental CUDA,
   loader, allocation, or blocking-I/O recursion.
-- Keep diagnostics actionable and safe. Never leave temporary tracing,
-  credentials, machine-specific paths, or generated build output in the source
-  tree.
+- Keep diagnostics actionable and safe. Do not commit temporary tracing,
+  credentials, developer-specific paths, or generated build output. Document
+  the scope of any fixed toolchain path required by a validation profile.
 
 ## Stage 4: Verify with evidence
 
 Run the smallest applicable checks while developing, then run the full relevant
-set before review. Use the exact commands below and retain the result in the
-change notes when the change is risky or hardware-dependent.
+set before review. Retain the commands and results in the change notes when the
+change is risky or hardware-dependent.
 
 | Change | Required evidence |
 | --- | --- |
-| Documentation-only | `git diff --check`; inspect every changed link and rendered section. |
+| Documentation-only | `git diff --check` and, when staged, `git diff --cached --check`; inspect changed links and rendered sections. |
 | Core or control behavior | `debug` build, CTest, format check, and `asan-ubsan` for ownership, lifetime, or concurrency changes. |
 | CMake, build, or dependency change | Affected preset build and CTest; `./scripts/check.sh` when available. |
 | CUDA interceptor change | `cuda-lint` or equivalent clang-tidy coverage, no-GPU interceptor tests, and `cuda-gpu` tests when a compatible GPU is available. |
 | Public behavior or failure-path change | A regression test plus success, rejection, cleanup, and rollback assertions that apply to the behavior. |
 
-The standard commands are:
+Common commands include:
 
 ```sh
 ./scripts/check.sh
 cmake --build --preset debug --target format-check
-ctest --preset debug --output-on-failure
+ctest --preset debug --output-on-failure --no-tests=error
 ```
 
-For sanitizer or CUDA work, also run the applicable commands in
-[TESTING.md](TESTING.md). The CUDA GPU suite is optional only when the required
-Toolkit, driver, or hardware is unavailable; report the skipped check and the
-no-GPU alternative. Verify that the editor database was refreshed when the
-build configuration changed:
+For sanitizer or CUDA work, follow [TESTING.md](TESTING.md). Run the GPU suite
+when compatible hardware is safely available and its use is authorized;
+otherwise report the skipped check and the no-GPU alternative. The aggregate
+script configures multiple build slots, so inspect their caches and storage
+first. If using the root editor database, use `readlink compile_commands.json`
+to verify that it refers to the intended build.
 
-```sh
-readlink compile_commands.json
-```
+## Full-device comparison qualification
 
-The link should point to the most recently built preset required by the change.
-Do not commit the generated database or build directories.
+Before formal GPU comparisons, qualify actual SM participation for every matched
+dominant operation and compared path by default. An 80-SM V100 requires 80/80 SMs.
+Explicit worker geometry and sufficient occupancy capacity are prerequisites,
+not coverage evidence. Small correctness-test worker defaults must not leak into
+measurement launchers. Preserve actual selection and numerical evidence too;
+an unused replacement kernel does not qualify the application path.
+
+Record native and replacement coverage separately. Missing, stale, partial,
+unmatched or representative-only captures fail qualification, not merely add a
+warning. Explicit diagnostic-only runs can inspect unqualified configurations,
+but must retain false full-card/performance/preemption acceptance. Never promote
+previous partial-card timings to a full-device baseline.
+
+A user-approved fixed-workload application contract may instead require equal
+whole-device resource availability and separately measured whole-path SM
+participation and aggregate co-location saturation. Record that choice explicitly
+before measurement; do not silently weaken an operation-level gate. Small native
+operations need not individually span all SMs under this alternative, but remain
+in the workload and measured cost. Available SM count is not participation;
+NVML GPU busy time is not SM activity or saturation. Aggregate co-location
+activity must come from the concurrent workload, not an average of serialized
+counter replays. Missing aggregate observations remain an open qualification
+gate. Such a contract must state the workload, resource bounds, measured scope
+and acceptance criteria in the comparison's reproducibility record. It does not
+change standalone GEMM qualification or historical acceptance flags.
+
+Counter collection is separate from ordinary timing. Bind it to GPU/driver,
+binary/source/vendor-library and workload identities. Use unchanged correctness
+oracles. Report active-cycle utilization, achieved occupancy and throughput
+separately from spatial SM coverage; participation does not prove continuous
+saturation. Profiling replay cannot qualify latency or physical priority overlap.
+Do not change MPS, clocks, driver permissions or GPU resource partitioning merely
+to make a gate pass. Reuse compatible builds and fresh small evidence folders.
+
+## Generated artifact retention and cleanup
+
+Follow [STORAGE_LAYOUT.md](STORAGE_LAYOUT.md) before building and when finishing
+experiments. Reuse compatible build slots, budget storage, and preserve frozen
+baselines and unique evidence. A new run does not require another full build.
+Declare large-output retention before collection; record cleanup and any lost
+reanalysis capability after review. Ignoring a directory does not authorize
+deleting its contents.
 
 ## Stage 5: Review protocol
 
-Review the diff in two passes. First verify correctness and safety; then verify
-maintainability and project consistency. The author performs this review even
-when no second reviewer is available.
+The author reviews the complete change even when working alone. Check:
 
-### Correctness pass
+- Correctness: intended behavior, input validation, error mapping, ownership,
+  cleanup, concurrency, accounting and ABI boundaries affected by the change.
+- Maintainability: module boundaries, complexity, naming, tests, build wiring
+  and documentation. Tests should verify behavior and meaningful failure paths.
+- Evidence: the appropriate checks passed; skipped checks and remaining risks
+  are described accurately.
 
-- Does the implementation satisfy every acceptance criterion and preserve
-  behavior outside the stated scope?
-- Are all success, rejection, timeout, cancellation, partial-initialization,
-  and cleanup paths handled?
-- Are ownership, lifetime, arithmetic overflow/underflow, and error mapping
-  correct?
-- Are shared-state synchronization, lock ordering, and thread safety clear?
-- For an interceptor, are ABI signatures, symbol lookup paths, initialization,
-  reentrancy guards, and fallback behavior correct?
-- Do tests exercise observable behavior and important failure paths rather than
-  only implementation details?
+For each finding, identify its location, impact and a concrete resolution.
+Resolve a `Blocker` (such as a crash, security issue, broken ABI or incorrect
+accounting) or `Major` issue (such as missing required behavior or a likely
+race) before integration. Fix a `Minor` issue when practical or record a
+follow-up; a `Nit` is optional. Recheck fixes and their affected tests.
+Automated formatters and analyzers own mechanical style checks. Prefer an
+improvement that meets these gates over delaying it for optional polish.
 
-### Maintainability pass
-
-- Does the change preserve module responsibilities and dependency direction?
-- Are names, logging levels, assertions, comments, and public documentation
-  consistent with the project rules?
-- Is the change small enough to understand and revert?
-- Are build presets, lint configuration, test registration, and generated-file
-  handling correct?
-- Do the documentation and API coverage tables describe the actual behavior,
-  including limitations and planned work?
-
-### Finding severity
-
-Use one of these labels for every finding:
-
-| Severity | Meaning | Required action |
-| --- | --- | --- |
-| `Blocker` | Build failure, crash, security issue, data corruption, undefined behavior, broken ABI, or incorrect quota/accounting result. | Must fix before integration. |
-| `Major` | Required behavior or test coverage is missing, a race/leak is likely, or documentation materially contradicts the implementation. | Must fix before integration. |
-| `Minor` | Local correctness risk or maintainability problem that does not invalidate the change. | Fix before integration when practical; otherwise record a follow-up. |
-| `Nit` | Wording or style preference with no behavior impact. | Optional; do not block integration. |
-
-Every finding should state the location, the risk, and a concrete resolution.
-Do not mark a finding resolved without rechecking the changed code and tests.
-
-### Review comment rules
-
-- Prefix a blocking comment with its severity, for example
-  `[Blocker]` or `[Major]`.
-- Report one independent issue per comment and reference the affected symbol,
-  path, or behavior.
-- Explain why the issue matters and, when useful, suggest a concrete fix or a
-  test that would demonstrate the fix.
-- Ask for clarification when intent is unclear; do not turn a preference into
-  a blocking finding.
-- Let automated tools own mechanical style findings. Do not spend review time
-  debating a rule that `.clang-format`, clang-tidy, or the compiler can decide.
-- The author must either fix the finding, provide a documented rationale, or
-  create a follow-up task before marking it resolved.
-- After a fix, re-run the affected checks and review the complete diff again;
-  do not review only the changed line in isolation.
-
-Use this compact record for a significant change or a risky self-review:
-
-```text
-Change:
-Scope and acceptance criteria:
-Risk and rollback:
-
-Checks:
-- [ ] debug build and CTest
-- [ ] format check
-- [ ] clang-tidy / CUDA lint (when applicable)
-- [ ] ASan/UBSan (when applicable)
-- [ ] GPU tests (when available and applicable)
-
-Findings:
-- [ ] Blocker: none / resolved
-- [ ] Major: none / resolved
-- [ ] Minor and Nit: resolved or recorded as follow-ups
-
-Review decision: approved / blocked / deferred
-Notes and follow-ups:
-```
+For more review guidance, see Google's
+[code review practices](https://google.github.io/eng-practices/review/reviewer/).
 
 ## Stage 6: Integrate on the single `main` branch
 
-Glimmer currently has one shared branch, so the commit is the durable change
-boundary. Follow [GIT_GUIDELINES.md](GIT_GUIDELINES.md):
-
-- inspect `git status`, the unstaged diff, and the staged diff;
-- stage only files belonging to the reviewed logical change;
-- keep implementation, tests, build wiring, and required documentation
-  together, rather than creating one commit per file;
-- use `[<type>]: <short imperative summary>` in English;
-- do not amend, reset, force-push, or rewrite shared history;
-- confirm the final commit contains the intended files and checks.
-
-When working alone, use the review checklist above as a mandatory self-review
-record. A second person or external review is encouraged for risky changes, but
-it does not replace the verification gates.
+Follow the [Git guidelines](GIT_GUIDELINES.md) for logical changes, staging and
+commit messages. Preserve unrelated work and avoid rewriting shared history.
 
 ## Definition of Done
 
-A change is ready to integrate only when all applicable statements are true:
-
-- the scope and acceptance criteria are met;
-- architecture, dependency, API-coverage, and user documentation are updated;
-- tests cover the new behavior and relevant failure/rollback paths;
-- required builds, tests, format checks, lint, and sanitizers pass;
-- unavailable hardware or tools are explicitly reported with an alternative
-  check;
-- the diff has no unresolved `Blocker` or `Major` findings;
-- no temporary logs, generated artifacts, credentials, or machine-specific
-  files are included;
-- `compile_commands.json` points to the intended last-built configuration;
-- the working tree and staged diff contain only the intended logical change;
-- the commit is made only after explicit authorization.
-
-If any statement is false, keep the change `Implemented`, `Verified`, or
-`Blocked` as appropriate instead of presenting it as integrated.
-
-## Exceptions and follow-ups
-
-If a rule cannot be followed, record the reason, affected risk, alternative
-verification, owner, and follow-up issue or task. An exception expires when the
-change is integrated unless it is intentionally converted into a documented
-project rule.
+A change is ready when its acceptance criteria, applicable checks and review
+are satisfied, documentation reflects actual behavior, and no blocking finding
+remains. Record unavailable checks, their risks and any follow-up; do not treat
+an unrun check as a pass. Exclude credentials and generated artifacts.

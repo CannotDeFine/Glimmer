@@ -4,11 +4,60 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 
 namespace glimmer::interceptor {
 namespace {
 
 constexpr std::chrono::milliseconds kHeartbeatInterval{100};
+
+class PrivateEventCaptureScope final {
+   public:
+    explicit PrivateEventCaptureScope(decltype(&cuThreadExchangeStreamCaptureMode) exchange)
+        : exchange_(exchange),
+          entered_(exchange_(&previous_)),
+          should_restore_(entered_ == CUDA_SUCCESS) {}
+    ~PrivateEventCaptureScope() noexcept {
+        if (should_restore_ && exchange_(&previous_) != CUDA_SUCCESS) {
+            report_diagnostic("[glimmer] private event capture-mode restoration failed\n");
+        }
+    }
+    PrivateEventCaptureScope(const PrivateEventCaptureScope&) = delete;
+    PrivateEventCaptureScope& operator=(const PrivateEventCaptureScope&) = delete;
+    [[nodiscard]] CUresult entered() const noexcept {
+        return entered_;
+    }
+    [[nodiscard]] CUresult finish(CUresult operation_result) noexcept {
+        if (!should_restore_) return entered_;
+        should_restore_ = false;
+        const auto restored = exchange_(&previous_);
+        return restored == CUDA_SUCCESS ? operation_result : restored;
+    }
+
+   private:
+    decltype(&cuThreadExchangeStreamCaptureMode) exchange_;
+    CUstreamCaptureMode previous_ = CU_STREAM_CAPTURE_MODE_THREAD_LOCAL;
+    CUresult entered_;
+    bool should_restore_;
+};
+
+template <typename Operation>
+[[nodiscard]] CUresult private_event_operation(
+    decltype(&cuThreadExchangeStreamCaptureMode) exchange, const Operation& operation) noexcept {
+    if (exchange == nullptr) return CUDA_ERROR_NOT_SUPPORTED;
+    // Only this private observer thread changes interaction mode. Captured
+    // events remain forbidden, and application GLOBAL mode is untouched.
+    const NativeDriverCallScope native;
+    PrivateEventCaptureScope scope(exchange);
+    if (scope.entered() != CUDA_SUCCESS) return scope.entered();
+    CUresult result = CUDA_ERROR_UNKNOWN;
+    try {
+        result = operation();
+    } catch (...) {
+        // The scope restores mode even when an injected operation throws.
+    }
+    return scope.finish(result);
+}
 
 }  // namespace
 
@@ -22,10 +71,22 @@ LaunchCompletionTracker::~LaunchCompletionTracker() noexcept {
 
 bool LaunchCompletionTracker::start() noexcept {
     try {
+        {
+            std::scoped_lock lock(mutex_);
+            if (monitor_thread_.joinable() || stopping_) return false;
+        }
+        // Symbol lookup must not run under metadata locks, nor may a missing
+        // API silently leave a GLOBAL-restricted monitor active.
+        void* exchange = nullptr;
+        if (driver_.get_proc_address("cuThreadExchangeStreamCaptureMode", &exchange, 12600,
+                                     CU_GET_PROC_ADDRESS_DEFAULT) != CUDA_SUCCESS ||
+            exchange == nullptr)
+            return false;
         std::scoped_lock lock(mutex_);
         if (monitor_thread_.joinable() || stopping_) {
             return false;
         }
+        exchange_capture_mode_ = reinterpret_cast<decltype(exchange_capture_mode_)>(exchange);
         monitor_thread_ = std::thread([this] { monitor(); });
         return true;
     } catch (...) {
@@ -186,14 +247,28 @@ void LaunchCompletionTracker::monitor() noexcept {
             static_cast<void>(fail(candidate.task_id));
         }
 
-        const CUresult query_result = driver_.event_query(candidate.event);
+        const CUresult query_result = private_event_operation(
+            exchange_capture_mode_, [&] { return driver_.event_query(candidate.event); });
         if (query_result == CUDA_ERROR_NOT_READY) {
             continue;
         }
 
         // Keep the event pending until cleanup finishes. Otherwise close_batch()
         // can publish success while this thread still owns the terminal result.
-        const bool event_destroyed = driver_.event_destroy(candidate.event) == CUDA_SUCCESS;
+        const CUresult destroy_result = private_event_operation(
+            exchange_capture_mode_, [&] { return driver_.event_destroy(candidate.event); });
+        const bool event_destroyed = destroy_result == CUDA_SUCCESS;
+        if (query_result != CUDA_SUCCESS || !event_destroyed) {
+            char message[192];
+            const int bytes = std::snprintf(
+                message, sizeof(message),
+                "[glimmer] launch event tracking failed: task=%llu query=%d destroy=%d\n",
+                static_cast<unsigned long long>(candidate.task_id), static_cast<int>(query_result),
+                static_cast<int>(destroy_result));
+            if (bytes > 0 && static_cast<std::size_t>(bytes) < sizeof(message)) {
+                report_diagnostic(message);
+            }
+        }
         bool should_complete = false;
         bool should_fail = false;
         {

@@ -98,14 +98,15 @@ struct ExecutionPriorityIdleConfig {
     std::uint64_t duration_ns{};
 };
 // Serialized pure policy: timestamps and observations come from the trusted
-// resource owner. A successful issue arms the guard even when a short command
-// retires before the next snapshot. Only healthy queue/physical drain starts
-// the interval. This narrows ordinary grants; it never proves physical stop.
+// resource owner. A successful issue or completed cleanup arms the guard even
+// when it retires before the next snapshot. Only healthy queue/physical drain
+// starts the interval. This narrows ordinary grants; it never proves physical stop.
 class ExecutionPriorityIdleWindow final {
    public:
     explicit ExecutionPriorityIdleWindow(ExecutionPriorityIdleConfig config = {}) noexcept;
     [[nodiscard]] bool enabled() const noexcept;
     void note_issue(std::uint32_t priority) noexcept;
+    void note_completed_cleanup(std::uint32_t priority) noexcept;
     [[nodiscard]] ExecutionPriorityPlan apply(std::span<const ExecutionPriorityPeer> peers,
                                               ExecutionSchedulingMode mode, std::uint64_t now_ns,
                                               ExecutionPriorityPlan plan) noexcept;

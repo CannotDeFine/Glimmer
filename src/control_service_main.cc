@@ -43,6 +43,8 @@ struct ServiceOptions {
     bool bind_leases_to_process = false;
     bool trace_scheduler = false;
     ExecutionMode execution_mode = ExecutionMode::kSimulated;
+    glimmer::control::NativeEpochExtent native_epoch_policy{};
+    std::uint8_t native_epoch_fields = 0;
 };
 
 void print_usage(std::ostream& output, std::string_view program) {
@@ -54,7 +56,9 @@ void print_usage(std::ostream& output, std::string_view program) {
               " [--adaptive-slo-target-queue-us N] [--adaptive-slo-window N]"
               " [--adaptive-slo-max-reserved-slots N]"
               " [--scheduler-policy fifo|weighted_rr|drr|priority]"
-              " [--max-requests N] [--bind-leases-to-process] [--trace-scheduler]\n";
+              " [--max-requests N] [--bind-leases-to-process] [--trace-scheduler]"
+              " [--native-epoch-max-calls N --native-epoch-prefix-calls N"
+              " --native-epoch-pending-prefixes N --native-epoch-acceptance-us N]\n";
 }
 
 template <typename Integer>
@@ -167,12 +171,42 @@ bool parse_options(int argc, char** argv, ServiceOptions* options) {
             if (!parse_positive(value, &options->max_requests)) {
                 return false;
             }
+        } else if (argument == "--native-epoch-max-calls") {
+            if ((options->native_epoch_fields & 1U) != 0 ||
+                !parse_positive(value, &options->native_epoch_policy.max_calls)) {
+                return false;
+            }
+            options->native_epoch_fields |= 1U;
+        } else if (argument == "--native-epoch-prefix-calls") {
+            if ((options->native_epoch_fields & 2U) != 0 ||
+                !parse_positive(value, &options->native_epoch_policy.calls_per_prefix)) {
+                return false;
+            }
+            options->native_epoch_fields |= 2U;
+        } else if (argument == "--native-epoch-pending-prefixes") {
+            if ((options->native_epoch_fields & 4U) != 0 ||
+                !parse_positive(value, &options->native_epoch_policy.max_pending_prefixes)) {
+                return false;
+            }
+            options->native_epoch_fields |= 4U;
+        } else if (argument == "--native-epoch-acceptance-us") {
+            if ((options->native_epoch_fields & 8U) != 0 ||
+                !parse_positive(value, &options->native_epoch_policy.acceptance_microseconds)) {
+                return false;
+            }
+            options->native_epoch_fields |= 8U;
         } else {
             return false;
         }
     }
     if (options->socket_path.empty() || options->quota_bytes == 0 ||
         options->priority_reserved_slots > options->max_concurrent_tasks) {
+        return false;
+    }
+    if (options->native_epoch_fields != 0 &&
+        (options->native_epoch_fields != 15 || !options->bind_leases_to_process ||
+         options->execution_mode != ServiceOptions::ExecutionMode::kRemote ||
+         !glimmer::control::valid_native_epoch_extent(options->native_epoch_policy))) {
         return false;
     }
     if (options->adaptive_slo_target_queue_wait_us == 0) {
@@ -298,7 +332,9 @@ int run_service(int argc, char** argv) {
         scheduler, std::chrono::milliseconds(options.lease_timeout_ms),
         options.bind_leases_to_process,
         options.trace_scheduler ? trace_scheduler_dispatch : nullptr, nullptr,
-        adaptive_controller.has_value() ? observe_adaptive_completion : nullptr, &adaptive_context);
+        adaptive_controller.has_value() ? observe_adaptive_completion : nullptr, &adaptive_context,
+        options.native_epoch_fields == 15 ? std::optional{options.native_epoch_policy}
+                                          : std::nullopt);
     glimmer::control::TaskControlEndpoint endpoint(admission_service, register_simulated_task,
                                                    &backend);
     glimmer::control::UnixSocketControlServer server(

@@ -4,11 +4,13 @@
 #include <nvml.h>
 
 #include "internal/diagnostics.h"
+#include "internal/process_call_gate.h"
 #include "glimmer/core/scheduler.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <functional>
 
 namespace glimmer::control {
 struct LaunchGateTiming;
@@ -16,8 +18,142 @@ struct LaunchGateTiming;
 
 namespace glimmer::interceptor {
 
+struct CudaCooperativeReleaseResult;
+class CudaNativeGraphExecutable;
+class DriverCooperativeRouter;
+struct PersistentSgemmProblem;
+struct PersistentBlasContext {
+    CUcontext context{};
+    unsigned long long id{};
+    bool operator==(const PersistentBlasContext&) const = default;
+};
+// Read-only observation; CUDA's context ID prevents address-reuse qualification.
+// Requires a normal shared Call and creates no context or frontend.
+[[nodiscard]] std::optional<PersistentBlasContext> persistent_blas_current_context() noexcept;
+// Nullopt means no application work was accepted; preserve the original cuBLAS
+// call. A returned status belongs to an accepted path and must never be replayed.
+// Caller owns a normal shared Call and has qualified the cuBLAS handle/scalars.
+[[nodiscard]] std::optional<CUresult> try_intercept_persistent_sgemm(
+    CUcontext handle_context, PersistentSgemmProblem problem, CUdeviceptr a, CUdeviceptr b,
+    CUdeviceptr c, CUdeviceptr bias = 0, CUdeviceptr workspace = 0,
+    std::size_t workspace_bytes = 0);
+struct CudaNativeEpochConfiguration;
+enum class CudaSourceCaptureKind;
+[[nodiscard]] CUresult intercept_driver_capture(CUstream stream, bool is_ptds,
+                                                CudaSourceCaptureKind kind,
+                                                const std::function<CUresult()>& original);
+// Borrowed process owner for trusted source assembly; no frontend initialization.
+// Requires an admitted shared call; the borrow must stay inside its lifetime.
+// Explicit process reset/fork teardown ends the process owner's lifetime.
+[[nodiscard]] DriverCooperativeRouter* cooperative_source_router() noexcept;
+// Trusted private startup only, before process-owner initialization. Requires
+// a normal shared Call and owns its Transition. One-shot; no SDK/actor creation.
+// Ordinary applications do not supply this policy; default construction is off.
+[[nodiscard]] CUresult configure_cooperative_native_epochs(
+    const CudaNativeEpochConfiguration& configuration) noexcept;
+// CPU-only private diagnostic under an admitted Call. Counts exact submitted
+// release generations in one context; never initializes an owner or calls SDK.
+[[nodiscard]] std::optional<std::size_t> cooperative_submitted_release_count(
+    CUcontext context) noexcept;
+[[nodiscard]] CUresult quarantine_cooperative_source_call(CUresult error) noexcept;
+[[nodiscard]] CUresult cooperative_graph_executable(CUgraphExec executable,
+                                                    CudaNativeGraphExecutable& output) noexcept;
+// Shared CPU-only admission prerequisite for covered public process transitions.
+// Thread-bound, lexical lifetime; trusted private/native callbacks bypass entry.
+[[nodiscard]] ProcessCallGate& cooperative_process_call_gate() noexcept;
+class CooperativeCallScope final {
+   public:
+    CooperativeCallScope();
+    CooperativeCallScope(const CooperativeCallScope&) = delete;
+    CooperativeCallScope& operator=(const CooperativeCallScope&) = delete;
+
+   private:
+    std::optional<ProcessCallGate::Call> call_;
+};
+[[nodiscard]] CUresult intercept_cooperative_native_boundary(
+    const std::function<CUresult()>& operation);
+[[nodiscard]] CUresult intercept_cooperative_memory_boundary(
+    const std::function<CUresult()>& operation);
+[[nodiscard]] CUresult intercept_cooperative_module_boundary(
+    const std::function<CUresult()>& operation);
+// Stream factories are metadata while the process retains source ownership.
+[[nodiscard]] CUresult intercept_driver_stream_create(const std::function<CUresult()>& original);
+[[nodiscard]] CUresult intercept_graph_instantiation(
+    CUgraphExec* output, CUgraph graph, bool should_prepare_effects,
+    const std::function<CUresult(CUgraphExec*)>& original);
+[[nodiscard]] CUresult intercept_graph_mutation(CUgraphExec executable, bool is_destroy,
+                                                const std::function<CUresult()>& original);
+[[nodiscard]] CUresult intercept_graph_event_update(CUgraphExec executable, CUgraphNode node,
+                                                    CUevent event, bool is_record,
+                                                    const std::function<CUresult()>& original);
+[[nodiscard]] CUresult intercept_graph_node_update(CUgraphExec executable, CUgraphNode node,
+                                                   std::optional<CUgraphNodeType> expected_type,
+                                                   const std::function<CUresult()>& original);
+[[nodiscard]] CUresult intercept_graph_update(CUgraphExec executable, CUgraph graph,
+                                              std::optional<CUgraphNode> child_node,
+                                              const std::function<CUresult()>& original);
+[[nodiscard]] void* resolve_native_driver_function(const char* name,
+                                                   bool per_thread_default_stream = false,
+                                                   int cuda_version = 12600);
+[[nodiscard]] CUresult intercept_driver_copy(CUdeviceptr destination, CUdeviceptr source,
+                                             void* host_pointer, std::size_t memory_bytes,
+                                             CUstream stream, unsigned int kind,
+                                             bool per_thread_default_stream);
+[[nodiscard]] bool cooperative_driver_preview_requested() noexcept;
+[[nodiscard]] CUresult intercept_driver_uva_copy(CUdeviceptr destination, CUdeviceptr source,
+                                                 std::size_t memory_bytes, CUstream stream,
+                                                 bool per_thread_default_stream,
+                                                 const std::function<CUresult()>& original);
+// Trusted progress-pool hooks: use the same quota ledger even in a Runtime
+// scope. Call only at an initialized, physically safe native context boundary.
+[[nodiscard]] CUresult allocate_cooperative_progress(CUdeviceptr* pointer,
+                                                     std::size_t memory_bytes) noexcept;
+[[nodiscard]] CudaCooperativeReleaseResult release_cooperative_progress(
+    CUdeviceptr pointer) noexcept;
+
+[[nodiscard]] CUresult intercept_module_load_data(CUmodule* module, const void* image,
+                                                  bool uses_extended_loader,
+                                                  unsigned int option_count, CUjit_option* options,
+                                                  void** option_values);
+[[nodiscard]] CUresult intercept_module_get_function(CUfunction* function, CUmodule module,
+                                                     const char* name);
+[[nodiscard]] CUresult intercept_module_unload(CUmodule module);
+[[nodiscard]] CUresult intercept_library_load_data(CUlibrary* library, const void* image,
+                                                   CUjit_option* options, void** option_values,
+                                                   unsigned int option_count,
+                                                   CUlibraryOption* library_options,
+                                                   void** library_option_values,
+                                                   unsigned int library_option_count);
+[[nodiscard]] CUresult intercept_library_load_from_file(CUlibrary* library, const char* path,
+                                                        CUjit_option* options, void** option_values,
+                                                        unsigned int option_count,
+                                                        CUlibraryOption* library_options,
+                                                        void** library_option_values,
+                                                        unsigned int library_option_count);
+[[nodiscard]] CUresult intercept_library_get_module(CUmodule* module, CUlibrary library);
+[[nodiscard]] CUresult intercept_library_unload(CUlibrary library);
+
 [[nodiscard]] CUresult intercept_init(unsigned int flags);
+[[nodiscard]] CUresult intercept_event_create(CUevent* event, unsigned int flags);
+[[nodiscard]] CUresult intercept_event_record(CUevent event, CUstream stream);
+[[nodiscard]] CUresult intercept_event_query(CUevent event);
+[[nodiscard]] CUresult intercept_event_destroy(CUevent event);
+[[nodiscard]] CUresult intercept_event_record_ptsz(CUevent event, CUstream stream);
+[[nodiscard]] CUresult intercept_event_record_with_flags(CUevent event, CUstream stream,
+                                                         unsigned int flags);
+[[nodiscard]] CUresult intercept_event_record_with_flags_ptsz(CUevent event, CUstream stream,
+                                                              unsigned int flags);
+[[nodiscard]] CUresult intercept_event_synchronize(CUevent event);
+[[nodiscard]] CUresult intercept_event_elapsed_time(float* milliseconds, CUevent start,
+                                                    CUevent end);
+[[nodiscard]] CUresult intercept_stream_wait_event(CUstream stream, CUevent event,
+                                                   unsigned int flags);
+[[nodiscard]] CUresult intercept_stream_wait_event_ptsz(CUstream stream, CUevent event,
+                                                        unsigned int flags);
 [[nodiscard]] bool launch_scheduling_is_enforced() noexcept;
+// A missing value prohibits admission; true delegates capture construction.
+[[nodiscard]] std::optional<bool> launch_stream_is_capturing(
+    CUstream stream, bool per_thread_default_stream) noexcept;
 [[nodiscard]] bool launch_timing_is_enabled() noexcept;
 [[nodiscard]] std::optional<glimmer::core::TaskId> acquire_launch_slot(
     glimmer::control::LaunchGateTiming* timing = nullptr) noexcept;
@@ -196,7 +332,9 @@ void report_launch_timing_observed(glimmer::core::TaskId task_id,
 [[nodiscard]] CUresult intercept_device_total_mem(std::size_t* total_bytes, CUdevice device);
 [[nodiscard]] CUresult intercept_context_get_current(CUcontext* context);
 [[nodiscard]] CUresult intercept_context_get_device(CUdevice* device);
-[[nodiscard]] CUresult intercept_context_destroy(CUcontext context);
+[[nodiscard]] CUresult intercept_context_destroy(CUcontext context, bool is_modern = true);
+[[nodiscard]] CUresult intercept_primary_context_reset(CUdevice device, bool is_modern);
+[[nodiscard]] CUresult intercept_primary_context_release(CUdevice device, bool is_modern);
 [[nodiscard]] CUresult intercept_stream_get_device(CUstream stream, CUdevice* device,
                                                    bool per_thread_default_stream);
 [[nodiscard]] CUresult intercept_stream_get_context(CUstream stream, CUcontext* context,

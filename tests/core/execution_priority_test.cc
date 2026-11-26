@@ -116,6 +116,58 @@ void priority_idle_window() {
                !progress.decisions[0].command,
            "the hold preserves exact dependency progress, never broad ordinary issue");
 }
+void completed_cleanup_idle_window() {
+    for (const auto mode :
+         {ExecutionSchedulingMode::kPriority, ExecutionSchedulingMode::kWorkloadAware}) {
+        ExecutionPriorityIdleWindow idle{{100, 100}};
+        std::array peers{ExecutionPriorityPeer{1, 0, false, false, true, false},
+                         ExecutionPriorityPeer{2, 100, false, false, false, false}};
+        peers[0].command = ExecutionPriorityCommand{.sequence = 7,
+                                                    .acceptance_order = 2,
+                                                    .physical_generation = 1,
+                                                    .geometry_epoch = 1,
+                                                    .command_epoch = 1,
+                                                    .control_epoch = 1,
+                                                    .is_resume = true};
+        const auto action = [&](std::uint64_t now) {
+            return idle.apply(peers, mode, now, plan_execution_priority(peers, mode))
+                .decisions[0]
+                .action;
+        };
+        idle.note_completed_cleanup(0);
+        expect(action(0) == ExecutionPriorityAction::kExecute,
+               "lower cleanup does not arm the highest-priority window");
+        idle.note_completed_cleanup(100);
+        expect(action(1) == ExecutionPriorityAction::kWait &&
+                   action(100) == ExecutionPriorityAction::kWait &&
+                   action(101) == ExecutionPriorityAction::kExecute,
+               "successful cleanup arms one bounded interval and permits eventual resume");
+        idle.note_completed_cleanup(100);
+        expect(action(102) == ExecutionPriorityAction::kWait, "expired window can rearm");
+        idle.note_completed_cleanup(100);
+        expect(action(150) == ExecutionPriorityAction::kWait &&
+                   action(249) == ExecutionPriorityAction::kWait &&
+                   action(250) == ExecutionPriorityAction::kExecute,
+               "a subsequent cleanup starts a new interval on the next healthy drain");
+        idle.note_completed_cleanup(100);
+        peers[1].has_unknown_state = true;
+        expect(action(251) == ExecutionPriorityAction::kQuarantined && !idle.has_idle_window(),
+               "unknown state cannot become a cleanup grant");
+        peers[1].has_unknown_state = false;
+        expect(action(252) == ExecutionPriorityAction::kWait &&
+                   action(352) == ExecutionPriorityAction::kExecute,
+               "healthy recovery restarts the hold without losing liveness");
+    }
+    ExecutionPriorityIdleWindow disabled{{100, 0}};
+    disabled.note_completed_cleanup(100);
+    std::array peers{ExecutionPriorityPeer{1, 0, true, false, false, false},
+                     ExecutionPriorityPeer{2, 100, false, false, false, false}};
+    expect(
+        disabled.apply(peers, ExecutionSchedulingMode::kPriority, 0, plan_execution_priority(peers))
+                .decisions[0]
+                .action == ExecutionPriorityAction::kExecute,
+        "zero idle duration disables cleanup holds");
+}
 void exact_priority_transitions() {
     std::array peers{ExecutionPriorityPeer{1, 0, false, true, false, false},
                      ExecutionPriorityPeer{2, 100, true, false, false, false}};
@@ -768,6 +820,7 @@ void exact_pair_grants_never_escape_the_selected_commands() {
 int main() {
     try {
         priority_idle_window();
+        completed_cleanup_idle_window();
         exact_priority_transitions();
         workload_aware_preserves_priority_before_pair_selection();
         exact_commands_are_not_connection_wide_grants();

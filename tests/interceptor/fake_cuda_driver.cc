@@ -3,9 +3,47 @@
 #endif
 
 #include <cuda.h>
+#include "event_audit_fixture.h"
+
+#ifdef cuEventDestroy
+#undef cuEventDestroy
+#endif
+
+#ifdef cuEventRecord
+#undef cuEventRecord
+#endif
+
+#ifdef cuEventRecordWithFlags
+#undef cuEventRecordWithFlags
+#endif
+
+#ifdef cuStreamWaitEvent
+#undef cuStreamWaitEvent
+#endif
+
+#ifdef cudaEventRecord
+#undef cudaEventRecord
+#endif
+
+#ifdef cudaEventRecordWithFlags
+#undef cudaEventRecordWithFlags
+#endif
+
+#ifdef cudaStreamWaitEvent
+#undef cudaStreamWaitEvent
+#endif
 
 #ifdef cuGetProcAddress
 #undef cuGetProcAddress
+#endif
+#ifdef cuDevicePrimaryCtxReset
+#undef cuDevicePrimaryCtxReset
+#endif
+#ifdef cuDevicePrimaryCtxRelease
+#undef cuDevicePrimaryCtxRelease
+#endif
+#ifdef cuCtxDestroy
+#undef cuCtxDestroy
 #endif
 #ifdef cuStreamDestroy
 #undef cuStreamDestroy
@@ -49,6 +87,8 @@
 
 #include <dlfcn.h>
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -57,7 +97,10 @@
 #include <string_view>
 #include <unordered_map>
 
+extern "C" void* glimmer_test_memory_symbol(const char* name, cuuint64_t flags);
+
 namespace {
+glimmer::tests::EventAudit g_event_audit;
 
 constexpr std::size_t kPhysicalMemoryBytes = std::size_t{64} * 1024 * 1024;
 constexpr std::size_t kForcedAllocationFailureBytes = 1536;
@@ -82,6 +125,19 @@ std::uint8_t g_external_memory_token = 0;
 std::uint8_t g_array_token = 0;
 std::uint8_t g_graphics_resource_token = 0;
 std::uint8_t g_event_token = 0;
+std::uint8_t g_module_token = 0;
+std::uint8_t g_kernel_token = 0;
+std::uint8_t g_persistent_kernel_token = 0;
+bool g_has_persistent_variant = false;
+std::atomic<int> g_capture_status{CU_STREAM_CAPTURE_STATUS_NONE};
+std::array<std::atomic<unsigned int>, 2> g_capture_queries{};
+std::atomic<unsigned int> g_internal_events{0};
+std::atomic<unsigned int> g_context_device_queries{0};
+bool g_is_cold_primary_initialized = false;
+unsigned int g_capacity_allocation_calls = 0;
+unsigned int g_capacity_memory_queries = 0;
+unsigned int g_persistent_worker_count = 0;
+unsigned int g_persistent_logical_count = 0;
 std::uint64_t g_pool_release_threshold = 0;
 
 CUcontext fake_context() {
@@ -102,6 +158,9 @@ CUresult reserve_memory(CUdeviceptr* device_pointer, std::size_t memory_bytes) {
     }
 
     std::scoped_lock lock(g_mutex);
+    if (std::getenv("GLIMMER_FAKE_COLD_RUNTIME_CAPACITY") != nullptr) {
+        ++g_capacity_allocation_calls;
+    }
     if (memory_bytes == kForcedAllocationFailureBytes) {
         *device_pointer = 0;
         return CUDA_ERROR_INVALID_VALUE;
@@ -131,7 +190,11 @@ CUresult reserve_memory(CUdeviceptr* device_pointer, std::size_t memory_bytes) {
     g_next_pointer += static_cast<CUdeviceptr>(memory_bytes + 0x1000U);
     g_allocations.emplace(pointer, memory_bytes);
     g_used_bytes += memory_bytes;
+    g_is_cold_primary_initialized = true;
     *device_pointer = pointer;
+    if (std::getenv("GLIMMER_FAKE_PROGRESS_ALLOCATION_ERROR") != nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
     return CUDA_SUCCESS;
 }
 
@@ -184,9 +247,164 @@ extern "C" CUresult CUDAAPI cuInit(unsigned int) {
     return CUDA_SUCCESS;
 }
 
-extern "C" CUresult CUDAAPI cuLaunchKernel(CUfunction, unsigned int, unsigned int, unsigned int,
+extern "C" CUresult CUDAAPI cuLaunchKernel(CUfunction function, unsigned int grid_x, unsigned int,
                                            unsigned int, unsigned int, unsigned int, unsigned int,
-                                           CUstream, void**, void**) {
+                                           unsigned int, CUstream, void** arguments, void**) {
+    std::scoped_lock lock(g_mutex);
+    if (function == reinterpret_cast<CUfunction>(&g_persistent_kernel_token)) {
+        if (arguments == nullptr || arguments[2] == nullptr) {
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+        g_persistent_worker_count = grid_x;
+        g_persistent_logical_count = *static_cast<unsigned int*>(arguments[2]);
+    } else {
+        g_persistent_worker_count = grid_x;
+        g_persistent_logical_count = grid_x;
+    }
+    return CUDA_SUCCESS;
+}
+
+extern "C" unsigned int glimmer_fake_persistent_worker_count() {
+    std::scoped_lock lock(g_mutex);
+    return g_persistent_worker_count;
+}
+
+extern "C" unsigned int glimmer_fake_persistent_logical_count() {
+    std::scoped_lock lock(g_mutex);
+    return g_persistent_logical_count;
+}
+
+extern "C" CUresult CUDAAPI cuModuleLoadData(CUmodule* module, const void* image) {
+    std::scoped_lock lock(g_mutex);
+    if (module == nullptr || image == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const auto* text = static_cast<const char*>(image);
+    g_has_persistent_variant =
+        (text[0] == '.' || text[0] == '\n') &&
+        std::string_view(text).find("write_indices__glimmer_ptb") != std::string_view::npos;
+    *module = reinterpret_cast<CUmodule>(&g_module_token);
+    return CUDA_SUCCESS;
+}
+
+namespace {
+unsigned int g_library_calls{};
+std::uint8_t g_library_token{};
+}  // namespace
+extern "C" unsigned int glimmer_fake_library_calls() {
+    std::scoped_lock lock(g_mutex);
+    return g_library_calls;
+}
+extern "C" CUresult CUDAAPI cuLibraryLoadData(CUlibrary* library, const void* image,
+                                              CUjit_option* options, void** values,
+                                              unsigned int count, CUlibraryOption* library_options,
+                                              void** library_values, unsigned int library_count) {
+    std::scoped_lock lock(g_mutex);
+    ++g_library_calls;
+    if (!library || !image) return CUDA_ERROR_INVALID_VALUE;
+    if (count || library_count) {
+        return count == 1 && library_count == 1 && options && values && library_options &&
+                       library_values && options[0] == CU_JIT_MAX_REGISTERS &&
+                       library_options[0] == CU_LIBRARY_BINARY_IS_PRESERVED &&
+                       values[0] == library && library_values[0] == library
+                   ? CUDA_ERROR_INVALID_IMAGE
+                   : CUDA_ERROR_INVALID_VALUE;
+    }
+    *library = reinterpret_cast<CUlibrary>(&g_library_token);
+    return CUDA_SUCCESS;
+}
+extern "C" CUresult CUDAAPI cuLibraryLoadFromFile(
+    CUlibrary* library, const char* path, CUjit_option* options, void** values, unsigned int count,
+    CUlibraryOption* library_options, void** library_values, unsigned int library_count) {
+    return cuLibraryLoadData(library, path, options, values, count, library_options, library_values,
+                             library_count);
+}
+extern "C" CUresult CUDAAPI cuLibraryGetModule(CUmodule* module, CUlibrary library) {
+    std::scoped_lock lock(g_mutex);
+    ++g_library_calls;
+    if (!module || library != reinterpret_cast<CUlibrary>(&g_library_token))
+        return CUDA_ERROR_INVALID_HANDLE;
+    *module = reinterpret_cast<CUmodule>(&g_module_token);
+    return CUDA_SUCCESS;
+}
+extern "C" CUresult CUDAAPI cuLibraryUnload(CUlibrary library) {
+    std::scoped_lock lock(g_mutex);
+    ++g_library_calls;
+    return library == reinterpret_cast<CUlibrary>(&g_library_token) ? CUDA_SUCCESS
+                                                                    : CUDA_ERROR_INVALID_HANDLE;
+}
+
+extern "C" CUresult CUDAAPI cuModuleLoadDataEx(CUmodule* module, const void* image, unsigned int,
+                                               CUjit_option*, void**) {
+    return cuModuleLoadData(module, image);
+}
+
+extern "C" CUresult CUDAAPI cuModuleGetFunction(CUfunction* function, CUmodule module,
+                                                const char* name) {
+    std::scoped_lock lock(g_mutex);
+    if (function == nullptr || name == nullptr ||
+        module != reinterpret_cast<CUmodule>(&g_module_token)) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    if (std::string_view(name) == "write_indices__glimmer_ptb") {
+        if (!g_has_persistent_variant) {
+            return CUDA_ERROR_NOT_FOUND;
+        }
+        *function = reinterpret_cast<CUfunction>(&g_persistent_kernel_token);
+    } else {
+        *function = reinterpret_cast<CUfunction>(&g_kernel_token);
+    }
+    return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuModuleUnload(CUmodule module) {
+    return module == reinterpret_cast<CUmodule>(&g_module_token) ? CUDA_SUCCESS
+                                                                 : CUDA_ERROR_INVALID_HANDLE;
+}
+
+extern "C" void glimmer_fake_set_capture_status(int status) {
+    g_capture_status.store(status);
+}
+
+extern "C" unsigned int glimmer_fake_capture_query_count(unsigned int alias) {
+    return alias < g_capture_queries.size() ? g_capture_queries[alias].load() : 0;
+}
+
+extern "C" unsigned int glimmer_fake_internal_event_count() {
+    return g_internal_events.load();
+}
+
+namespace {
+
+CUresult fake_capture_status(CUstreamCaptureStatus* status, std::size_t alias) {
+    ++g_capture_queries[alias];
+    if (status == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const int configured = g_capture_status.load();
+    if (configured < 0) {
+        return CUDA_ERROR_NOT_INITIALIZED;
+    }
+    *status = static_cast<CUstreamCaptureStatus>(configured);
+    return CUDA_SUCCESS;
+}
+
+}  // namespace
+
+extern "C" CUresult CUDAAPI cuStreamIsCapturing(CUstream, CUstreamCaptureStatus* status) {
+    return fake_capture_status(status, 0);
+}
+
+extern "C" CUresult CUDAAPI cuStreamIsCapturing_ptsz(CUstream, CUstreamCaptureStatus* status) {
+    return fake_capture_status(status, 1);
+}
+
+extern "C" CUresult CUDAAPI cuOccupancyMaxActiveBlocksPerMultiprocessor(int* blocks, CUfunction,
+                                                                        int, std::size_t) {
+    if (blocks == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *blocks = 1;
     return CUDA_SUCCESS;
 }
 
@@ -775,7 +993,8 @@ extern "C" CUresult CUDAAPI cuStreamGetDevice_ptsz(CUstream stream, CUdevice* de
     return cuStreamGetDevice(stream, device);
 }
 
-extern "C" CUresult CUDAAPI cuStreamGetCtx(CUstream, CUcontext* context) {
+namespace {
+CUresult CUDAAPI native_stream_get_context(CUstream, CUcontext* context) {
     if (context == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
     }
@@ -786,10 +1005,45 @@ extern "C" CUresult CUDAAPI cuStreamGetCtx(CUstream, CUcontext* context) {
     *context = fake_context();
     return CUDA_SUCCESS;
 }
-
-extern "C" CUresult CUDAAPI cuStreamGetCtx_ptsz(CUstream stream, CUcontext* context) {
-    return cuStreamGetCtx(stream, context);
+CUresult CUDAAPI native_stream_get_context_ptsz(CUstream stream, CUcontext* context) {
+    return native_stream_get_context(stream, context);
 }
+
+#if CUDA_VERSION >= 12050
+CUresult CUDAAPI native_stream_get_context_v2(CUstream stream, CUcontext* context,
+                                              CUgreenCtx* green_context) {
+    if (!green_context) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const auto result = native_stream_get_context(stream, context);
+    if (result == CUDA_SUCCESS) {
+        *green_context = nullptr;
+    }
+    return result;
+}
+CUresult CUDAAPI native_stream_get_context_v2_ptsz(CUstream stream, CUcontext* context,
+                                                   CUgreenCtx* green_context) {
+    return native_stream_get_context_v2(stream, context, green_context);
+}
+#endif
+}  // namespace
+
+extern "C" CUresult CUDAAPI cuStreamGetCtx(CUstream stream, CUcontext* context) {
+    return native_stream_get_context(stream, context);
+}
+extern "C" CUresult CUDAAPI cuStreamGetCtx_ptsz(CUstream stream, CUcontext* context) {
+    return native_stream_get_context_ptsz(stream, context);
+}
+#if CUDA_VERSION >= 12050
+extern "C" CUresult CUDAAPI cuStreamGetCtx_v2(CUstream stream, CUcontext* context,
+                                              CUgreenCtx* green_context) {
+    return native_stream_get_context_v2(stream, context, green_context);
+}
+extern "C" CUresult CUDAAPI cuStreamGetCtx_v2_ptsz(CUstream stream, CUcontext* context,
+                                                   CUgreenCtx* green_context) {
+    return native_stream_get_context_v2_ptsz(stream, context, green_context);
+}
+#endif
 
 extern "C" CUresult CUDAAPI cuStreamQuery(CUstream stream) {
     complete_pending_frees(stream, true);
@@ -822,27 +1076,114 @@ extern "C" CUresult CUDAAPI cuCtxSynchronize() {
     return CUDA_SUCCESS;
 }
 
-extern "C" CUresult CUDAAPI cuEventCreate(CUevent* event, unsigned int) {
+extern "C" CUresult CUDAAPI cuEventCreate(CUevent* event, unsigned int flags) {
+    if (std::getenv("GLIMMER_FAKE_EVENT_AUDIT") != nullptr) {
+        glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kCreate, event,
+                                          nullptr, nullptr, nullptr, flags);
+        return static_cast<CUresult>(g_event_audit.result);
+    }
     if (event == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
     }
     *event = reinterpret_cast<CUevent>(&g_event_token);
+    ++g_internal_events;
     return CUDA_SUCCESS;
 }
 
-extern "C" CUresult CUDAAPI cuEventRecord(CUevent event, CUstream) {
+extern "C" CUresult CUDAAPI cuEventRecord(CUevent event, CUstream stream) {
+    if (std::getenv("GLIMMER_FAKE_EVENT_AUDIT") != nullptr) {
+        glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kRecord,
+                                          nullptr, event, stream, nullptr, 0);
+        return static_cast<CUresult>(g_event_audit.result);
+    }
     return event == reinterpret_cast<CUevent>(&g_event_token) ? CUDA_SUCCESS
                                                               : CUDA_ERROR_INVALID_HANDLE;
 }
 
 extern "C" CUresult CUDAAPI cuEventQuery(CUevent event) {
+    if (std::getenv("GLIMMER_FAKE_EVENT_AUDIT") != nullptr) {
+        glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kQuery, nullptr,
+                                          event, nullptr, nullptr, 0);
+        return static_cast<CUresult>(g_event_audit.result);
+    }
     return event == reinterpret_cast<CUevent>(&g_event_token) ? CUDA_SUCCESS
                                                               : CUDA_ERROR_INVALID_HANDLE;
 }
 
+extern "C" CUresult CUDAAPI cuThreadExchangeStreamCaptureMode(CUstreamCaptureMode* mode) {
+    thread_local CUstreamCaptureMode current = CU_STREAM_CAPTURE_MODE_GLOBAL;
+    if (mode == nullptr ||
+        (*mode != CU_STREAM_CAPTURE_MODE_GLOBAL && *mode != CU_STREAM_CAPTURE_MODE_THREAD_LOCAL &&
+         *mode != CU_STREAM_CAPTURE_MODE_RELAXED)) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const auto previous = current;
+    current = *mode;
+    *mode = previous;
+    return CUDA_SUCCESS;
+}
+
 extern "C" CUresult CUDAAPI cuEventDestroy_v2(CUevent event) {
+    if (std::getenv("GLIMMER_FAKE_EVENT_AUDIT") != nullptr) {
+        glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kDestroy,
+                                          nullptr, event, nullptr, nullptr, 0);
+        return static_cast<CUresult>(g_event_audit.result);
+    }
     return event == reinterpret_cast<CUevent>(&g_event_token) ? CUDA_SUCCESS
                                                               : CUDA_ERROR_INVALID_HANDLE;
+}
+
+extern "C" glimmer::tests::EventAudit* glimmer_fake_event_audit() {
+    return &g_event_audit;
+}
+
+extern "C" CUresult CUDAAPI cuEventRecord_ptsz(CUevent event, CUstream stream) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kRecordPtds,
+                                      nullptr, event, stream, nullptr, 0);
+    return static_cast<CUresult>(g_event_audit.result);
+}
+
+extern "C" CUresult CUDAAPI cuEventRecordWithFlags(CUevent event, CUstream stream,
+                                                   unsigned int flags) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kRecordFlags,
+                                      nullptr, event, stream, nullptr, flags);
+    return static_cast<CUresult>(g_event_audit.result);
+}
+
+extern "C" CUresult CUDAAPI cuEventRecordWithFlags_ptsz(CUevent event, CUstream stream,
+                                                        unsigned int flags) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kRecordFlagsPtds,
+                                      nullptr, event, stream, nullptr, flags);
+    return static_cast<CUresult>(g_event_audit.result);
+}
+
+extern "C" CUresult CUDAAPI cuEventSynchronize(CUevent event) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kSynchronize,
+                                      nullptr, event, nullptr, nullptr, 0);
+    return static_cast<CUresult>(g_event_audit.result);
+}
+
+extern "C" CUresult CUDAAPI cuEventElapsedTime(float* milliseconds, CUevent start, CUevent end) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kElapsed,
+                                      milliseconds, start, nullptr, end, 0);
+    return static_cast<CUresult>(g_event_audit.result);
+}
+
+extern "C" CUresult CUDAAPI cuStreamWaitEvent(CUstream stream, CUevent event, unsigned int flags) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kWait, nullptr,
+                                      event, stream, nullptr, flags);
+    return static_cast<CUresult>(g_event_audit.result);
+}
+
+extern "C" CUresult CUDAAPI cuStreamWaitEvent_ptsz(CUstream stream, CUevent event,
+                                                   unsigned int flags) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kWaitPtds, nullptr,
+                                      event, stream, nullptr, flags);
+    return static_cast<CUresult>(g_event_audit.result);
+}
+
+extern "C" CUresult CUDAAPI cuEventDestroy(CUevent event) {
+    return cuEventDestroy_v2(event);
 }
 
 extern "C" CUresult CUDAAPI cuMemGetInfo_v2(std::size_t* free_bytes, std::size_t* total_bytes) {
@@ -850,9 +1191,46 @@ extern "C" CUresult CUDAAPI cuMemGetInfo_v2(std::size_t* free_bytes, std::size_t
         return CUDA_ERROR_INVALID_VALUE;
     }
     std::scoped_lock lock(g_mutex);
+    if (std::getenv("GLIMMER_FAKE_COLD_RUNTIME_CAPACITY") != nullptr) {
+        ++g_capacity_memory_queries;
+        if (!g_is_cold_primary_initialized) {
+            return CUDA_ERROR_CONTEXT_IS_DESTROYED;
+        }
+    }
     *free_bytes = kPhysicalMemoryBytes - g_used_bytes;
     *total_bytes = kPhysicalMemoryBytes;
     return CUDA_SUCCESS;
+}
+
+extern "C" CUresult CUDAAPI cuDevicePrimaryCtxGetState(CUdevice device, unsigned int* flags,
+                                                       int* active) {
+    if (device != 0 || !flags || !active) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    std::scoped_lock lock(g_mutex);
+    *flags = 0;
+    *active = g_context_alive ? 1 : 0;
+    if (std::getenv("GLIMMER_FAKE_COLD_RUNTIME_CAPACITY") != nullptr &&
+        !g_is_cold_primary_initialized) {
+        *active = 0;
+        if (std::getenv("GLIMMER_FAKE_COLD_PRIMARY_UNKNOWN") != nullptr) {
+            *active = 2;
+        }
+        if (std::getenv("GLIMMER_FAKE_COLD_PRIMARY_FAILURE") != nullptr) {
+            return CUDA_ERROR_INVALID_DEVICE;
+        }
+    }
+    return CUDA_SUCCESS;
+}
+
+extern "C" unsigned int glimmer_test_capacity_allocation_calls() {
+    std::scoped_lock lock(g_mutex);
+    return g_capacity_allocation_calls;
+}
+
+extern "C" unsigned int glimmer_test_capacity_memory_queries() {
+    std::scoped_lock lock(g_mutex);
+    return g_capacity_memory_queries;
 }
 
 extern "C" CUresult CUDAAPI cuDeviceTotalMem_v2(std::size_t* total_bytes, CUdevice) {
@@ -867,24 +1245,47 @@ extern "C" CUresult CUDAAPI cuCtxGetCurrent(CUcontext* context) {
     if (context == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
     }
+    if (std::getenv("GLIMMER_FAKE_PROGRESS_CONTEXT_ERROR") != nullptr) {
+        return CUDA_ERROR_INVALID_CONTEXT;
+    }
+    if (std::getenv("GLIMMER_FAKE_UNBOUND_CAPACITY") != nullptr) {
+        *context = nullptr;
+        return CUDA_SUCCESS;
+    }
     std::scoped_lock lock(g_mutex);
     *context = g_context_alive ? fake_context() : nullptr;
     return CUDA_SUCCESS;
 }
 
 extern "C" CUresult CUDAAPI cuCtxGetDevice(CUdevice* device) {
+    g_context_device_queries.fetch_add(1, std::memory_order_relaxed);
     if (device == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
     }
     std::scoped_lock lock(g_mutex);
-    if (!g_context_alive) {
+    if (!g_context_alive || std::getenv("GLIMMER_FAKE_UNBOUND_CAPACITY") != nullptr) {
         return CUDA_ERROR_INVALID_CONTEXT;
     }
     *device = 0;
     return CUDA_SUCCESS;
 }
 
-extern "C" CUresult CUDAAPI cuCtxDestroy_v2(CUcontext context) {
+extern "C" unsigned int glimmer_test_context_device_queries() {
+    return g_context_device_queries.load(std::memory_order_relaxed);
+}
+
+namespace {
+using DestroyQuery = CUresult(CUDAAPI*)(const char*, void**, int, cuuint64_t);
+using DestroyQueryV2 = CUresult(CUDAAPI*)(const char*, void**, int, cuuint64_t,
+                                          CUdriverProcAddressQueryResult*);
+thread_local DestroyQuery g_destroy_query{};
+thread_local DestroyQueryV2 g_destroy_query_v2{};
+
+CUresult CUDAAPI native_context_destroy_legacy(CUcontext) {
+    return CUDA_ERROR_INVALID_HANDLE;
+}
+
+CUresult CUDAAPI native_context_destroy_modern(CUcontext context) {
     if (context != fake_context()) {
         return CUDA_ERROR_INVALID_CONTEXT;
     }
@@ -895,20 +1296,186 @@ extern "C" CUresult CUDAAPI cuCtxDestroy_v2(CUcontext context) {
     g_used_bytes = 0;
     return CUDA_SUCCESS;
 }
+}  // namespace
 
-extern "C" CUresult CUDAAPI cuGetProcAddress(const char* symbol, void** function_pointer, int,
-                                             cuuint64_t) {
+extern "C" void glimmer_test_set_destroy_query_callbacks(DestroyQuery query,
+                                                         DestroyQueryV2 query_v2) {
+    g_destroy_query = query;
+    g_destroy_query_v2 = query_v2;
+}
+
+extern "C" CUresult CUDAAPI cuCtxDestroy(CUcontext context) {
+    return native_context_destroy_legacy(context);
+}
+
+extern "C" CUresult CUDAAPI cuCtxDestroy_v2(CUcontext context) {
+    return native_context_destroy_modern(context);
+}
+
+extern "C" void* glimmer_test_graph_symbol(const char*, int, cuuint64_t);
+namespace {
+CUresult CUDAAPI native_primary_reset_legacy(CUdevice device) {
+    return device == 0 ? CUDA_ERROR_PRIMARY_CONTEXT_ACTIVE : CUDA_ERROR_INVALID_DEVICE;
+}
+
+CUresult CUDAAPI native_primary_reset_modern(CUdevice device) {
+    return device == 0 ? CUDA_ERROR_INVALID_CONTEXT : CUDA_ERROR_INVALID_DEVICE;
+}
+
+const char* versioned_memory_symbol(const char* symbol, int version) {
+    if (version >= 10010 && symbol) {
+        if (std::string_view{symbol} == "cuStreamBeginCapture") {
+            return "cuStreamBeginCapture_v2";
+        }
+        if (std::string_view{symbol} == "cuStreamBeginCapture_ptsz") {
+            return "cuStreamBeginCapture_v2_ptsz";
+        }
+    }
+    return symbol;
+}
+CUresult CUDAAPI native_primary_release_legacy(CUdevice) {
+    return CUDA_ERROR_INVALID_DEVICE;
+}
+CUresult CUDAAPI native_primary_release_modern(CUdevice) {
+    return CUDA_ERROR_INVALID_CONTEXT;
+}
+CUresult CUDAAPI native_get_proc_address(const char* symbol, void** function_pointer, int version,
+                                         cuuint64_t flags) {
     if (symbol == nullptr || function_pointer == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
     }
-    *function_pointer = lookup_symbol(symbol);
+    if (g_destroy_query && (std::string_view(symbol) == "cuCtxDestroy" ||
+                            std::string_view(symbol) == "cuCtxDestroy_v2")) {
+        return g_destroy_query(symbol, function_pointer, version, flags);
+    }
+    if (std::string_view(symbol) == "cuCtxDestroy") {
+        if (version < 2000) {
+            return CUDA_ERROR_NOT_FOUND;
+        }
+        *function_pointer = version < 4000
+                                ? reinterpret_cast<void*>(&native_context_destroy_legacy)
+                                : reinterpret_cast<void*>(&native_context_destroy_modern);
+        return CUDA_SUCCESS;
+    }
+    if (std::string_view(symbol) == "cuCtxDestroy_v2") {
+        return CUDA_ERROR_NOT_FOUND;
+    }
+    if (std::string_view(symbol) == "cuDevicePrimaryCtxRelease" && version >= 7000) {
+        *function_pointer = version < 11000
+                                ? reinterpret_cast<void*>(&native_primary_release_legacy)
+                                : reinterpret_cast<void*>(&native_primary_release_modern);
+        return CUDA_SUCCESS;
+    }
+    if ((std::string_view(symbol) == "cuDevicePrimaryCtxRelease" && version < 7000) ||
+        (std::string_view(symbol) == "cuDevicePrimaryCtxRelease_v2" && version < 11000)) {
+        *function_pointer = nullptr;
+        return CUDA_ERROR_NOT_FOUND;
+    }
+    if (std::string_view(symbol) == "cuDevicePrimaryCtxReset" && version >= 7000) {
+        *function_pointer = version < 11000 ? reinterpret_cast<void*>(&native_primary_reset_legacy)
+                                            : reinterpret_cast<void*>(&native_primary_reset_modern);
+        return CUDA_SUCCESS;
+    }
+    if ((std::string_view(symbol) == "cuDevicePrimaryCtxReset" && version < 7000) ||
+        (std::string_view(symbol) == "cuDevicePrimaryCtxReset_v2" && version < 11000)) {
+        *function_pointer = nullptr;
+        return CUDA_ERROR_NOT_FOUND;
+    }
+#if CUDA_VERSION >= 12050
+    if ((std::string_view(symbol) == "cuStreamGetCtx" ||
+         std::string_view(symbol) == "cuStreamGetCtx_ptsz") &&
+        version >= 12050) {
+        const bool is_ptds = (flags & CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM) != 0 ||
+                             std::string_view(symbol) == "cuStreamGetCtx_ptsz";
+        *function_pointer = is_ptds ? reinterpret_cast<void*>(&native_stream_get_context_v2_ptsz)
+                                    : reinterpret_cast<void*>(&native_stream_get_context_v2);
+        return CUDA_SUCCESS;
+    }
+#endif
+    if (std::string_view(symbol) == "cuStreamIsCapturing" ||
+        std::string_view(symbol) == "cuStreamIsCapturing_ptsz") {
+        const bool is_ptds = (flags & CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM) != 0 ||
+                             std::string_view(symbol) == "cuStreamIsCapturing_ptsz";
+        *function_pointer = is_ptds ? reinterpret_cast<void*>(&cuStreamIsCapturing_ptsz)
+                                    : reinterpret_cast<void*>(&cuStreamIsCapturing);
+        return CUDA_SUCCESS;
+    }
+    if (std::getenv("GLIMMER_FAKE_SELF_COPY_LOOKUP") != nullptr &&
+        std::string_view{symbol} == "cuMemcpyHtoDAsync") {
+        *function_pointer = dlsym(RTLD_DEFAULT, "cuMemcpyHtoDAsync_v2");
+        return *function_pointer ? CUDA_SUCCESS : CUDA_ERROR_NOT_FOUND;
+    }
+    if (std::string_view(symbol) == "glimmer_test_progress_accounting_callback") {
+        *function_pointer = dlsym(RTLD_DEFAULT, symbol);
+        return *function_pointer == nullptr ? CUDA_ERROR_NOT_FOUND
+                                            : reinterpret_cast<CUresult (*)()>(*function_pointer)();
+    }
+    *function_pointer = glimmer_test_memory_symbol(versioned_memory_symbol(symbol, version), flags);
+    if (*function_pointer == nullptr) {
+        *function_pointer = glimmer_test_graph_symbol(symbol, version, flags);
+    }
+    if (*function_pointer == nullptr) {
+        *function_pointer = lookup_symbol(symbol);
+    }
     return *function_pointer == nullptr ? CUDA_ERROR_NOT_FOUND : CUDA_SUCCESS;
+}
+}  // namespace
+
+extern "C" CUresult CUDAAPI cuDevicePrimaryCtxReset(CUdevice device) {
+    return native_primary_reset_legacy(device);
+}
+
+extern "C" CUresult CUDAAPI cuDevicePrimaryCtxReset_v2(CUdevice device) {
+    return native_primary_reset_modern(device);
+}
+
+extern "C" CUresult CUDAAPI cuDevicePrimaryCtxRelease(CUdevice device) {
+    return native_primary_release_legacy(device);
+}
+extern "C" CUresult CUDAAPI cuDevicePrimaryCtxRelease_v2(CUdevice device) {
+    return native_primary_release_modern(device);
+}
+
+extern "C" CUresult CUDAAPI cuGetProcAddress(const char* symbol, void** function_pointer,
+                                             int version, cuuint64_t flags) {
+    return native_get_proc_address(symbol, function_pointer, version, flags);
 }
 
 extern "C" CUresult CUDAAPI cuGetProcAddress_v2(const char* symbol, void** function_pointer,
                                                 int version, cuuint64_t flags,
                                                 CUdriverProcAddressQueryResult* symbol_status) {
-    const CUresult result = cuGetProcAddress(symbol, function_pointer, version, flags);
+    if (symbol != nullptr && function_pointer != nullptr &&
+        (std::string_view(symbol) == "cuCtxDestroy" ||
+         std::string_view(symbol) == "cuCtxDestroy_v2")) {
+        if (g_destroy_query_v2) {
+            return g_destroy_query_v2(symbol, function_pointer, version, flags, symbol_status);
+        }
+        const bool is_base = std::string_view(symbol) == "cuCtxDestroy";
+        *function_pointer = !is_base || version < 2000 ? nullptr
+                            : version < 4000
+                                ? reinterpret_cast<void*>(&native_context_destroy_legacy)
+                                : reinterpret_cast<void*>(&native_context_destroy_modern);
+        if (symbol_status != nullptr) {
+            *symbol_status = !is_base         ? CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND
+                             : version < 2000 ? CU_GET_PROC_ADDRESS_VERSION_NOT_SUFFICIENT
+                                              : CU_GET_PROC_ADDRESS_SUCCESS;
+        }
+        return CUDA_SUCCESS;
+    }
+    if (symbol != nullptr && function_pointer != nullptr) {
+        *function_pointer =
+            glimmer_test_memory_symbol(versioned_memory_symbol(symbol, version), flags);
+        if (*function_pointer == nullptr) {
+            *function_pointer = glimmer_test_graph_symbol(symbol, version, flags);
+        }
+        if (*function_pointer != nullptr) {
+            if (symbol_status != nullptr) {
+                *symbol_status = CU_GET_PROC_ADDRESS_SUCCESS;
+            }
+            return CUDA_SUCCESS;
+        }
+    }
+    const CUresult result = native_get_proc_address(symbol, function_pointer, version, flags);
     if (symbol_status != nullptr) {
         *symbol_status = result == CUDA_SUCCESS ? CU_GET_PROC_ADDRESS_SUCCESS
                                                 : CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
@@ -918,12 +1485,103 @@ extern "C" CUresult CUDAAPI cuGetProcAddress_v2(const char* symbol, void** funct
 
 namespace {
 
+// Constructor-routing tests own no GPU frontend. These opt-in dispatch entries
+// allow CPU router initialization, but reject every unmodeled resource effect.
+CUresult CUDAAPI unavailable_context_push(CUcontext) {
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+CUresult CUDAAPI unavailable_context_pop(CUcontext*) {
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+CUresult CUDAAPI unavailable_stream_create(CUstream*, unsigned int) {
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+CUresult CUDAAPI unavailable_stream_flags(CUstream, unsigned int*) {
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+CUresult CUDAAPI unavailable_stream_priority(CUstream, int*) {
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+CUresult CUDAAPI unavailable_host_allocate(void**, std::size_t, unsigned int) {
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+CUresult CUDAAPI unavailable_host_free(void*) {
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+CUresult CUDAAPI unavailable_host_map(CUdeviceptr*, void*, unsigned int) {
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+CUresult CUDAAPI unavailable_pointer_attribute(void*, CUpointer_attribute, CUdeviceptr) {
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+CUresult CUDAAPI unavailable_host_flags(unsigned int*, void*) {
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+CUresult CUDAAPI empty_graph_nodes(CUgraph graph, CUgraphNode*, std::size_t* count) {
+    if (graph != reinterpret_cast<CUgraph>(0xfa020) || !count) return CUDA_ERROR_INVALID_VALUE;
+    *count = 0;
+    return CUDA_SUCCESS;
+}
+CUresult CUDAAPI empty_graph_node_type(CUgraphNode, CUgraphNodeType*) {
+    return CUDA_ERROR_INVALID_VALUE;
+}
+
 void* lookup_symbol(const char* symbol) {
     if (symbol == nullptr) {
         return nullptr;
     }
+    if (std::getenv("GLIMMER_FAKE_GRAPH_OWNER_DISPATCH") != nullptr) {
+        const std::string_view name{symbol};
+        if (name == "cuGraphGetNodes") return reinterpret_cast<void*>(&empty_graph_nodes);
+        if (name == "cuGraphNodeGetType") return reinterpret_cast<void*>(&empty_graph_node_type);
+        if (name == "cuCtxPushCurrent") return reinterpret_cast<void*>(&unavailable_context_push);
+        if (name == "cuCtxPopCurrent") return reinterpret_cast<void*>(&unavailable_context_pop);
+        if (name == "cuStreamCreate") return reinterpret_cast<void*>(&unavailable_stream_create);
+        if (name == "cuStreamGetFlags") return reinterpret_cast<void*>(&unavailable_stream_flags);
+        if (name == "cuStreamGetPriority")
+            return reinterpret_cast<void*>(&unavailable_stream_priority);
+        if (name == "cuMemHostAlloc") return reinterpret_cast<void*>(&unavailable_host_allocate);
+        if (name == "cuMemFreeHost") return reinterpret_cast<void*>(&unavailable_host_free);
+        if (name == "cuMemHostGetDevicePointer")
+            return reinterpret_cast<void*>(&unavailable_host_map);
+        if (name == "cuPointerGetAttribute")
+            return reinterpret_cast<void*>(&unavailable_pointer_attribute);
+        if (name == "cuMemHostGetFlags") return reinterpret_cast<void*>(&unavailable_host_flags);
+    }
     if (std::string_view(symbol) == "cuInit") {
         return reinterpret_cast<void*>(&cuInit);
+    }
+    if (std::string_view(symbol) == "cuDevicePrimaryCtxReset") {
+        return reinterpret_cast<void*>(&native_primary_reset_legacy);
+    }
+    if (std::string_view(symbol) == "cuDevicePrimaryCtxReset_v2") {
+        return reinterpret_cast<void*>(&native_primary_reset_modern);
+    }
+    if (std::string_view(symbol) == "cuDevicePrimaryCtxRelease") {
+        return reinterpret_cast<void*>(&native_primary_release_legacy);
+    }
+    if (std::string_view(symbol) == "cuDevicePrimaryCtxRelease_v2") {
+        return reinterpret_cast<void*>(&native_primary_release_modern);
+    }
+    if (std::string_view(symbol) == "cuModuleLoadData") {
+        return reinterpret_cast<void*>(&cuModuleLoadData);
+    }
+    if (std::string_view(symbol) == "cuModuleLoadDataEx") {
+        return reinterpret_cast<void*>(&cuModuleLoadDataEx);
+    }
+    if (std::string_view(symbol) == "cuModuleGetFunction") {
+        return reinterpret_cast<void*>(&cuModuleGetFunction);
+    }
+    if (std::string_view(symbol) == "cuLibraryLoadData")
+        return reinterpret_cast<void*>(&cuLibraryLoadData);
+    if (std::string_view(symbol) == "cuLibraryLoadFromFile")
+        return reinterpret_cast<void*>(&cuLibraryLoadFromFile);
+    if (std::string_view(symbol) == "cuLibraryGetModule")
+        return reinterpret_cast<void*>(&cuLibraryGetModule);
+    if (std::string_view(symbol) == "cuLibraryUnload")
+        return reinterpret_cast<void*>(&cuLibraryUnload);
+    if (std::string_view(symbol) == "cuModuleUnload") {
+        return reinterpret_cast<void*>(&cuModuleUnload);
     }
     if (std::string_view(symbol) == "cuLaunchKernel") {
         return reinterpret_cast<void*>(&cuLaunchKernel);
@@ -1149,9 +1807,11 @@ void* lookup_symbol(const char* symbol) {
     if (std::string_view(symbol) == "cuCtxGetDevice") {
         return reinterpret_cast<void*>(&cuCtxGetDevice);
     }
-    if (std::string_view(symbol) == "cuCtxDestroy" ||
-        std::string_view(symbol) == "cuCtxDestroy_v2") {
-        return reinterpret_cast<void*>(&cuCtxDestroy_v2);
+    if (std::string_view(symbol) == "cuCtxDestroy") {
+        return reinterpret_cast<void*>(&native_context_destroy_legacy);
+    }
+    if (std::string_view(symbol) == "cuCtxDestroy_v2") {
+        return reinterpret_cast<void*>(&native_context_destroy_modern);
     }
     if (std::string_view(symbol) == "cuStreamGetDevice") {
         return reinterpret_cast<void*>(&cuStreamGetDevice);
@@ -1160,10 +1820,16 @@ void* lookup_symbol(const char* symbol) {
         return reinterpret_cast<void*>(&cuStreamGetDevice_ptsz);
     }
     if (std::string_view(symbol) == "cuStreamGetCtx") {
-        return reinterpret_cast<void*>(&cuStreamGetCtx);
+        return reinterpret_cast<void*>(&native_stream_get_context);
     }
     if (std::string_view(symbol) == "cuStreamGetCtx_ptsz") {
-        return reinterpret_cast<void*>(&cuStreamGetCtx_ptsz);
+        return reinterpret_cast<void*>(&native_stream_get_context_ptsz);
+    }
+    if (std::string_view(symbol) == "cuStreamIsCapturing") {
+        return reinterpret_cast<void*>(&cuStreamIsCapturing);
+    }
+    if (std::string_view(symbol) == "cuStreamIsCapturing_ptsz") {
+        return reinterpret_cast<void*>(&cuStreamIsCapturing_ptsz);
     }
     if (std::string_view(symbol) == "cuStreamQuery") {
         return reinterpret_cast<void*>(&cuStreamQuery);
@@ -1183,6 +1849,45 @@ void* lookup_symbol(const char* symbol) {
     }
     if (std::string_view(symbol) == "cuCtxSynchronize") {
         return reinterpret_cast<void*>(&cuCtxSynchronize);
+    }
+    if (std::string_view(symbol) == "cuEventCreate") {
+        return reinterpret_cast<void*>(&cuEventCreate);
+    }
+    if (std::string_view(symbol) == "cuEventRecord") {
+        return reinterpret_cast<void*>(&cuEventRecord);
+    }
+    if (std::string_view(symbol) == "cuEventQuery") {
+        return reinterpret_cast<void*>(&cuEventQuery);
+    }
+    if (std::string_view(symbol) == "cuThreadExchangeStreamCaptureMode") {
+        return reinterpret_cast<void*>(&cuThreadExchangeStreamCaptureMode);
+    }
+    if (std::string_view(symbol) == "cuEventDestroy_v2") {
+        return reinterpret_cast<void*>(&cuEventDestroy_v2);
+    }
+    if (std::string_view(symbol) == "cuEventRecord_ptsz") {
+        return reinterpret_cast<void*>(&cuEventRecord_ptsz);
+    }
+    if (std::string_view(symbol) == "cuEventRecordWithFlags") {
+        return reinterpret_cast<void*>(&cuEventRecordWithFlags);
+    }
+    if (std::string_view(symbol) == "cuEventRecordWithFlags_ptsz") {
+        return reinterpret_cast<void*>(&cuEventRecordWithFlags_ptsz);
+    }
+    if (std::string_view(symbol) == "cuEventSynchronize") {
+        return reinterpret_cast<void*>(&cuEventSynchronize);
+    }
+    if (std::string_view(symbol) == "cuEventElapsedTime") {
+        return reinterpret_cast<void*>(&cuEventElapsedTime);
+    }
+    if (std::string_view(symbol) == "cuStreamWaitEvent") {
+        return reinterpret_cast<void*>(&cuStreamWaitEvent);
+    }
+    if (std::string_view(symbol) == "cuStreamWaitEvent_ptsz") {
+        return reinterpret_cast<void*>(&cuStreamWaitEvent_ptsz);
+    }
+    if (std::string_view(symbol) == "cuEventDestroy") {
+        return reinterpret_cast<void*>(&cuEventDestroy);
     }
     if (std::string_view(symbol) == "cuGetProcAddress") {
         return reinterpret_cast<void*>(&cuGetProcAddress);

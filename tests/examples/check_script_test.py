@@ -201,6 +201,23 @@ with open(os.environ['BUDGET_FIXTURE_CMAKE'], 'a') as stream:
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("::warning::ShellCheck is unavailable", result.stdout)
 
+    @unittest.skipUnless(shutil.which("cmake"), "cmake is required")
+    def test_missing_spdlog_configuration_suggests_only_required_submodule(self):
+        source = self.root / "missing-spdlog-source"
+        source.mkdir()
+        shutil.copyfile(PROJECT / "CMakeLists.txt", source / "CMakeLists.txt")
+        shutil.copytree(PROJECT / "cmake", source / "cmake")
+        result = subprocess.run(
+            [shutil.which("cmake"), "-S", str(source), "-B", str(self.root / "missing-spdlog-build"),
+             "-DBUILD_TESTING=OFF", "-DCMAKE_EXPORT_COMPILE_COMMANDS=OFF"],
+            env=self.environment, capture_output=True, text=True, timeout=60,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("git submodule update --init --recursive -- 3rdparty/spdlog",
+                      " ".join((result.stdout + result.stderr).split()))
+        self.assertFalse((source / "3rdparty").exists())
+        self.assertFalse(self.log.exists(), "configuration must not run git or download dependencies")
+
     def test_build_script_does_not_fetch_or_overwrite_user_files(self):
         build_script = self.root / "scripts/build.sh"
         shutil.copyfile(PROJECT / "scripts/build.sh", build_script)
@@ -281,6 +298,141 @@ with open(os.environ['CHECK_SCRIPT_LOG'], 'a') as target:
         calls = [json.loads(line)[1:] for line in self.log.read_text().splitlines()]
         self.assertEqual(calls, [["--preset", "debug"], ["--build", "--preset", "debug"]])
         self.assertFalse(database.exists())
+
+    def test_priority_demo_target_dependencies(self):
+        source = self.root / "priority-target-source"
+        source.mkdir()
+        (source / "CMakeLists.txt").write_text(textwrap.dedent(f"""\
+            cmake_minimum_required(VERSION 3.20)
+            project(priority_target_fixture LANGUAGES CXX)
+            add_library(project_options INTERFACE)
+            add_library(Glimmer::project_options ALIAS project_options)
+            add_library(CUDA::cudart INTERFACE IMPORTED)
+            add_library(CUDA::cublas INTERFACE IMPORTED)
+            add_custom_target(glimmer_control_service)
+            if(TEST_INTERCEPTOR)
+                add_custom_target(glimmer_cuda_interceptor)
+            endif()
+            function(glimmer_enable_clang_tidy target)
+            endfunction()
+            set(BUILD_TESTING OFF)
+            add_subdirectory("{PROJECT / 'examples/priority_demo'}" demo)
+            set_target_properties(glimmer_cuda_priority_workload PROPERTIES LINKER_LANGUAGE CXX)
+            get_target_property(dependencies glimmer_cuda_priority_demo MANUALLY_ADDED_DEPENDENCIES)
+            if(TEST_INTERCEPTOR AND NOT "glimmer_cuda_interceptor" IN_LIST dependencies)
+                message(FATAL_ERROR "demo target omits the enabled interceptor")
+            endif()
+            if(NOT TEST_INTERCEPTOR AND "glimmer_cuda_interceptor" IN_LIST dependencies)
+                message(FATAL_ERROR "demo target depends on a disabled interceptor")
+            endif()
+        """))
+        cmake = shutil.which("cmake")
+        self.assertIsNotNone(cmake, "cmake is required for the build-configuration tests")
+        for enabled in ("ON", "OFF"):
+            result = subprocess.run(
+                [cmake, "-S", str(source), "-B", str(self.root / f"priority-target-{enabled}"),
+                 f"-DTEST_INTERCEPTOR={enabled}"],
+                cwd=self.root, env=self.environment, capture_output=True, text=True, timeout=30)
+            with self.subTest(interceptor=enabled):
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_priority_demo_uses_fresh_output_without_removing_existing_files(self):
+        runner = self.root / "examples/priority_demo/run_priority_demo.sh"
+        runner.parent.mkdir(parents=True)
+        shutil.copyfile(PROJECT / "examples/priority_demo/run_priority_demo.sh", runner)
+        shutil.copyfile(PROJECT / "scripts/artifact_paths.py", self.root / "scripts/artifact_paths.py")
+        workload = self.root / "fake-build/examples/priority_demo/glimmer_cuda_priority_workload"
+        workload.parent.mkdir(parents=True)
+        command = ["/bin/bash", str(runner), "--mode", "native", "--no-plot",
+                   "--build-dir", str(self.root / "fake-build")]
+        for contents in (None, "not executable\n"):
+            if contents is not None:
+                workload.write_text(contents)
+            result = subprocess.run(command, cwd=self.root, env=self.environment,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("required executable is missing or not executable", result.stderr)
+            self.assertIn("examples/priority_demo/README.md", result.stderr)
+            self.assertFalse((self.root / "artifacts").exists())
+        workload.write_text(f"#!{sys.executable}\n" + """
+import json, os, pathlib, sys, time
+args = sys.argv[1:]
+def value(name):
+    return pathlib.Path(args[args.index(name) + 1])
+value('--ready-file').touch()
+for _ in range(200):
+    if value('--start-file').exists():
+        break
+    time.sleep(.01)
+else:
+    raise SystemExit(1)
+value('--output').write_text('new result\\n')
+value('--output').with_suffix('.environment').write_text(json.dumps({
+    'LD_PRELOAD': os.environ.get('LD_PRELOAD'), 'LD_AUDIT': os.environ.get('LD_AUDIT')}))
+""")
+        workload.chmod(0o755)
+        legacy = self.root / "examples/priority_demo/output/native/training.csv"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("retained result\n")
+        self.environment.update(LD_PRELOAD="/missing/glimmer-test-preload.so",
+                                LD_AUDIT="/missing/glimmer-test-audit.so")
+        for _ in range(2):
+            result = subprocess.run(command, cwd=self.root, env=self.environment,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(legacy.read_text(), "retained result\n")
+        attempts = list((self.root / "artifacts/runs/priority-demo-native").glob("attempt-*"))
+        self.assertEqual(len(attempts), 2)
+        for attempt in attempts:
+            for role in ("training", "inference"):
+                self.assertEqual((attempt / f"{role}.csv").read_text(), "new result\n")
+                self.assertEqual(json.loads((attempt / f"{role}.environment").read_text()),
+                                 {"LD_PRELOAD": None, "LD_AUDIT": None})
+            self.assertEqual(json.loads((attempt / "run.json").read_text())["namespace"],
+                             "priority-demo-native")
+
+        custom = self.root / "artifacts/runs/custom"
+        custom.mkdir(parents=True)
+        (custom / "training.csv").write_text("existing file\n")
+        result = subprocess.run([*command, "--output-dir", str(custom)], cwd=self.root,
+                                env=self.environment, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((custom / "training.csv").read_text(), "existing file\n")
+        self.assertEqual(len(list(custom.glob("attempt-*"))), 1)
+        rejected = self.root / "build/retained-output"
+        result = subprocess.run([*command, "--output-dir", str(rejected)], cwd=self.root,
+                                env=self.environment, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(rejected.exists())
+
+        service = self.root / "fake-build/bin/glimmer_control_service"
+        service.parent.mkdir(parents=True)
+        service.write_text(f"#!{sys.executable}\n" + """
+import json, os, pathlib
+pathlib.Path(os.environ['TEST_SERVICE_ENV']).write_text(json.dumps({
+    'LD_PRELOAD': os.environ.get('LD_PRELOAD'), 'LD_AUDIT': os.environ.get('LD_AUDIT')}))
+raise SystemExit(1)
+""")
+        service.chmod(0o755)
+        interceptor = self.root / "fake-build/lib/libglimmer_cuda_interceptor.so"
+        interceptor.parent.mkdir(parents=True)
+        result = subprocess.run([*command, "--mode", "priority"], cwd=self.root,
+                                env=self.environment, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("required interceptor is missing", result.stderr)
+        self.assertFalse((self.root / "artifacts/runs/priority-demo-priority").exists())
+        interceptor.touch()
+        service_environment = self.root / "service-environment.json"
+        self.environment["TEST_SERVICE_ENV"] = str(service_environment)
+        result = subprocess.run([*command, "--mode", "priority"], cwd=self.root,
+                                env=self.environment, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("control service did not create its socket", result.stderr)
+        self.assertEqual(json.loads(service_environment.read_text()),
+                         {"LD_PRELOAD": None, "LD_AUDIT": None})
+        failed = list((self.root / "artifacts/runs/priority-demo-priority").glob("attempt-*"))
+        self.assertEqual(len(failed), 1)
+        self.assertTrue((failed[0] / "run.json").is_file())
 
     def test_git_inventory_failure_does_not_pass_an_empty_scope(self):
         self.tool("git", "import sys\nraise SystemExit(64 if 'ls-files' in sys.argv else 0)\n")
@@ -490,6 +642,76 @@ with open(os.environ['CHECK_PRESET_LOG'], 'a') as target:
         asan = [call for call in calls if call[0] == "ctest" and "asan-ubsan" in call[1]][-1]
         self.assertEqual(asan[3], "detect_leaks=1:halt_on_error=1")
 
+    @unittest.skipUnless(shutil.which("cmake") and shutil.which("ctest"),
+                         "cmake and ctest are required")
+    def test_default_host_format_scope_and_sanitizer_exclusions(self):
+        cmake, ctest = shutil.which("cmake"), shutil.which("ctest")
+        self.tool("clang-format", """
+import json, os, sys
+with open(os.environ['CHECK_SCRIPT_LOG'], 'a') as target:
+    target.write(json.dumps(sys.argv[1:]) + '\\n')
+""")
+        selected = {}
+        for name, options in (("debug", []), ("asan", ["-DGLIMMER_ENABLE_SANITIZERS=ON"])):
+            build = self.root / f"label-{name}"
+            configured = subprocess.run(
+                [cmake, "-S", str(PROJECT), "-B", str(build), "-DBUILD_TESTING=ON",
+                 "-DCMAKE_BUILD_TYPE=Debug", "-DGLIMMER_ENABLE_CUDA_GPU_TESTS=OFF",
+                 "-DCMAKE_EXPORT_COMPILE_COMMANDS=OFF", f"-DPython3_EXECUTABLE={sys.executable}",
+                 f"-DGLIMMER_CLANG_FORMAT={self.bin / 'clang-format'}",
+                 *options], env=self.environment, capture_output=True, text=True, timeout=60)
+            self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+            if name == "debug":
+                checked = subprocess.run(
+                    [cmake, "--build", str(build), "--target", "format-check"],
+                    env=self.environment, capture_output=True, text=True, timeout=60)
+                self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+                arguments = json.loads(self.log.read_text().splitlines()[-1])
+                actual = set(arguments) - {"--dry-run", "--Werror"}
+                expected = set()
+                for directory in ("include", "src", "examples", "tests"):
+                    extensions = {".h", ".hpp", ".cuh"}
+                    if directory != "include":
+                        extensions.update({".cc", ".cpp", ".cu"})
+                    for path in (PROJECT / directory).rglob("*"):
+                        if (path.is_file() and path.suffix in extensions and
+                                not {".venv", "output", "build"}.intersection(path.relative_to(PROJECT).parts)):
+                            expected.add(str(path))
+                self.assertEqual(actual, expected)
+            listed = subprocess.run(
+                [ctest, "--test-dir", str(build), "--show-only=json-v1", "-L", "^no-instrumented-code$"],
+                env=self.environment, capture_output=True, text=True, timeout=30)
+            self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
+            tests = json.loads(listed.stdout)["tests"]
+            selected[name] = {test["name"] for test in tests}
+            for test in tests:
+                properties = {item["name"]: item["value"] for item in test.get("properties", [])}
+                self.assertFalse(properties.get("DISABLED", False), test["name"])
+            if name == "asan":
+                included = subprocess.run(
+                    [ctest, "--test-dir", str(build), "--show-only=json-v1", "-LE", "^no-instrumented-code$"],
+                    env=self.environment, capture_output=True, text=True, timeout=30)
+                self.assertEqual(included.returncode, 0, included.stdout + included.stderr)
+                selected["asan_included"] = {test["name"] for test in json.loads(included.stdout)["tests"]}
+        self.assertTrue(selected["debug"], "expected labeled tests in the default Debug configuration")
+        build_fixtures = {"glimmer_execution_test_runtime_build_test",
+                          "glimmer_execution_host_optimization_build_test",
+                          "glimmer_nccl_dependency_test", "glimmer_cutlass_dependency_test"}
+        self.assertTrue(build_fixtures <= selected["debug"], build_fixtures - selected["debug"])
+        self.assertTrue(build_fixtures <= selected["asan"], build_fixtures - selected["asan"])
+        receipt_fixtures = {"glimmer_execution_unified_copy_numerical_receipt_test",
+                            "glimmer_execution_unified_copy_execution_receipt_test",
+                            "glimmer_execution_unified_copy_h2h_receipt_test",
+                            "glimmer_execution_unified_copy_h2h_order_receipt_test",
+                            "glimmer_execution_unified_copy_h2d_order_receipt_test",
+                            "glimmer_execution_unified_copy_per_thread_receipt_test",
+                            "glimmer_execution_unified_copy_per_thread_order_receipt_test",
+                            "glimmer_execution_lt_scalar_bias_receipt_test"}
+        self.assertTrue(receipt_fixtures <= selected["debug"], receipt_fixtures - selected["debug"])
+        self.assertTrue(receipt_fixtures <= selected["asan"], receipt_fixtures - selected["asan"])
+        self.assertTrue(receipt_fixtures.isdisjoint(selected["asan_included"]))
+        self.assertFalse(selected["asan"] - selected["debug"],
+                         f"sanitizer exclusions missing from Debug: {selected['asan'] - selected['debug']}")
 
     @unittest.skipUnless(shutil.which("cmake") and shutil.which("ctest"),
                          "cmake and ctest are required")
@@ -536,12 +758,29 @@ set_tests_properties(explicit_limit PROPERTIES TIMEOUT 15)
             shutil.copyfile(PROJECT / name, source / name)
         for name in ("cmake", "src", "include", "3rdparty"):
             (source / name).symlink_to(PROJECT / name, target_is_directory=True)
+        for name in ("tests/owned.h", "examples/output/generated.h", "examples/.venv/generated.h"):
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("// fixture\n")
+        self.tool("clang-format", """
+import json, os, sys
+with open(os.environ['CHECK_SCRIPT_LOG'], 'a') as target:
+    target.write(json.dumps(sys.argv[1:]) + '\\n')
+""")
         build = self.root / "link build"
         cmake = shutil.which("cmake")
         configured = subprocess.run(
-            [cmake, "-S", str(source), "-B", str(build), "-DBUILD_TESTING=OFF"],
+            [cmake, "-S", str(source), "-B", str(build), "-DBUILD_TESTING=OFF",
+             f"-DGLIMMER_CLANG_FORMAT={self.bin / 'clang-format'}"],
             env=self.environment, capture_output=True, text=True, timeout=30)
         self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+        formatted = subprocess.run([cmake, "--build", str(build), "--target", "format-check"],
+                                   env=self.environment, capture_output=True, text=True, timeout=30)
+        self.assertEqual(formatted.returncode, 0, formatted.stdout + formatted.stderr)
+        arguments = json.loads(self.log.read_text().splitlines()[-1])
+        self.assertIn(str(source / "tests/owned.h"), arguments)
+        self.assertNotIn(str(source / "examples/output/generated.h"), arguments)
+        self.assertNotIn(str(source / "examples/.venv/generated.h"), arguments)
         command = [cmake, "--build", str(build), "--target", "glimmer_compile_commands"]
         database = source / "compile_commands.json"
         database.write_text("user data\n")
@@ -586,7 +825,6 @@ add_executable(scope_probe probe.cc)
                                        env=self.environment, capture_output=True, text=True, timeout=30)
             self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
             self.assertEqual((build / "compile_commands.json").exists(), expected)
-
 
     @unittest.skipUnless(shutil.which("clang-tidy") and shutil.which("cmake") and shutil.which("c++"),
                          "clang-tidy, cmake and a C++ compiler are required")

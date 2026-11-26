@@ -10,13 +10,12 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-import tempfile
 
 from analyze_cuda_profile import analyze_sqlite
 from measurements import read_workload
-from run_overhead_baseline import (EXAMPLE, MODES, ROLES, artifact_hashes, optimized_build,
+from run_overhead_baseline import (MODES, ROLES, artifact_hashes, optimized_build,
                                    parse_args as baseline_args, remote_service, workload_command)
-from run_slo_validation import benchmark_environment, run_bounded
+from run_slo_validation import benchmark_environment, prepare_output, run_bounded
 
 
 def parse_args(argv=None):
@@ -26,6 +25,10 @@ def parse_args(argv=None):
     parser.add_argument("--mode", choices=MODES, default="local")
     parser.add_argument("--role", choices=ROLES, default="training")
     parser.add_argument("--nsys", default="nsys")
+    parser.add_argument("--cooperative-preview", action="store_true")
+    parser.add_argument("--persistent-worker-blocks", type=int)
+    parser.add_argument("--cuda-api-trace", choices=("full", "default"), default="full",
+                        help="explicitly allow selected default APIs on older Nsight versions")
     options, remaining = parser.parse_known_args(argv)
     args = baseline_args(["--duration-seconds", "1", "--repetitions", "1", *remaining])
     if args.analyze_only is not None or args.repetitions != 1:
@@ -33,16 +36,36 @@ def parse_args(argv=None):
     if args.duration_seconds > 10:
         parser.error("diagnostic duration is limited to 10 seconds")
     args.mode, args.role, args.nsys = options.mode, options.role, options.nsys
+    args.cuda_api_trace = options.cuda_api_trace
+    if options.cooperative_preview and options.mode not in ("local", "remote"):
+        parser.error("cooperative preview requires local or remote mode")
+    if options.persistent_worker_blocks is not None and not options.cooperative_preview:
+        parser.error("persistent workers require explicit cooperative preview")
+    workers = 3 if options.persistent_worker_blocks is None else options.persistent_worker_blocks
+    if not 1 <= workers <= 65536:
+        parser.error("persistent workers must be in [1, 65536]")
+    args.cooperative_preview = options.cooperative_preview
+    args.persistent_worker_blocks = workers
     return args
 
 
 def profile_command(args, output, socket_path=""):
     # LD_PRELOAD belongs to the target's env command, not the Nsight process.
-    return [args.nsys, "profile", "--trace=cuda", "--sample=none", "--cpuctxsw=none",
-            "--cuda-trace-all-apis=true", "--cuda-event-trace=false",
+    target = workload_command(args.mode, args.role, args, output, socket_path)
+    if args.cooperative_preview:
+        target[1:1] = ["GLIMMER_COOPERATIVE_DRIVER_PREVIEW=1",
+                       "GLIMMER_COOPERATIVE_RUNTIME_PREVIEW=1",
+                       f"GLIMMER_PERSISTENT_WORKER_BLOCKS={args.persistent_worker_blocks}"]
+    executable = shutil.which(target[0])
+    if executable is None:
+        raise ValueError(f"profile target executable is unavailable: {target[0]}")
+    target[0] = str(pathlib.Path(executable).resolve())
+    flags = (["--cuda-trace-all-apis=true", "--cuda-event-trace=false"]
+             if args.cuda_api_trace == "full" else [])
+    return [args.nsys, "profile", "--trace=cuda", "--sample=none", "--cpuctxsw=none", *flags,
             "--capture-range=cudaProfilerApi", "--capture-range-end=stop", "--export=sqlite",
             "--force-overwrite=false", f"--output={output / 'timeline'}",
-            *workload_command(args.mode, args.role, args, output, socket_path), "--profile-cuda"]
+            *target, "--profile-cuda"]
 
 
 def validate_workload(args, output):
@@ -70,16 +93,7 @@ def main(argv=None):
         args.nsys = executable
         version = subprocess.run([args.nsys, "--version"], check=True, capture_output=True,
                                  text=True, timeout=10, env=benchmark_environment()).stdout.strip()
-        if args.output_dir is None:
-            (EXAMPLE / "output").mkdir(exist_ok=True)
-            output = pathlib.Path(tempfile.mkdtemp(
-                prefix=f"launch-profile-{args.mode}-{args.role}-", dir=EXAMPLE / "output"))
-        else:
-            destination = args.output_dir.resolve()
-            if destination.exists() and any(destination.iterdir()):
-                raise ValueError(f"output directory must be empty: {destination}")
-            destination.mkdir(parents=True, exist_ok=True)
-            output = destination
+        output = prepare_output("pytorch-launch-profile", args.output_dir, category="profiles")
         manifest = {"version": "warmed_cuda_profile_v1", "diagnostic_only": True,
                     "collection_complete": False, "nsys_version": version, "build": build,
                     "arguments": {key: str(value) if isinstance(value, pathlib.Path) else value

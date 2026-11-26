@@ -30,6 +30,17 @@ enum class TaskProtocolOperation : std::uint8_t {
     kFail,
     kStats,
     kMetrics,
+    kExecutionClaim,
+    kRetreat,
+    kSuspend,
+    kExecutionHeartbeat,
+    kExecutionComplete,
+    kExecutionFail,
+    kExecutionCancel,
+    // Submit cooperative work and attempt its first generation-bound claim.
+    kExecutionAcquire,
+    // Complete one proven-stopped execution, then admit distinct new work.
+    kExecutionCompleteAcquire,
 };
 
 enum class TaskProtocolParseError : std::uint8_t {
@@ -48,6 +59,7 @@ struct TaskProtocolRequest {
     TaskAdmissionRequest admission;
     core::TaskId task_id = 0;
     std::uint32_t wait_timeout_ms = 0;
+    std::uint64_t generation = 0;
 };
 
 struct TaskProtocolRequestParseResult {
@@ -84,6 +96,9 @@ enum class TaskProtocolResponseKind : std::uint8_t {
     kEmpty,
     kStats,
     kMetrics,
+    kExecutionLease,
+    kRetreat,
+    kExecutionHandoff,
 };
 
 struct TaskProtocolStats {
@@ -114,6 +129,10 @@ struct TaskProtocolResponse {
     std::uint32_t weight = 0;
     std::uint32_t work_units = 0;
     TaskProtocolStats stats;
+    std::uint64_t generation = 0;
+    bool should_retreat = false;
+    // Only EXEC_HANDOFF carries the independently acknowledged old identity.
+    TaskExecutionIdentity completed_execution{};
 };
 
 struct TaskProtocolResponseParseResult {

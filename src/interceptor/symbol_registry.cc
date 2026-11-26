@@ -1,11 +1,116 @@
 #include "internal/symbol_registry.h"
+#include "internal/driver_copy_wrappers.h"
 
 #include <cuda.h>
 #include <cuda_runtime_api.h>
+#include <cublas_v2.h>
+#include <cublasLt.h>
+
+#ifdef cudaStreamBeginCapture
+#undef cudaStreamBeginCapture
+#endif
+#ifdef cudaStreamEndCapture
+#undef cudaStreamEndCapture
+#endif
+
+#ifdef cudaGraphInstantiateWithParams
+#undef cudaGraphInstantiateWithParams
+#endif
+#if CUDART_VERSION >= 12000
+extern "C" cudaError_t CUDARTAPI cudaGraphInstantiateWithParams_ptsz(cudaGraphExec_t*, cudaGraph_t,
+                                                                     cudaGraphInstantiateParams*);
+#endif
+
+#ifdef cudaMemcpy
+#undef cudaMemcpy
+#endif
+#ifdef cudaMemcpy_ptds
+#undef cudaMemcpy_ptds
+#endif
+#ifdef cudaMemcpyAsync
+#undef cudaMemcpyAsync
+#endif
+#ifdef cudaMemcpyAsync_ptsz
+#undef cudaMemcpyAsync_ptsz
+#endif
+#ifdef cudaMemset
+#undef cudaMemset
+#endif
+#ifdef cudaMemset_ptds
+#undef cudaMemset_ptds
+#endif
+#ifdef cudaMemsetAsync
+#undef cudaMemsetAsync
+#endif
+#ifdef cudaMemsetAsync_ptsz
+#undef cudaMemsetAsync_ptsz
+#endif
+#ifdef cudaMallocHost
+#undef cudaMallocHost
+#endif
+#ifdef cudaHostAlloc
+#undef cudaHostAlloc
+#endif
+#ifdef cudaFreeHost
+#undef cudaFreeHost
+#endif
+#ifdef cudaHostRegister
+#undef cudaHostRegister
+#endif
+#ifdef cudaHostUnregister
+#undef cudaHostUnregister
+#endif
+#ifdef cudaHostGetDevicePointer
+#undef cudaHostGetDevicePointer
+#endif
+#ifdef cudaStreamCreate
+#undef cudaStreamCreate
+#endif
+#ifdef cudaStreamCreateWithFlags
+#undef cudaStreamCreateWithFlags
+#endif
+#ifdef cudaStreamCreateWithPriority
+#undef cudaStreamCreateWithPriority
+#endif
+#ifdef cudaStreamGetFlags
+#undef cudaStreamGetFlags
+#endif
+#ifdef cudaStreamGetPriority
+#undef cudaStreamGetPriority
+#endif
+
+#ifdef cuEventDestroy
+#undef cuEventDestroy
+#endif
+
+#ifdef cuEventRecord
+#undef cuEventRecord
+#endif
+
+#ifdef cuEventRecordWithFlags
+#undef cuEventRecordWithFlags
+#endif
+
+#ifdef cuStreamWaitEvent
+#undef cuStreamWaitEvent
+#endif
+
+#ifdef cudaEventRecord
+#undef cudaEventRecord
+#endif
+
+#ifdef cudaEventRecordWithFlags
+#undef cudaEventRecordWithFlags
+#endif
+
+#ifdef cudaStreamWaitEvent
+#undef cudaStreamWaitEvent
+#endif
 #include <nvml.h>
 
 #include <array>
 #include <string_view>
+#include "internal/driver_graph_wrappers.h"
 
 #ifdef cuGetProcAddress
 #undef cuGetProcAddress
@@ -24,6 +129,12 @@
 #endif
 #ifdef cuCtxDestroy
 #undef cuCtxDestroy
+#endif
+#ifdef cuDevicePrimaryCtxReset
+#undef cuDevicePrimaryCtxReset
+#endif
+#ifdef cuDevicePrimaryCtxRelease
+#undef cuDevicePrimaryCtxRelease
 #endif
 #ifdef cuStreamGetDevice
 #undef cuStreamGetDevice
@@ -108,6 +219,10 @@ extern "C" CUresult CUDAAPI cuCtxGetCurrent(CUcontext* context);
 extern "C" CUresult CUDAAPI cuCtxGetDevice(CUdevice* device);
 extern "C" CUresult CUDAAPI cuCtxDestroy(CUcontext context);
 extern "C" CUresult CUDAAPI cuCtxDestroy_v2(CUcontext context);
+extern "C" CUresult CUDAAPI cuDevicePrimaryCtxReset(CUdevice device);
+extern "C" CUresult CUDAAPI cuDevicePrimaryCtxReset_v2(CUdevice device);
+extern "C" CUresult CUDAAPI cuDevicePrimaryCtxRelease(CUdevice device);
+extern "C" CUresult CUDAAPI cuDevicePrimaryCtxRelease_v2(CUdevice device);
 extern "C" CUresult CUDAAPI cuMemAllocAsync(CUdeviceptr* device_pointer, std::size_t memory_bytes,
                                             CUstream stream);
 extern "C" CUresult CUDAAPI cuMemAllocAsync_ptsz(CUdeviceptr* device_pointer,
@@ -245,6 +360,73 @@ extern "C" CUresult CUDAAPI cuStreamGetDevice_ptsz(CUstream stream, CUdevice* de
 extern "C" CUresult CUDAAPI cuStreamGetCtx(CUstream stream, CUcontext* context);
 extern "C" CUresult CUDAAPI cuStreamGetCtx_ptsz(CUstream stream, CUcontext* context);
 extern "C" CUresult CUDAAPI cuStreamQuery(CUstream stream);
+extern "C" CUresult CUDAAPI cuEventCreate(CUevent* event, unsigned int flags);
+extern "C" CUresult CUDAAPI cuEventRecord(CUevent event, CUstream stream);
+extern "C" CUresult CUDAAPI cuEventQuery(CUevent event);
+extern "C" CUresult CUDAAPI cuEventDestroy_v2(CUevent event);
+extern "C" CUresult CUDAAPI cuEventRecord_ptsz(CUevent event, CUstream stream);
+extern "C" CUresult CUDAAPI cuEventRecordWithFlags(CUevent event, CUstream stream,
+                                                   unsigned int flags);
+extern "C" CUresult CUDAAPI cuEventRecordWithFlags_ptsz(CUevent event, CUstream stream,
+                                                        unsigned int flags);
+extern "C" CUresult CUDAAPI cuEventSynchronize(CUevent event);
+extern "C" CUresult CUDAAPI cuEventElapsedTime(float* milliseconds, CUevent start, CUevent end);
+extern "C" CUresult CUDAAPI cuStreamWaitEvent(CUstream stream, CUevent event, unsigned int flags);
+extern "C" CUresult CUDAAPI cuStreamWaitEvent_ptsz(CUstream stream, CUevent event,
+                                                   unsigned int flags);
+extern "C" CUresult CUDAAPI cuEventDestroy(CUevent event);
+extern "C" cudaError_t CUDARTAPI cudaEventCreate(cudaEvent_t* event);
+extern "C" cudaError_t CUDARTAPI cudaMemcpy(void* destination, const void* source,
+                                            std::size_t memory_bytes, cudaMemcpyKind kind);
+extern "C" cudaError_t CUDARTAPI cudaMemcpy_ptds(void* destination, const void* source,
+                                                 std::size_t memory_bytes, cudaMemcpyKind kind);
+extern "C" cudaError_t CUDARTAPI cudaMemcpyAsync(void* destination, const void* source,
+                                                 std::size_t memory_bytes, cudaMemcpyKind kind,
+                                                 cudaStream_t stream);
+extern "C" cudaError_t CUDARTAPI cudaMemcpyAsync_ptsz(void* destination, const void* source,
+                                                      std::size_t memory_bytes, cudaMemcpyKind kind,
+                                                      cudaStream_t stream);
+extern "C" cudaError_t CUDARTAPI cudaMemset(void* pointer, int value, std::size_t memory_bytes);
+extern "C" cudaError_t CUDARTAPI cudaMemset_ptds(void* pointer, int value,
+                                                 std::size_t memory_bytes);
+extern "C" cudaError_t CUDARTAPI cudaMemsetAsync(void* pointer, int value, std::size_t memory_bytes,
+                                                 cudaStream_t stream);
+extern "C" cudaError_t CUDARTAPI cudaMemsetAsync_ptsz(void* pointer, int value,
+                                                      std::size_t memory_bytes,
+                                                      cudaStream_t stream);
+extern "C" cudaError_t CUDARTAPI cudaMallocHost(void** pointer, std::size_t memory_bytes);
+extern "C" cudaError_t CUDARTAPI cudaHostAlloc(void** pointer, std::size_t memory_bytes,
+                                               unsigned int flags);
+extern "C" cudaError_t CUDARTAPI cudaFreeHost(void* pointer);
+extern "C" cudaError_t CUDARTAPI cudaHostRegister(void* pointer, std::size_t memory_bytes,
+                                                  unsigned int flags);
+extern "C" cudaError_t CUDARTAPI cudaHostUnregister(void* pointer);
+extern "C" cudaError_t CUDARTAPI cudaHostGetDevicePointer(void** device_pointer, void* host_pointer,
+                                                          unsigned int flags);
+extern "C" cudaError_t CUDARTAPI cudaStreamCreate(cudaStream_t* stream);
+extern "C" cudaError_t CUDARTAPI cudaStreamCreateWithFlags(cudaStream_t* stream,
+                                                           unsigned int flags);
+extern "C" cudaError_t CUDARTAPI cudaStreamCreateWithPriority(cudaStream_t* stream,
+                                                              unsigned int flags, int priority);
+extern "C" cudaError_t CUDARTAPI cudaStreamGetFlags(cudaStream_t stream, unsigned int* flags);
+extern "C" cudaError_t CUDARTAPI cudaStreamGetPriority(cudaStream_t stream, int* priority);
+extern "C" cudaError_t CUDARTAPI cudaEventCreateWithFlags(cudaEvent_t* event, unsigned int flags);
+extern "C" cudaError_t CUDARTAPI cudaEventRecord(cudaEvent_t event, cudaStream_t stream);
+extern "C" cudaError_t CUDARTAPI cudaEventRecord_ptsz(cudaEvent_t event, cudaStream_t stream);
+extern "C" cudaError_t CUDARTAPI cudaEventRecordWithFlags(cudaEvent_t event, cudaStream_t stream,
+                                                          unsigned int flags);
+extern "C" cudaError_t CUDARTAPI cudaEventRecordWithFlags_ptsz(cudaEvent_t event,
+                                                               cudaStream_t stream,
+                                                               unsigned int flags);
+extern "C" cudaError_t CUDARTAPI cudaEventQuery(cudaEvent_t event);
+extern "C" cudaError_t CUDARTAPI cudaEventSynchronize(cudaEvent_t event);
+extern "C" cudaError_t CUDARTAPI cudaEventDestroy(cudaEvent_t event);
+extern "C" cudaError_t CUDARTAPI cudaEventElapsedTime(float* milliseconds, cudaEvent_t start,
+                                                      cudaEvent_t end);
+extern "C" cudaError_t CUDARTAPI cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event,
+                                                     unsigned int flags);
+extern "C" cudaError_t CUDARTAPI cudaStreamWaitEvent_ptsz(cudaStream_t stream, cudaEvent_t event,
+                                                          unsigned int flags);
 extern "C" CUresult CUDAAPI cuStreamQuery_ptsz(CUstream stream);
 extern "C" CUresult CUDAAPI cuStreamSynchronize(CUstream stream);
 extern "C" CUresult CUDAAPI cuStreamSynchronize_ptsz(CUstream stream);
@@ -274,6 +456,8 @@ extern "C" cudaError_t CUDARTAPI cudaLaunchKernel_ptsz(const void* function, dim
 extern "C" cudaError_t CUDARTAPI cudaGraphLaunch(cudaGraphExec_t graph_exec, cudaStream_t stream);
 extern "C" cudaError_t CUDARTAPI cudaGraphLaunch_ptsz(cudaGraphExec_t graph_exec,
                                                       cudaStream_t stream);
+extern "C" cudaError_t CUDARTAPI cudaStreamBeginCapture_ptsz(cudaStream_t, cudaStreamCaptureMode);
+extern "C" cudaError_t CUDARTAPI cudaStreamEndCapture_ptsz(cudaStream_t, cudaGraph_t*);
 // NOLINTBEGIN(bugprone-reserved-identifier, readability-identifier-naming): preserve CUDA compiler
 // ABI names.
 extern "C" cudaError_t CUDARTAPI __cudaLaunchKernel(cudaKernel_t kernel, dim3 grid_dim,
@@ -420,13 +604,111 @@ struct InterceptorSymbol {
 };
 
 const auto kInterceptorSymbols = std::to_array<InterceptorSymbol>({
+    {"cublasLtCreate", reinterpret_cast<void*>(&cublasLtCreate)},
+    {"cublasLtDestroy", reinterpret_cast<void*>(&cublasLtDestroy)},
+    {"cublasLtMatmul", reinterpret_cast<void*>(&cublasLtMatmul)},
+    {"cublasSgemm_v2", reinterpret_cast<void*>(&cublasSgemm_v2)},
+    {"cublasCreate_v2", reinterpret_cast<void*>(&cublasCreate_v2)},
+    {"cublasDestroy_v2", reinterpret_cast<void*>(&cublasDestroy_v2)},
+    {"cuMemcpyHtoDAsync_v2", reinterpret_cast<void*>(&cuMemcpyHtoDAsync_v2)},
+    {"cuMemcpy", reinterpret_cast<void*>(&cuMemcpy)},
+    {"cuMemcpy_ptds", reinterpret_cast<void*>(&cuMemcpy_ptds)},
+    {"cuMemcpyAsync", reinterpret_cast<void*>(&cuMemcpyAsync)},
+    {"cuMemcpyAsync_ptsz", reinterpret_cast<void*>(&cuMemcpyAsync_ptsz)},
+    {"cuMemcpyHtoDAsync", reinterpret_cast<void*>(&cuMemcpyHtoDAsync_v2)},
+    {"cuMemcpyHtoDAsync_v2_ptsz", reinterpret_cast<void*>(&cuMemcpyHtoDAsync_v2_ptsz)},
+    {"cuMemcpyHtoDAsync_ptsz", reinterpret_cast<void*>(&cuMemcpyHtoDAsync_v2_ptsz)},
+    {"cuMemcpyHtoD_v2", reinterpret_cast<void*>(&cuMemcpyHtoD_v2)},
+    {"cuMemcpyHtoD", reinterpret_cast<void*>(&cuMemcpyHtoD_v2)},
+    {"cuMemcpyHtoD_v2_ptds", reinterpret_cast<void*>(&cuMemcpyHtoD_v2_ptds)},
+    {"cuMemcpyHtoD_ptds", reinterpret_cast<void*>(&cuMemcpyHtoD_v2_ptds)},
+    {"cuMemcpyDtoHAsync_v2", reinterpret_cast<void*>(&cuMemcpyDtoHAsync_v2)},
+    {"cuMemcpyDtoHAsync", reinterpret_cast<void*>(&cuMemcpyDtoHAsync_v2)},
+    {"cuMemcpyDtoHAsync_v2_ptsz", reinterpret_cast<void*>(&cuMemcpyDtoHAsync_v2_ptsz)},
+    {"cuMemcpyDtoHAsync_ptsz", reinterpret_cast<void*>(&cuMemcpyDtoHAsync_v2_ptsz)},
+    {"cuMemcpyDtoH_v2", reinterpret_cast<void*>(&cuMemcpyDtoH_v2)},
+    {"cuMemcpyDtoH", reinterpret_cast<void*>(&cuMemcpyDtoH_v2)},
+    {"cuMemcpyDtoH_v2_ptds", reinterpret_cast<void*>(&cuMemcpyDtoH_v2_ptds)},
+    {"cuMemcpyDtoH_ptds", reinterpret_cast<void*>(&cuMemcpyDtoH_v2_ptds)},
+    {"cuMemcpyDtoDAsync_v2", reinterpret_cast<void*>(&cuMemcpyDtoDAsync_v2)},
+    {"cuMemcpyDtoDAsync", reinterpret_cast<void*>(&cuMemcpyDtoDAsync_v2)},
+    {"cuMemcpyDtoDAsync_v2_ptsz", reinterpret_cast<void*>(&cuMemcpyDtoDAsync_v2_ptsz)},
+    {"cuMemcpyDtoDAsync_ptsz", reinterpret_cast<void*>(&cuMemcpyDtoDAsync_v2_ptsz)},
+    {"cuMemcpyDtoD_v2", reinterpret_cast<void*>(&cuMemcpyDtoD_v2)},
+    {"cuMemcpyDtoD", reinterpret_cast<void*>(&cuMemcpyDtoD_v2)},
+    {"cuMemcpyDtoD_v2_ptds", reinterpret_cast<void*>(&cuMemcpyDtoD_v2_ptds)},
+    {"cuMemcpyDtoD_ptds", reinterpret_cast<void*>(&cuMemcpyDtoD_v2_ptds)},
+    {"cuMemHostAlloc", reinterpret_cast<void*>(&cuMemHostAlloc)},
+    {"cuMemAllocHost_v2", reinterpret_cast<void*>(&cuMemAllocHost_v2)},
+    {"cuMemAllocHost", reinterpret_cast<void*>(&cuMemAllocHost_v2)},
+    {"cuMemFreeHost", reinterpret_cast<void*>(&cuMemFreeHost)},
+    {"cuMemHostRegister_v2", reinterpret_cast<void*>(&cuMemHostRegister_v2)},
+    {"cuMemHostRegister", reinterpret_cast<void*>(&cuMemHostRegister_v2)},
+    {"cuMemHostUnregister", reinterpret_cast<void*>(&cuMemHostUnregister)},
+    {"cuMemHostGetDevicePointer_v2", reinterpret_cast<void*>(&cuMemHostGetDevicePointer_v2)},
+    {"cuMemHostGetDevicePointer", reinterpret_cast<void*>(&cuMemHostGetDevicePointer_v2)},
+    {"cuStreamCreate", reinterpret_cast<void*>(&cuStreamCreate)},
+    {"cuStreamCreateWithPriority", reinterpret_cast<void*>(&cuStreamCreateWithPriority)},
+    {"cuStreamGetFlags", reinterpret_cast<void*>(&cuStreamGetFlags)},
+    {"cuStreamGetPriority", reinterpret_cast<void*>(&cuStreamGetPriority)},
+    {"cuMemsetD8_v2", reinterpret_cast<void*>(&cuMemsetD8_v2)},
+    {"cuMemsetD8", reinterpret_cast<void*>(&cuMemsetD8_v2)},
+    {"cuMemsetD8_v2_ptds", reinterpret_cast<void*>(&cuMemsetD8_v2_ptds)},
+    {"cuMemsetD8_ptds", reinterpret_cast<void*>(&cuMemsetD8_v2_ptds)},
+    {"cuMemsetD8Async", reinterpret_cast<void*>(&cuMemsetD8Async)},
+    {"cuMemsetD8Async_ptsz", reinterpret_cast<void*>(&cuMemsetD8Async_ptsz)},
+    {"cuMemsetD16_v2", reinterpret_cast<void*>(&cuMemsetD16_v2)},
+    {"cuMemsetD16", reinterpret_cast<void*>(&cuMemsetD16_v2)},
+    {"cuMemsetD16_v2_ptds", reinterpret_cast<void*>(&cuMemsetD16_v2_ptds)},
+    {"cuMemsetD16_ptds", reinterpret_cast<void*>(&cuMemsetD16_v2_ptds)},
+    {"cuMemsetD16Async", reinterpret_cast<void*>(&cuMemsetD16Async)},
+    {"cuMemsetD16Async_ptsz", reinterpret_cast<void*>(&cuMemsetD16Async_ptsz)},
+    {"cuMemsetD32_v2", reinterpret_cast<void*>(&cuMemsetD32_v2)},
+    {"cuMemsetD32", reinterpret_cast<void*>(&cuMemsetD32_v2)},
+    {"cuMemsetD32_v2_ptds", reinterpret_cast<void*>(&cuMemsetD32_v2_ptds)},
+    {"cuMemsetD32_ptds", reinterpret_cast<void*>(&cuMemsetD32_v2_ptds)},
+    {"cuMemsetD32Async", reinterpret_cast<void*>(&cuMemsetD32Async)},
+    {"cuMemsetD32Async_ptsz", reinterpret_cast<void*>(&cuMemsetD32Async_ptsz)},
+    {"cuStreamBeginCapture", reinterpret_cast<void*>(&cuStreamBeginCapture)},
+    {"cuStreamBeginCapture_v2", reinterpret_cast<void*>(&cuStreamBeginCapture_v2)},
+    {"cuStreamBeginCapture_ptsz", reinterpret_cast<void*>(&cuStreamBeginCapture_ptsz)},
+    {"cuStreamBeginCapture_v2_ptsz", reinterpret_cast<void*>(&cuStreamBeginCapture_v2_ptsz)},
+    {"cuStreamEndCapture", reinterpret_cast<void*>(&cuStreamEndCapture)},
+    {"cuStreamEndCapture_ptsz", reinterpret_cast<void*>(&cuStreamEndCapture_ptsz)},
     {"cuInit", reinterpret_cast<void*>(&cuInit)},
+    {"cuModuleLoadData", reinterpret_cast<void*>(&cuModuleLoadData)},
+    {"cuModuleLoadDataEx", reinterpret_cast<void*>(&cuModuleLoadDataEx)},
+    {"cuModuleGetFunction", reinterpret_cast<void*>(&cuModuleGetFunction)},
+    {"cuLibraryLoadData", reinterpret_cast<void*>(&cuLibraryLoadData)},
+    {"cuLibraryLoadFromFile", reinterpret_cast<void*>(&cuLibraryLoadFromFile)},
+    {"cuLibraryGetModule", reinterpret_cast<void*>(&cuLibraryGetModule)},
+    {"cuLibraryUnload", reinterpret_cast<void*>(&cuLibraryUnload)},
+    {"cuModuleUnload", reinterpret_cast<void*>(&cuModuleUnload)},
     {"cuLaunchKernel", reinterpret_cast<void*>(&cuLaunchKernel)},
     {"cuLaunchKernel_ptsz", reinterpret_cast<void*>(&cuLaunchKernel_ptsz)},
     {"cuLaunchKernelEx", reinterpret_cast<void*>(&cuLaunchKernelEx)},
     {"cuLaunchKernelEx_ptsz", reinterpret_cast<void*>(&cuLaunchKernelEx_ptsz)},
     {"cuGraphLaunch", reinterpret_cast<void*>(&cuGraphLaunch)},
     {"cuGraphLaunch_ptsz", reinterpret_cast<void*>(&cuGraphLaunch_ptsz)},
+    {"cuGraphInstantiate", reinterpret_cast<void*>(&cuGraphInstantiate)},
+    {"cuGraphInstantiate_v2", reinterpret_cast<void*>(&cuGraphInstantiate_v2)},
+    {"cuGraphInstantiateWithFlags", reinterpret_cast<void*>(&cuGraphInstantiateWithFlags)},
+    {"cuGraphInstantiateWithParams", reinterpret_cast<void*>(&cuGraphInstantiateWithParams)},
+    {"cuGraphInstantiateWithParams_ptsz",
+     reinterpret_cast<void*>(&cuGraphInstantiateWithParams_ptsz)},
+    {"cuGraphExecDestroy", reinterpret_cast<void*>(&cuGraphExecDestroy)},
+    {"cuGraphExecEventRecordNodeSetEvent",
+     reinterpret_cast<void*>(&cuGraphExecEventRecordNodeSetEvent)},
+    {"cuGraphExecEventWaitNodeSetEvent",
+     reinterpret_cast<void*>(&cuGraphExecEventWaitNodeSetEvent)},
+    {"cuGraphExecChildGraphNodeSetParams",
+     reinterpret_cast<void*>(&cuGraphExecChildGraphNodeSetParams)},
+    {"cuGraphNodeSetEnabled", reinterpret_cast<void*>(&cuGraphNodeSetEnabled)},
+#if CUDA_VERSION >= 12020
+    {"cuGraphExecNodeSetParams", reinterpret_cast<void*>(&cuGraphExecNodeSetParams)},
+#endif
+    {"cuGraphExecUpdate", reinterpret_cast<void*>(&cuGraphExecUpdate)},
+    {"cuGraphExecUpdate_v2", reinterpret_cast<void*>(&cuGraphExecUpdate_v2)},
     {"cuMemAlloc", reinterpret_cast<void*>(&cuMemAlloc_v2)},
     {"cuMemAlloc_v2", reinterpret_cast<void*>(&cuMemAlloc_v2)},
     {"cuMemAllocManaged", reinterpret_cast<void*>(&cuMemAllocManaged)},
@@ -440,8 +722,12 @@ const auto kInterceptorSymbols = std::to_array<InterceptorSymbol>({
     {"cuDeviceTotalMem_v2", reinterpret_cast<void*>(&cuDeviceTotalMem_v2)},
     {"cuCtxGetCurrent", reinterpret_cast<void*>(&cuCtxGetCurrent)},
     {"cuCtxGetDevice", reinterpret_cast<void*>(&cuCtxGetDevice)},
-    {"cuCtxDestroy", reinterpret_cast<void*>(&cuCtxDestroy_v2)},
+    {"cuCtxDestroy", reinterpret_cast<void*>(&cuCtxDestroy)},
     {"cuCtxDestroy_v2", reinterpret_cast<void*>(&cuCtxDestroy_v2)},
+    {"cuDevicePrimaryCtxReset", reinterpret_cast<void*>(&cuDevicePrimaryCtxReset)},
+    {"cuDevicePrimaryCtxReset_v2", reinterpret_cast<void*>(&cuDevicePrimaryCtxReset_v2)},
+    {"cuDevicePrimaryCtxRelease", reinterpret_cast<void*>(&cuDevicePrimaryCtxRelease)},
+    {"cuDevicePrimaryCtxRelease_v2", reinterpret_cast<void*>(&cuDevicePrimaryCtxRelease_v2)},
     {"cuMemAllocAsync", reinterpret_cast<void*>(&cuMemAllocAsync)},
     {"cuMemAllocAsync_ptsz", reinterpret_cast<void*>(&cuMemAllocAsync_ptsz)},
     {"cuMemAllocFromPoolAsync", reinterpret_cast<void*>(&cuMemAllocFromPoolAsync)},
@@ -519,6 +805,49 @@ const auto kInterceptorSymbols = std::to_array<InterceptorSymbol>({
     {"cuStreamGetCtx", reinterpret_cast<void*>(&cuStreamGetCtx)},
     {"cuStreamGetCtx_ptsz", reinterpret_cast<void*>(&cuStreamGetCtx_ptsz)},
     {"cuStreamQuery", reinterpret_cast<void*>(&cuStreamQuery)},
+    {"cuEventCreate", reinterpret_cast<void*>(&cuEventCreate)},
+    {"cuEventRecord", reinterpret_cast<void*>(&cuEventRecord)},
+    {"cuEventQuery", reinterpret_cast<void*>(&cuEventQuery)},
+    {"cuEventDestroy_v2", reinterpret_cast<void*>(&cuEventDestroy_v2)},
+    {"cuEventRecord_ptsz", reinterpret_cast<void*>(&cuEventRecord_ptsz)},
+    {"cuEventRecordWithFlags", reinterpret_cast<void*>(&cuEventRecordWithFlags)},
+    {"cuEventRecordWithFlags_ptsz", reinterpret_cast<void*>(&cuEventRecordWithFlags_ptsz)},
+    {"cuEventSynchronize", reinterpret_cast<void*>(&cuEventSynchronize)},
+    {"cuEventElapsedTime", reinterpret_cast<void*>(&cuEventElapsedTime)},
+    {"cuStreamWaitEvent", reinterpret_cast<void*>(&cuStreamWaitEvent)},
+    {"cuStreamWaitEvent_ptsz", reinterpret_cast<void*>(&cuStreamWaitEvent_ptsz)},
+    {"cuEventDestroy", reinterpret_cast<void*>(&cuEventDestroy)},
+    {"cudaEventCreate", reinterpret_cast<void*>(&cudaEventCreate)},
+    {"cudaMemcpy", reinterpret_cast<void*>(&cudaMemcpy)},
+    {"cudaMemcpy_ptds", reinterpret_cast<void*>(&cudaMemcpy_ptds)},
+    {"cudaMemcpyAsync", reinterpret_cast<void*>(&cudaMemcpyAsync)},
+    {"cudaMemcpyAsync_ptsz", reinterpret_cast<void*>(&cudaMemcpyAsync_ptsz)},
+    {"cudaMemset", reinterpret_cast<void*>(&cudaMemset)},
+    {"cudaMemset_ptds", reinterpret_cast<void*>(&cudaMemset_ptds)},
+    {"cudaMemsetAsync", reinterpret_cast<void*>(&cudaMemsetAsync)},
+    {"cudaMemsetAsync_ptsz", reinterpret_cast<void*>(&cudaMemsetAsync_ptsz)},
+    {"cudaMallocHost", reinterpret_cast<void*>(&cudaMallocHost)},
+    {"cudaHostAlloc", reinterpret_cast<void*>(&cudaHostAlloc)},
+    {"cudaFreeHost", reinterpret_cast<void*>(&cudaFreeHost)},
+    {"cudaHostRegister", reinterpret_cast<void*>(&cudaHostRegister)},
+    {"cudaHostUnregister", reinterpret_cast<void*>(&cudaHostUnregister)},
+    {"cudaHostGetDevicePointer", reinterpret_cast<void*>(&cudaHostGetDevicePointer)},
+    {"cudaStreamCreate", reinterpret_cast<void*>(&cudaStreamCreate)},
+    {"cudaStreamCreateWithFlags", reinterpret_cast<void*>(&cudaStreamCreateWithFlags)},
+    {"cudaStreamCreateWithPriority", reinterpret_cast<void*>(&cudaStreamCreateWithPriority)},
+    {"cudaStreamGetFlags", reinterpret_cast<void*>(&cudaStreamGetFlags)},
+    {"cudaStreamGetPriority", reinterpret_cast<void*>(&cudaStreamGetPriority)},
+    {"cudaEventCreateWithFlags", reinterpret_cast<void*>(&cudaEventCreateWithFlags)},
+    {"cudaEventRecord", reinterpret_cast<void*>(&cudaEventRecord)},
+    {"cudaEventRecord_ptsz", reinterpret_cast<void*>(&cudaEventRecord_ptsz)},
+    {"cudaEventRecordWithFlags", reinterpret_cast<void*>(&cudaEventRecordWithFlags)},
+    {"cudaEventRecordWithFlags_ptsz", reinterpret_cast<void*>(&cudaEventRecordWithFlags_ptsz)},
+    {"cudaEventQuery", reinterpret_cast<void*>(&cudaEventQuery)},
+    {"cudaEventSynchronize", reinterpret_cast<void*>(&cudaEventSynchronize)},
+    {"cudaEventDestroy", reinterpret_cast<void*>(&cudaEventDestroy)},
+    {"cudaEventElapsedTime", reinterpret_cast<void*>(&cudaEventElapsedTime)},
+    {"cudaStreamWaitEvent", reinterpret_cast<void*>(&cudaStreamWaitEvent)},
+    {"cudaStreamWaitEvent_ptsz", reinterpret_cast<void*>(&cudaStreamWaitEvent_ptsz)},
     {"cuStreamQuery_ptsz", reinterpret_cast<void*>(&cuStreamQuery_ptsz)},
     {"cuStreamSynchronize", reinterpret_cast<void*>(&cuStreamSynchronize)},
     {"cuStreamSynchronize_ptsz", reinterpret_cast<void*>(&cuStreamSynchronize_ptsz)},
@@ -537,6 +866,28 @@ const auto kInterceptorSymbols = std::to_array<InterceptorSymbol>({
     {"cudaLaunchKernelExC_ptsz", reinterpret_cast<void*>(&cudaLaunchKernelExC_ptsz)},
     {"cudaGraphLaunch", reinterpret_cast<void*>(&cudaGraphLaunch)},
     {"cudaGraphLaunch_ptsz", reinterpret_cast<void*>(&cudaGraphLaunch_ptsz)},
+    {"cudaStreamBeginCapture", reinterpret_cast<void*>(&cudaStreamBeginCapture)},
+    {"cudaStreamBeginCapture_ptsz", reinterpret_cast<void*>(&cudaStreamBeginCapture_ptsz)},
+    {"cudaStreamEndCapture", reinterpret_cast<void*>(&cudaStreamEndCapture)},
+    {"cudaStreamEndCapture_ptsz", reinterpret_cast<void*>(&cudaStreamEndCapture_ptsz)},
+    {"cudaGraphInstantiateWithFlags", reinterpret_cast<void*>(&cudaGraphInstantiateWithFlags)},
+#if CUDART_VERSION >= 12000
+    {"cudaGraphInstantiateWithParams", reinterpret_cast<void*>(&cudaGraphInstantiateWithParams)},
+    {"cudaGraphInstantiateWithParams_ptsz",
+     reinterpret_cast<void*>(&cudaGraphInstantiateWithParams_ptsz)},
+#endif
+    {"cudaGraphExecDestroy", reinterpret_cast<void*>(&cudaGraphExecDestroy)},
+    {"cudaGraphExecUpdate", reinterpret_cast<void*>(&cudaGraphExecUpdate)},
+    {"cudaGraphExecChildGraphNodeSetParams",
+     reinterpret_cast<void*>(&cudaGraphExecChildGraphNodeSetParams)},
+    {"cudaGraphExecEventRecordNodeSetEvent",
+     reinterpret_cast<void*>(&cudaGraphExecEventRecordNodeSetEvent)},
+    {"cudaGraphExecEventWaitNodeSetEvent",
+     reinterpret_cast<void*>(&cudaGraphExecEventWaitNodeSetEvent)},
+    {"cudaGraphNodeSetEnabled", reinterpret_cast<void*>(&cudaGraphNodeSetEnabled)},
+#if CUDART_VERSION >= 12020
+    {"cudaGraphExecNodeSetParams", reinterpret_cast<void*>(&cudaGraphExecNodeSetParams)},
+#endif
     {"__cudaLaunchKernel", reinterpret_cast<void*>(&__cudaLaunchKernel)},
     {"__cudaLaunchKernel_ptsz", reinterpret_cast<void*>(&__cudaLaunchKernel_ptsz)},
     {"cudaMallocAsync", reinterpret_cast<void*>(&cudaMallocAsync)},
@@ -573,6 +924,7 @@ const auto kInterceptorSymbols = std::to_array<InterceptorSymbol>({
     {"cudaFreeAsync_ptsz", reinterpret_cast<void*>(&cudaFreeAsync_ptsz)},
     {"cudaMemGetInfo", reinterpret_cast<void*>(&cudaMemGetInfo)},
     {"cudaDeviceSynchronize", reinterpret_cast<void*>(&cudaDeviceSynchronize)},
+    {"cudaDeviceReset", reinterpret_cast<void*>(&cudaDeviceReset)},
     {"cudaStreamSynchronize", reinterpret_cast<void*>(&cudaStreamSynchronize)},
     {"cudaStreamSynchronize_ptsz", reinterpret_cast<void*>(&cudaStreamSynchronize_ptsz)},
     {"cudaStreamQuery", reinterpret_cast<void*>(&cudaStreamQuery)},
@@ -621,7 +973,8 @@ void* find_interceptor_symbol(const char* name, bool per_thread_default_stream) 
     if (per_thread_default_stream) {
         for (const InterceptorSymbol& symbol : kInterceptorSymbols) {
             if (symbol.name.size() == requested_name.size() + 5 &&
-                symbol.name.starts_with(requested_name) && symbol.name.ends_with("_ptsz")) {
+                symbol.name.starts_with(requested_name) &&
+                (symbol.name.ends_with("_ptsz") || symbol.name.ends_with("_ptds"))) {
                 return symbol.wrapper;
             }
         }

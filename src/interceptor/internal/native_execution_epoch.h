@@ -3,6 +3,7 @@
 #include "glimmer/control/task_admission.h"
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -57,10 +58,10 @@ class NativeEpochFence final {
 
 // Preserve the existing enum representation used by the execution components.
 // NOLINTBEGIN(performance-enum-size)
-enum class NativeEpochCallOutcome { kSuccess, kRejected, kUncertain };
-enum class NativeEpochStopReason { kRequested, kFailure };
-enum class NativeEpochDisposition { kComplete, kFail };
-enum class NativeEpochPhase { kOpen, kStopping, kReporting, kRetained, kComplete };
+enum class NativeEpochCallOutcome : std::uint8_t { kSuccess, kRejected, kUncertain };
+enum class NativeEpochStopReason : std::uint8_t { kRequested, kFailure };
+enum class NativeEpochDisposition : std::uint8_t { kComplete, kFail };
+enum class NativeEpochPhase : std::uint8_t { kOpen, kStopping, kReporting, kRetained, kComplete };
 // NOLINTEND(performance-enum-size)
 
 class NativeEpochTerminal final {
@@ -142,7 +143,7 @@ class NativeExecutionEpoch final {
    private:
     // Preserve the existing representation of the epoch state.
     // NOLINTNEXTLINE(performance-enum-size)
-    enum class FenceState { kFree, kPrepared, kRecorded, kFailed };
+    enum class FenceState : std::uint8_t { kFree, kPrepared, kRecorded, kFailed };
     struct Prefix {
         NativeEpochFence fence;
         FenceState state{FenceState::kFree};

@@ -17,6 +17,10 @@ void ExecutionPriorityIdleWindow::note_issue(std::uint32_t priority) noexcept {
     idle_since_ns_.reset();
 }
 
+void ExecutionPriorityIdleWindow::note_completed_cleanup(std::uint32_t priority) noexcept {
+    note_issue(priority);
+}
+
 std::uint64_t ExecutionPriorityIdleWindow::remaining_ns(std::uint64_t now_ns) const noexcept {
     if (!idle_since_ns_) return 0;
     if (now_ns < *idle_since_ns_) return config_.duration_ns;

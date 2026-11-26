@@ -1,6 +1,7 @@
 """Standard-library regression tests for optimized uncontended measurements."""
 
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import csv
 import io
 import json
@@ -8,6 +9,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -19,10 +21,111 @@ from pytorch_smoke import validate_memory_view
 from run_overhead_baseline import (MODES, REPOSITORY, ROLES, VERSION, aggregate, check_remote_stats,
                                    collect_results, main, mode_settings, optimized_build, parse_args,
                                    remote_service, stop_service, workload_command)
-from run_slo_validation import benchmark_environment
+import run_slo_validation as slo
+from run_slo_validation import benchmark_environment, prepare_output
 
 
 class OverheadBaselineTest(unittest.TestCase):
+    def test_collection_directory_policy_and_concurrent_claim(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            project = root / "project"
+            project.mkdir()
+            resolve = slo.artifact_paths.resolve_artifact_root
+            with mock.patch.object(slo.artifact_paths, "resolve_artifact_root",
+                                   side_effect=lambda name, **options: resolve(
+                                       name, **{**options, "project_root": project})):
+                attempts = [prepare_output("slo", None), prepare_output("slo", None)]
+                self.assertNotEqual(*attempts)
+                for attempt in attempts:
+                    self.assertTrue(attempt.is_relative_to(project / "artifacts/runs/slo"))
+                    self.assertTrue((attempt / "run.json").is_file())
+                for rejected in (project / "src/results", project / "build/results"):
+                    with self.subTest(path=rejected), self.assertRaises(ValueError):
+                        prepare_output("slo", rejected)
+                    self.assertFalse(rejected.exists())
+                dangling = root / "dangling"
+                dangling.symlink_to(root / "missing", target_is_directory=True)
+                with self.assertRaisesRegex(ValueError, "symlink"):
+                    prepare_output("slo", dangling)
+                self.assertFalse((root / "missing").exists())
+
+                existing = root / "existing"
+                existing.mkdir()
+                (existing / "keep").write_text("original")
+                with self.assertRaisesRegex(ValueError, "empty"):
+                    prepare_output("slo", existing)
+                self.assertEqual((existing / "keep").read_text(), "original")
+
+                shared = root / "shared"
+                shared.mkdir()
+                barrier = threading.Barrier(2)
+                per_thread = threading.local()
+                original_iterdir = pathlib.Path.iterdir
+
+                def synchronized_iterdir(path):
+                    entries = list(original_iterdir(path))
+                    if path == shared and not getattr(per_thread, "scanned", False):
+                        per_thread.scanned = True
+                        barrier.wait(timeout=5)
+                    return iter(entries)
+
+                def claim(namespace):
+                    try:
+                        return prepare_output(namespace, shared)
+                    except ValueError:
+                        return None
+
+                with mock.patch.object(pathlib.Path, "iterdir", synchronized_iterdir), \
+                        ThreadPoolExecutor(max_workers=2) as pool:
+                    results = list(pool.map(claim, ("slo", "overhead")))
+                self.assertEqual(results.count(shared), 1)
+                self.assertEqual(results.count(None), 1)
+                self.assertEqual([path.name for path in shared.iterdir()], [".glimmer-collection"])
+
+    def test_analysis_does_not_claim_or_restrict_historical_directories(self):
+        historical = REPOSITORY / "examples/framework_workloads/pytorch_smoke/output/old"
+        with mock.patch.object(sys, "argv", ["slo", "--analyze-only", str(historical)]), \
+                mock.patch.object(slo, "prepare_output", side_effect=AssertionError("claimed")), \
+                mock.patch.object(slo, "write_aggregate") as analyze:
+            self.assertEqual(slo.main(), 0)
+            analyze.assert_called_once_with(historical)
+        with mock.patch("run_overhead_baseline.prepare_output", side_effect=AssertionError("claimed")), \
+                mock.patch("run_overhead_baseline.collect_results") as analyze:
+            self.assertEqual(main(["--analyze-only", str(historical)]), 0)
+            analyze.assert_called_once_with(historical)
+
+    def test_default_collection_failures_retain_fresh_attempts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project = pathlib.Path(temporary) / "project"
+            project.mkdir()
+            build = project / "fake-build"
+            for name in ("lib/libglimmer_cuda_interceptor.so", "bin/glimmer_control_service"):
+                path = build / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture")
+            resolve = slo.artifact_paths.resolve_artifact_root
+            with mock.patch.object(slo.artifact_paths, "resolve_artifact_root",
+                                   side_effect=lambda name, **options: resolve(
+                                       name, **{**options, "project_root": project})), \
+                    contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                with mock.patch.object(sys, "argv", ["slo", "--build-dir", str(build),
+                                                      "--inference-target-ms", "1"]), \
+                        mock.patch.object(slo, "run_bounded", side_effect=RuntimeError("fixture stop")):
+                    self.assertEqual(slo.main(), 1)
+                with mock.patch("run_overhead_baseline.optimized_build", return_value={}), \
+                        mock.patch("run_overhead_baseline.artifact_hashes", side_effect=OSError("fixture stop")):
+                    self.assertEqual(main([]), 1)
+            for namespace in ("pytorch-slo-validation", "pytorch-overhead-baseline"):
+                attempts = list((project / "artifacts/runs" / namespace).glob("attempt-*"))
+                self.assertEqual(len(attempts), 1)
+                self.assertTrue((attempts[0] / "run.json").is_file())
+                self.assertTrue((attempts[0] / "failure.json").is_file())
+            slo_attempt = next((project / "artifacts/runs/pytorch-slo-validation").glob("attempt-*"))
+            manifest = json.loads((slo_attempt / "manifest.json").read_text())
+            self.assertIn(str(REPOSITORY / "scripts/artifact_paths.py"), manifest["artifacts_sha256"])
+
+
     def args(self):
         return parse_args([])
 

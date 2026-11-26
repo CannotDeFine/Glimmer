@@ -12,6 +12,7 @@
 namespace glimmer::interceptor {
 
 namespace {
+void native_dispatch_owner_marker() noexcept {}
 
 thread_local bool g_is_inside_driver_call = false;
 thread_local bool g_is_inside_proc_address_dispatch = false;
@@ -123,7 +124,13 @@ void prime_cuda_driver_symbols(void* primary_handle) noexcept {
 }
 
 [[nodiscard]] void* open_cuda_driver() noexcept {
+#ifdef GLIMMER_SANITIZED_INTERCEPTOR
+    // ASan rejects DEEPBIND. Sanitizer fixtures load wrappers after startup;
+    // this path does not establish production preload-loader compatibility.
+    constexpr int k_flags = RTLD_NOW | RTLD_LOCAL;
+#else
     constexpr int k_flags = RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND;
+#endif
     void* primary_handle = dlopen("libcuda.so.1", k_flags);
     if (primary_handle == nullptr) {
         return nullptr;
@@ -148,6 +155,26 @@ void prime_cuda_driver_symbols(void* primary_handle) noexcept {
 
 bool is_inside_driver_call() noexcept {
     return g_is_inside_driver_call;
+}
+
+bool is_interceptor_driver_function(void* address) noexcept {
+    if (address == nullptr) {
+        return false;
+    }
+    Dl_info owner{};
+    Dl_info candidate{};
+    return dladdr(reinterpret_cast<void*>(&native_dispatch_owner_marker), &owner) != 0 &&
+           dladdr(address, &candidate) != 0 && owner.dli_fbase == candidate.dli_fbase;
+}
+
+bool enter_native_driver_scope() noexcept {
+    const bool previous = g_is_inside_driver_call;
+    g_is_inside_driver_call = true;
+    return previous;
+}
+
+void leave_native_driver_scope(bool previous_state) noexcept {
+    g_is_inside_driver_call = previous_state;
 }
 
 DlsymFunction resolve_real_dlsym() noexcept {
@@ -179,6 +206,20 @@ DriverDispatch::~DriverDispatch() {
 
 DriverDispatch::DriverDispatch(DriverFunctionTable functions) noexcept
     : init_(functions.init),
+      module_load_data_(functions.module_load_data),
+      library_load_data_(functions.library_load_data),
+      library_load_from_file_(functions.library_load_from_file),
+      library_get_kernel_(functions.library_get_kernel),
+      library_get_module_(functions.library_get_module),
+      kernel_get_function_(functions.kernel_get_function),
+      function_load_(functions.function_load),
+      function_get_module_(functions.function_get_module),
+      library_unload_(functions.library_unload),
+      module_load_data_ex_(functions.module_load_data_ex),
+      module_get_function_(functions.module_get_function),
+      module_unload_(functions.module_unload),
+      occupancy_(functions.occupancy),
+      device_get_attribute_(functions.device_get_attribute),
       launch_kernel_(functions.launch_kernel),
       launch_kernel_ptsz_(functions.launch_kernel_ptsz),
       launch_kernel_ex_(functions.launch_kernel_ex),
@@ -255,14 +296,31 @@ DriverDispatch::DriverDispatch(DriverFunctionTable functions) noexcept
       event_record_(functions.event_record),
       event_query_(functions.event_query),
       event_destroy_(functions.event_destroy),
+      event_record_ptsz_(functions.event_record_ptsz),
+      event_record_with_flags_(functions.event_record_with_flags),
+      event_record_with_flags_ptsz_(functions.event_record_with_flags_ptsz),
+      event_synchronize_(functions.event_synchronize),
+      event_elapsed_time_(functions.event_elapsed_time),
+      stream_wait_event_(functions.stream_wait_event),
+      stream_wait_event_ptsz_(functions.stream_wait_event_ptsz),
       context_get_current_(functions.context_get_current),
       context_get_device_(functions.context_get_device),
+      context_get_api_version_(functions.context_get_api_version),
+      primary_context_get_state_(functions.primary_context_get_state),
+      primary_context_retain_(functions.primary_context_retain),
+      primary_context_release_(functions.primary_context_release),
+      primary_context_release_legacy_(functions.primary_context_release_legacy),
+      primary_context_reset_(functions.primary_context_reset),
+      primary_context_reset_v2_(functions.primary_context_reset_v2),
       context_destroy_(functions.context_destroy),
+      context_destroy_legacy_(functions.context_destroy_legacy),
       stream_get_device_(functions.stream_get_device),
       stream_get_device_ptsz_(functions.stream_get_device_ptsz),
       stream_get_context_(functions.stream_get_context),
       stream_get_context_ptsz_(functions.stream_get_context_ptsz),
       stream_query_(functions.stream_query),
+      stream_capture_status_(functions.stream_capture_status),
+      stream_capture_status_ptsz_(functions.stream_capture_status_ptsz),
       stream_query_ptsz_(functions.stream_query_ptsz),
       stream_synchronize_(functions.stream_synchronize),
       stream_synchronize_ptsz_(functions.stream_synchronize_ptsz),
@@ -280,7 +338,8 @@ bool DriverDispatch::initialize() {
     // wrappers (notably cuGetProcAddress), creating recursion when the quota
     // path queries physical device capacity. DEEPBIND keeps the driver's own
     // entry points ahead of the preload scope while preserving our explicit
-    // wrapper calls at the application boundary.
+    // wrapper calls at the application boundary. Sanitizer-only builds omit
+    // that incompatible flag and are verified with controlled wrapper loading.
     // Resolve the driver's own relocations before exposing any entry point.
     // Lazy binding can defer an internal CUDA call until after the preload
     // scope is active and bind that call back to a Glimmer wrapper.
@@ -290,6 +349,30 @@ bool DriverDispatch::initialize() {
     }
 
     init_ = reinterpret_cast<InitFunction>(load_symbol("cuInit"));
+    module_load_data_ = reinterpret_cast<ModuleLoadDataFunction>(load_symbol("cuModuleLoadData"));
+    library_load_data_ =
+        reinterpret_cast<LibraryLoadDataFunction>(load_symbol("cuLibraryLoadData"));
+    library_load_from_file_ =
+        reinterpret_cast<LibraryLoadFromFileFunction>(load_symbol("cuLibraryLoadFromFile"));
+    library_get_kernel_ =
+        reinterpret_cast<LibraryGetKernelFunction>(load_symbol("cuLibraryGetKernel"));
+    library_get_module_ =
+        reinterpret_cast<LibraryGetModuleFunction>(load_symbol("cuLibraryGetModule"));
+    kernel_get_function_ =
+        reinterpret_cast<KernelGetFunctionFunction>(load_symbol("cuKernelGetFunction"));
+    function_load_ = reinterpret_cast<FunctionLoadFunction>(load_symbol("cuFuncLoad"));
+    function_get_module_ =
+        reinterpret_cast<FunctionGetModuleFunction>(load_symbol("cuFuncGetModule"));
+    library_unload_ = reinterpret_cast<LibraryUnloadFunction>(load_symbol("cuLibraryUnload"));
+    module_load_data_ex_ =
+        reinterpret_cast<ModuleLoadDataExFunction>(load_symbol("cuModuleLoadDataEx"));
+    module_get_function_ =
+        reinterpret_cast<ModuleGetFunctionFunction>(load_symbol("cuModuleGetFunction"));
+    module_unload_ = reinterpret_cast<ModuleUnloadFunction>(load_symbol("cuModuleUnload"));
+    occupancy_ = reinterpret_cast<OccupancyFunction>(
+        load_symbol("cuOccupancyMaxActiveBlocksPerMultiprocessor"));
+    device_get_attribute_ =
+        reinterpret_cast<DeviceGetAttributeFunction>(load_symbol("cuDeviceGetAttribute"));
     launch_kernel_ = reinterpret_cast<LaunchKernelFunction>(load_symbol("cuLaunchKernel"));
     launch_kernel_ptsz_ =
         reinterpret_cast<LaunchKernelFunction>(load_symbol("cuLaunchKernel_ptsz"));
@@ -436,6 +519,18 @@ bool DriverDispatch::initialize() {
     event_create_ = reinterpret_cast<EventCreateFunction>(load_symbol("cuEventCreate"));
     event_record_ = reinterpret_cast<EventRecordFunction>(load_symbol("cuEventRecord"));
     event_query_ = reinterpret_cast<EventQueryFunction>(load_symbol("cuEventQuery"));
+    event_record_ptsz_ = reinterpret_cast<EventRecordFunction>(load_symbol("cuEventRecord_ptsz"));
+    event_record_with_flags_ =
+        reinterpret_cast<EventRecordWithFlagsFunction>(load_symbol("cuEventRecordWithFlags"));
+    event_record_with_flags_ptsz_ =
+        reinterpret_cast<EventRecordWithFlagsFunction>(load_symbol("cuEventRecordWithFlags_ptsz"));
+    event_synchronize_ = reinterpret_cast<EventQueryFunction>(load_symbol("cuEventSynchronize"));
+    event_elapsed_time_ =
+        reinterpret_cast<EventElapsedTimeFunction>(load_symbol("cuEventElapsedTime"));
+    stream_wait_event_ =
+        reinterpret_cast<StreamWaitEventFunction>(load_symbol("cuStreamWaitEvent"));
+    stream_wait_event_ptsz_ =
+        reinterpret_cast<StreamWaitEventFunction>(load_symbol("cuStreamWaitEvent_ptsz"));
     event_destroy_ = reinterpret_cast<EventDestroyFunction>(load_symbol("cuEventDestroy_v2"));
     if (event_destroy_ == nullptr) {
         event_destroy_ = reinterpret_cast<EventDestroyFunction>(load_symbol("cuEventDestroy"));
@@ -443,7 +538,22 @@ bool DriverDispatch::initialize() {
     context_get_current_ =
         reinterpret_cast<ContextGetCurrentFunction>(load_symbol("cuCtxGetCurrent"));
     context_get_device_ = reinterpret_cast<ContextGetDeviceFunction>(load_symbol("cuCtxGetDevice"));
+    context_get_api_version_ =
+        reinterpret_cast<ContextGetApiVersionFunction>(load_symbol("cuCtxGetApiVersion"));
+    primary_context_get_state_ =
+        reinterpret_cast<PrimaryContextGetStateFunction>(load_symbol("cuDevicePrimaryCtxGetState"));
+    primary_context_retain_ =
+        reinterpret_cast<PrimaryContextRetainFunction>(load_symbol("cuDevicePrimaryCtxRetain"));
+    primary_context_release_ = reinterpret_cast<PrimaryContextReleaseFunction>(
+        load_symbol("cuDevicePrimaryCtxRelease_v2"));
+    primary_context_release_legacy_ =
+        reinterpret_cast<PrimaryContextReleaseFunction>(load_symbol("cuDevicePrimaryCtxRelease"));
+    primary_context_reset_ =
+        reinterpret_cast<PrimaryContextResetFunction>(load_symbol("cuDevicePrimaryCtxReset"));
+    primary_context_reset_v2_ =
+        reinterpret_cast<PrimaryContextResetFunction>(load_symbol("cuDevicePrimaryCtxReset_v2"));
     context_destroy_ = reinterpret_cast<ContextDestroyFunction>(load_symbol("cuCtxDestroy_v2"));
+    context_destroy_legacy_ = reinterpret_cast<ContextDestroyFunction>(load_symbol("cuCtxDestroy"));
     stream_get_device_ =
         reinterpret_cast<StreamGetDeviceFunction>(load_symbol("cuStreamGetDevice"));
     stream_get_device_ptsz_ =
@@ -452,6 +562,10 @@ bool DriverDispatch::initialize() {
     stream_get_context_ptsz_ =
         reinterpret_cast<StreamGetContextFunction>(load_symbol("cuStreamGetCtx_ptsz"));
     stream_query_ = reinterpret_cast<StreamQueryFunction>(load_symbol("cuStreamQuery"));
+    stream_capture_status_ =
+        reinterpret_cast<StreamCaptureFunction>(load_symbol("cuStreamIsCapturing"));
+    stream_capture_status_ptsz_ =
+        reinterpret_cast<StreamCaptureFunction>(load_symbol("cuStreamIsCapturing_ptsz"));
     stream_query_ptsz_ = reinterpret_cast<StreamQueryFunction>(load_symbol("cuStreamQuery_ptsz"));
     stream_synchronize_ =
         reinterpret_cast<StreamSynchronizeFunction>(load_symbol("cuStreamSynchronize"));
@@ -488,6 +602,135 @@ CUresult DriverDispatch::init(unsigned int flags) const {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
     return init_(flags);
+}
+
+CUresult DriverDispatch::module_load_data(CUmodule* module, const void* image) const {
+    DriverCallScope scope;
+    return module_load_data_ == nullptr ? CUDA_ERROR_NOT_SUPPORTED
+                                        : module_load_data_(module, image);
+}
+
+CUresult DriverDispatch::module_load_data_ex(CUmodule* module, const void* image,
+                                             unsigned int option_count, CUjit_option* options,
+                                             void** option_values) const {
+    DriverCallScope scope;
+    return module_load_data_ex_ == nullptr
+               ? CUDA_ERROR_NOT_SUPPORTED
+               : module_load_data_ex_(module, image, option_count, options, option_values);
+}
+
+CUresult DriverDispatch::module_get_function(CUfunction* function, CUmodule module,
+                                             const char* name) const {
+    DriverCallScope scope;
+    return module_get_function_ == nullptr ? CUDA_ERROR_NOT_SUPPORTED
+                                           : module_get_function_(function, module, name);
+}
+
+CUresult DriverDispatch::module_unload(CUmodule module) const {
+    DriverCallScope scope;
+    return module_unload_ == nullptr ? CUDA_ERROR_NOT_SUPPORTED : module_unload_(module);
+}
+
+CUresult DriverDispatch::occupancy(int* block_count, CUfunction function, int block_size,
+                                   std::size_t dynamic_shared_memory_bytes) const {
+    DriverCallScope scope;
+    return occupancy_ == nullptr
+               ? CUDA_ERROR_NOT_SUPPORTED
+               : occupancy_(block_count, function, block_size, dynamic_shared_memory_bytes);
+}
+
+bool DriverDispatch::has_persistent_kernel_api() const {
+    return module_load_data_ != nullptr && module_get_function_ != nullptr &&
+           module_unload_ != nullptr && occupancy_ != nullptr && has_context_queries();
+}
+
+CUresult DriverDispatch::device_get_attribute(int* value, CUdevice_attribute attribute,
+                                              CUdevice device) const {
+    DriverCallScope scope;
+    return device_get_attribute_ == nullptr ? CUDA_ERROR_NOT_SUPPORTED
+                                            : device_get_attribute_(value, attribute, device);
+}
+
+bool DriverDispatch::has_runtime_persistent_api() const {
+    return library_load_data_ != nullptr && library_get_kernel_ != nullptr &&
+           kernel_get_function_ != nullptr && library_unload_ != nullptr && occupancy_ != nullptr &&
+           has_context_queries();
+}
+
+CUresult DriverDispatch::library_load_data(CUlibrary* library, const void* image,
+                                           CUjit_option* options, void** option_values,
+                                           unsigned int option_count,
+                                           CUlibraryOption* library_options,
+                                           void** library_option_values,
+                                           unsigned int library_option_count) const {
+    DriverCallScope scope;
+    return library_load_data_ == nullptr
+               ? CUDA_ERROR_NOT_SUPPORTED
+               : library_load_data_(library, image, options, option_values, option_count,
+                                    library_options, library_option_values, library_option_count);
+}
+
+CUresult DriverDispatch::library_get_module(CUmodule* module, CUlibrary library) const {
+    DriverCallScope scope;
+    return library_get_module_ ? library_get_module_(module, library) : CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult DriverDispatch::library_load_from_file(CUlibrary* library, const char* path,
+                                                CUjit_option* options, void** option_values,
+                                                unsigned int option_count,
+                                                CUlibraryOption* library_options,
+                                                void** library_option_values,
+                                                unsigned int library_option_count) const {
+    const DriverCallScope scope;
+    return library_load_from_file_
+               ? library_load_from_file_(library, path, options, option_values, option_count,
+                                         library_options, library_option_values,
+                                         library_option_count)
+               : CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult DriverDispatch::library_get_kernel(CUkernel* kernel, CUlibrary library,
+                                            const char* name) const {
+    DriverCallScope scope;
+    return library_get_kernel_ == nullptr ? CUDA_ERROR_NOT_SUPPORTED
+                                          : library_get_kernel_(kernel, library, name);
+}
+
+CUresult DriverDispatch::kernel_get_function(CUfunction* function, CUkernel kernel) const {
+    DriverCallScope scope;
+    return kernel_get_function_ == nullptr ? CUDA_ERROR_NOT_SUPPORTED
+                                           : kernel_get_function_(function, kernel);
+}
+
+bool DriverDispatch::has_function_load() const noexcept {
+    return function_load_ != nullptr;
+}
+
+CUresult DriverDispatch::function_load(CUfunction function) const {
+    DriverCallScope scope;
+    return function_load_ ? function_load_(function) : CUDA_ERROR_NOT_SUPPORTED;
+}
+
+bool DriverDispatch::has_function_get_module() const noexcept {
+    return function_get_module_ != nullptr;
+}
+
+CUresult DriverDispatch::function_get_module(CUmodule* module, CUfunction function) const {
+    DriverCallScope scope;
+    return function_get_module_ ? function_get_module_(module, function) : CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult DriverDispatch::library_unload(CUlibrary library) const {
+    DriverCallScope scope;
+    return library_unload_ == nullptr ? CUDA_ERROR_NOT_SUPPORTED : library_unload_(library);
+}
+
+CUresult DriverDispatch::stream_capture_status(CUstream stream, CUstreamCaptureStatus* status,
+                                               bool per_thread_default_stream) const {
+    DriverCallScope scope;
+    const auto invoke =
+        per_thread_default_stream ? stream_capture_status_ptsz_ : stream_capture_status_;
+    return invoke == nullptr ? CUDA_ERROR_NOT_SUPPORTED : invoke(stream, status);
 }
 
 CUresult DriverDispatch::launch_kernel(CUfunction function, unsigned int grid_dim_x,
@@ -1150,6 +1393,52 @@ CUresult DriverDispatch::event_destroy(CUevent event) const {
     return event_destroy_(event);
 }
 
+CUresult DriverDispatch::event_record_ptsz(CUevent event, CUstream stream) const {
+    DriverCallScope scope;
+    return event_record_ptsz_ == nullptr ? CUDA_ERROR_NOT_SUPPORTED
+                                         : event_record_ptsz_(event, stream);
+}
+
+CUresult DriverDispatch::event_record_with_flags(CUevent event, CUstream stream,
+                                                 unsigned int flags) const {
+    DriverCallScope scope;
+    return event_record_with_flags_ == nullptr ? CUDA_ERROR_NOT_SUPPORTED
+                                               : event_record_with_flags_(event, stream, flags);
+}
+
+CUresult DriverDispatch::event_record_with_flags_ptsz(CUevent event, CUstream stream,
+                                                      unsigned int flags) const {
+    DriverCallScope scope;
+    return event_record_with_flags_ptsz_ == nullptr
+               ? CUDA_ERROR_NOT_SUPPORTED
+               : event_record_with_flags_ptsz_(event, stream, flags);
+}
+
+CUresult DriverDispatch::event_synchronize(CUevent event) const {
+    DriverCallScope scope;
+    return event_synchronize_ == nullptr ? CUDA_ERROR_NOT_SUPPORTED : event_synchronize_(event);
+}
+
+CUresult DriverDispatch::event_elapsed_time(float* milliseconds, CUevent start, CUevent end) const {
+    DriverCallScope scope;
+    return event_elapsed_time_ == nullptr ? CUDA_ERROR_NOT_SUPPORTED
+                                          : event_elapsed_time_(milliseconds, start, end);
+}
+
+CUresult DriverDispatch::stream_wait_event(CUstream stream, CUevent event,
+                                           unsigned int flags) const {
+    DriverCallScope scope;
+    return stream_wait_event_ == nullptr ? CUDA_ERROR_NOT_SUPPORTED
+                                         : stream_wait_event_(stream, event, flags);
+}
+
+CUresult DriverDispatch::stream_wait_event_ptsz(CUstream stream, CUevent event,
+                                                unsigned int flags) const {
+    DriverCallScope scope;
+    return stream_wait_event_ptsz_ == nullptr ? CUDA_ERROR_NOT_SUPPORTED
+                                              : stream_wait_event_ptsz_(stream, event, flags);
+}
+
 CUresult DriverDispatch::context_get_current(CUcontext* context) const {
     DriverCallScope scope;
     if (context_get_current_ == nullptr) {
@@ -1166,12 +1455,126 @@ CUresult DriverDispatch::context_get_device(CUdevice* device) const {
     return context_get_device_(device);
 }
 
-CUresult DriverDispatch::context_destroy(CUcontext context) const {
+CUresult DriverDispatch::context_get_api_version(CUcontext context, unsigned int* version) const {
     DriverCallScope scope;
-    if (context_destroy_ == nullptr) {
+    return context_get_api_version_ == nullptr ? CUDA_ERROR_NOT_SUPPORTED
+                                               : context_get_api_version_(context, version);
+}
+
+CUresult DriverDispatch::primary_context_is_active(CUdevice device, bool& output) const {
+    const DriverCallScope scope;
+    if (device < 0) {
+        return CUDA_ERROR_INVALID_DEVICE;
+    }
+    if (!primary_context_get_state_) {
         return CUDA_ERROR_NOT_SUPPORTED;
     }
-    return context_destroy_(context);
+    unsigned int flags{};
+    int active = -1;
+    const auto status = primary_context_get_state_(device, &flags, &active);
+    if (status != CUDA_SUCCESS) {
+        return status;
+    }
+    if (active != 0 && active != 1) {
+        return CUDA_ERROR_UNKNOWN;
+    }
+    output = active == 1;
+    return CUDA_SUCCESS;
+}
+
+CUresult DriverDispatch::current_context_is_active_primary(CUcontext context, bool& output) const {
+    const DriverCallScope scope;
+    if (!context) {
+        return CUDA_ERROR_INVALID_CONTEXT;
+    }
+    if (!context_get_current_ || !context_get_device_ || !primary_context_get_state_ ||
+        !primary_context_retain_ || !primary_context_release_) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    CUcontext current{};
+    auto status = context_get_current_(&current);
+    if (status != CUDA_SUCCESS || current != context) {
+        return status == CUDA_SUCCESS ? CUDA_ERROR_INVALID_CONTEXT : status;
+    }
+    CUdevice device{};
+    status = context_get_device_(&device);
+    if (status != CUDA_SUCCESS) {
+        return status;
+    }
+    CUcontext primary{};
+    status = active_primary_context(device, primary);
+    if (status == CUDA_SUCCESS) {
+        output = primary == context;
+    }
+    return status;
+}
+
+CUresult DriverDispatch::active_primary_context(CUdevice device, CUcontext& output,
+                                                bool* is_deinitialized_before_identity) const {
+    const DriverCallScope scope;
+    if (is_deinitialized_before_identity) {
+        *is_deinitialized_before_identity = false;
+    }
+    if (device < 0) {
+        return CUDA_ERROR_INVALID_DEVICE;
+    }
+    if (!primary_context_get_state_ || !primary_context_retain_ || !primary_context_release_) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    unsigned int flags{};
+    int active = -1;
+    auto status = primary_context_get_state_(device, &flags, &active);
+    if (status != CUDA_SUCCESS) {
+        if (is_deinitialized_before_identity && status == CUDA_ERROR_DEINITIALIZED) {
+            *is_deinitialized_before_identity = true;
+        }
+        return status;
+    }
+    if (active == 0) {
+        output = nullptr;
+        return CUDA_SUCCESS;
+    }
+    if (active != 1) {
+        return CUDA_ERROR_UNKNOWN;
+    }
+    CUcontext primary{};
+    status = primary_context_retain_(&primary, device);
+    if (status != CUDA_SUCCESS) {
+        return status;
+    }
+    // Retain does not make the context current. Reset is externally excluded
+    // throughout this identity probe, so releasing our extra active reference
+    // cannot remove the application's original primary ownership.
+    status = primary_context_release_(device);
+    if (status != CUDA_SUCCESS) {
+        return status;
+    }
+    if (!primary) {
+        return CUDA_ERROR_UNKNOWN;
+    }
+    output = primary;
+    return CUDA_SUCCESS;
+}
+
+CUresult DriverDispatch::primary_context_reset(CUdevice device, bool is_modern) const {
+    const DriverCallScope scope;
+    const auto original = is_modern ? primary_context_reset_v2_ : primary_context_reset_;
+    return original ? original(device) : CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult DriverDispatch::primary_context_release(CUdevice device, bool is_modern) const {
+    const DriverCallScope scope;
+    const auto original = is_modern ? primary_context_release_ : primary_context_release_legacy_;
+    return original ? original(device) : CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult DriverDispatch::context_destroy(CUcontext context, bool is_modern) const {
+    DriverCallScope scope;
+    const auto original = is_modern ? context_destroy_ : context_destroy_legacy_;
+    if (original == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return original(context);
 }
 
 CUresult DriverDispatch::stream_get_device(CUstream stream, CUdevice* device) const {
@@ -1250,6 +1653,16 @@ CUresult DriverDispatch::get_proc_address(const char* symbol, void** function_po
                                           int cuda_version, cuuint64_t flags) const {
     if (g_is_inside_proc_address_dispatch) {
         if (library_handle_ != nullptr && symbol != nullptr && function_pointer != nullptr) {
+            const std::string_view name{symbol};
+            if (name == "cuCtxDestroy" || name == "cuCtxDestroy_v2") {
+                const auto original =
+                    cuda_version < 4000 ? context_destroy_legacy_ : context_destroy_;
+                if (name != "cuCtxDestroy" || cuda_version < 2000 || original == nullptr) {
+                    return CUDA_ERROR_NOT_FOUND;
+                }
+                *function_pointer = reinterpret_cast<void*>(original);
+                return CUDA_SUCCESS;
+            }
             *function_pointer = resolve_direct_symbol(symbol, flags);
             return *function_pointer == nullptr ? CUDA_ERROR_NOT_FOUND : CUDA_SUCCESS;
         }
@@ -1270,6 +1683,23 @@ CUresult DriverDispatch::get_proc_address_v2(const char* symbol, void** function
                                              CUdriverProcAddressQueryResult* symbol_status) const {
     if (g_is_inside_proc_address_dispatch) {
         if (library_handle_ != nullptr && symbol != nullptr && function_pointer != nullptr) {
+            const std::string_view name{symbol};
+            if (name == "cuCtxDestroy" || name == "cuCtxDestroy_v2") {
+                const bool is_base = name == "cuCtxDestroy";
+                *function_pointer =
+                    !is_base || cuda_version < 2000
+                        ? nullptr
+                        : reinterpret_cast<void*>(cuda_version < 4000 ? context_destroy_legacy_
+                                                                      : context_destroy_);
+                if (symbol_status != nullptr) {
+                    *symbol_status = !is_base ? CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND
+                                     : cuda_version < 2000
+                                         ? CU_GET_PROC_ADDRESS_VERSION_NOT_SUFFICIENT
+                                     : *function_pointer ? CU_GET_PROC_ADDRESS_SUCCESS
+                                                         : CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+                }
+                return CUDA_SUCCESS;
+            }
             *function_pointer = resolve_direct_symbol(symbol, flags);
             if (symbol_status != nullptr) {
                 *symbol_status = *function_pointer == nullptr ? CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND
@@ -1287,6 +1717,12 @@ CUresult DriverDispatch::get_proc_address_v2(const char* symbol, void** function
         return CUDA_ERROR_NOT_SUPPORTED;
     }
     return get_proc_address_v2_(symbol, function_pointer, cuda_version, flags, symbol_status);
+}
+
+bool DriverDispatch::is_proc_address_function(void* address, bool uses_extended_resolver) const {
+    return address != nullptr &&
+           address == (uses_extended_resolver ? reinterpret_cast<void*>(get_proc_address_v2_)
+                                              : reinterpret_cast<void*>(get_proc_address_));
 }
 
 bool DriverDispatch::has_get_proc_address() const {
@@ -1570,8 +2006,8 @@ bool DriverDispatch::has_context_queries() const {
     return context_get_current_ != nullptr && context_get_device_ != nullptr;
 }
 
-bool DriverDispatch::has_context_destroy() const {
-    return context_destroy_ != nullptr;
+bool DriverDispatch::has_context_destroy(bool is_modern) const {
+    return (is_modern ? context_destroy_ : context_destroy_legacy_) != nullptr;
 }
 
 bool DriverDispatch::has_stream_identity() const {
@@ -1613,8 +2049,69 @@ void* DriverDispatch::resolve_direct_symbol(const char* name, cuuint64_t flags) 
     // entry points instead.
     const std::string_view symbol{name};
     const bool ptds = (flags & CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM) != 0;
+    if (symbol == "cuEventCreate") {
+        return reinterpret_cast<void*>(event_create_);
+    }
+    if (symbol == "cuEventRecord") {
+        return reinterpret_cast<void*>(ptds ? event_record_ptsz_ : event_record_);
+    }
+    if (symbol == "cuEventQuery") {
+        return reinterpret_cast<void*>(event_query_);
+    }
+    if (symbol == "cuEventDestroy_v2") {
+        return reinterpret_cast<void*>(event_destroy_);
+    }
+    if (symbol == "cuEventRecord_ptsz") {
+        return reinterpret_cast<void*>(event_record_ptsz_);
+    }
+    if (symbol == "cuEventRecordWithFlags") {
+        return reinterpret_cast<void*>(ptds ? event_record_with_flags_ptsz_
+                                            : event_record_with_flags_);
+    }
+    if (symbol == "cuEventRecordWithFlags_ptsz") {
+        return reinterpret_cast<void*>(event_record_with_flags_ptsz_);
+    }
+    if (symbol == "cuEventSynchronize") {
+        return reinterpret_cast<void*>(event_synchronize_);
+    }
+    if (symbol == "cuEventElapsedTime") {
+        return reinterpret_cast<void*>(event_elapsed_time_);
+    }
+    if (symbol == "cuStreamWaitEvent") {
+        return reinterpret_cast<void*>(ptds ? stream_wait_event_ptsz_ : stream_wait_event_);
+    }
+    if (symbol == "cuStreamWaitEvent_ptsz") {
+        return reinterpret_cast<void*>(stream_wait_event_ptsz_);
+    }
+    if (symbol == "cuEventDestroy") {
+        return reinterpret_cast<void*>(event_destroy_);
+    }
     if (symbol == "cuInit") {
         return reinterpret_cast<void*>(init_);
+    }
+    if (symbol == "cuModuleLoadData") {
+        return reinterpret_cast<void*>(module_load_data_);
+    }
+    if (symbol == "cuModuleLoadDataEx") {
+        return reinterpret_cast<void*>(module_load_data_ex_);
+    }
+    if (symbol == "cuModuleGetFunction") {
+        return reinterpret_cast<void*>(module_get_function_);
+    }
+    if (symbol == "cuLibraryLoadData") {
+        return reinterpret_cast<void*>(library_load_data_);
+    }
+    if (symbol == "cuLibraryLoadFromFile") {
+        return reinterpret_cast<void*>(library_load_from_file_);
+    }
+    if (symbol == "cuLibraryGetModule") {
+        return reinterpret_cast<void*>(library_get_module_);
+    }
+    if (symbol == "cuLibraryUnload") {
+        return reinterpret_cast<void*>(library_unload_);
+    }
+    if (symbol == "cuModuleUnload") {
+        return reinterpret_cast<void*>(module_unload_);
     }
     if (symbol == "cuLaunchKernel") {
         return reinterpret_cast<void*>(ptds ? launch_kernel_ptsz_ : launch_kernel_);
@@ -1744,8 +2241,14 @@ void* DriverDispatch::resolve_direct_symbol(const char* name, cuuint64_t flags) 
     if (symbol == "cuCtxGetDevice") {
         return reinterpret_cast<void*>(context_get_device_);
     }
-    if (symbol == "cuCtxDestroy_v2" || symbol == "cuCtxDestroy") {
+    if (symbol == "cuCtxGetApiVersion") {
+        return reinterpret_cast<void*>(context_get_api_version_);
+    }
+    if (symbol == "cuCtxDestroy_v2") {
         return reinterpret_cast<void*>(context_destroy_);
+    }
+    if (symbol == "cuCtxDestroy") {
+        return reinterpret_cast<void*>(context_destroy_legacy_);
     }
     if (symbol == "cuStreamGetDevice") {
         return reinterpret_cast<void*>(ptds ? stream_get_device_ptsz_ : stream_get_device_);

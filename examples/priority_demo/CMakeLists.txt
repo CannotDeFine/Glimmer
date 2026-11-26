@@ -1,5 +1,3 @@
-enable_language(CUDA)
-
 add_executable(glimmer_cuda_priority_workload
     priority_workload.cu
 )
@@ -25,6 +23,9 @@ add_custom_target(glimmer_cuda_priority_demo
         glimmer_control_service
     COMMENT "Building the transparent priority scheduling demo"
 )
+if(TARGET glimmer_cuda_interceptor)
+    add_dependencies(glimmer_cuda_priority_demo glimmer_cuda_interceptor)
+endif()
 
 if(BUILD_TESTING AND GLIMMER_BUILD_CUDA_INTERCEPTOR AND GLIMMER_ENABLE_CUDA_GPU_TESTS)
     add_test(NAME glimmer_cuda_priority_workload_gpu_test

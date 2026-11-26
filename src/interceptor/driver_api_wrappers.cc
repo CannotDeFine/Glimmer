@@ -6,6 +6,22 @@
 
 #include <cuda.h>
 
+#ifdef cuEventDestroy
+#undef cuEventDestroy
+#endif
+
+#ifdef cuEventRecord
+#undef cuEventRecord
+#endif
+
+#ifdef cuEventRecordWithFlags
+#undef cuEventRecordWithFlags
+#endif
+
+#ifdef cuStreamWaitEvent
+#undef cuStreamWaitEvent
+#endif
+
 #ifdef cuGetProcAddress
 #undef cuGetProcAddress
 #endif
@@ -72,6 +88,12 @@
 #ifdef cuCtxDestroy
 #undef cuCtxDestroy
 #endif
+#ifdef cuDevicePrimaryCtxReset
+#undef cuDevicePrimaryCtxReset
+#endif
+#ifdef cuDevicePrimaryCtxRelease
+#undef cuDevicePrimaryCtxRelease
+#endif
 #ifdef cuCtxSynchronize
 #undef cuCtxSynchronize
 #endif
@@ -130,18 +152,31 @@
 namespace {
 
 template <typename Function>
-CUresult guard_cuda_boundary(Function&& function) noexcept {
+CUresult guard_modeled_cuda_boundary(Function&& function) noexcept {
     try {
+        const glimmer::interceptor::CooperativeCallScope scope;
         return function();
     } catch (...) {
         return CUDA_ERROR_UNKNOWN;
     }
 }
 
+template <typename Function>
+CUresult guard_cuda_boundary(Function&& function) noexcept {
+    return guard_modeled_cuda_boundary(
+        [&] { return glimmer::interceptor::intercept_cooperative_native_boundary(function); });
+}
+
+template <typename Function>
+CUresult guard_memory_cuda_boundary(Function&& function) noexcept {
+    return guard_modeled_cuda_boundary(
+        [&] { return glimmer::interceptor::intercept_cooperative_memory_boundary(function); });
+}
+
 }  // namespace
 
 extern "C" CUresult CUDAAPI cuMemAlloc_v2(CUdeviceptr* device_pointer, std::size_t memory_bytes) {
-    return guard_cuda_boundary([device_pointer, memory_bytes] {
+    return guard_memory_cuda_boundary([device_pointer, memory_bytes] {
         return glimmer::interceptor::intercept_mem_alloc(device_pointer, memory_bytes);
     });
 }
@@ -151,7 +186,72 @@ extern "C" CUresult CUDAAPI cuMemAlloc(CUdeviceptr* device_pointer, std::size_t 
 }
 
 extern "C" CUresult CUDAAPI cuInit(unsigned int flags) {
-    return guard_cuda_boundary([flags] { return glimmer::interceptor::intercept_init(flags); });
+    return guard_modeled_cuda_boundary(
+        [flags] { return glimmer::interceptor::intercept_init(flags); });
+}
+
+extern "C" CUresult CUDAAPI cuModuleLoadData(CUmodule* module, const void* image) {
+    return guard_modeled_cuda_boundary([&] {
+        return glimmer::interceptor::intercept_module_load_data(module, image, false, 0, nullptr,
+                                                                nullptr);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuModuleLoadDataEx(CUmodule* module, const void* image,
+                                               unsigned int option_count, CUjit_option* options,
+                                               void** option_values) {
+    return guard_modeled_cuda_boundary([&] {
+        return glimmer::interceptor::intercept_module_load_data(module, image, true, option_count,
+                                                                options, option_values);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuModuleGetFunction(CUfunction* function, CUmodule module,
+                                                const char* name) {
+    return guard_modeled_cuda_boundary([&] {
+        return glimmer::interceptor::intercept_module_get_function(function, module, name);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuModuleUnload(CUmodule module) {
+    return guard_modeled_cuda_boundary(
+        [&] { return glimmer::interceptor::intercept_module_unload(module); });
+}
+
+extern "C" CUresult CUDAAPI cuLibraryLoadData(CUlibrary* library, const void* image,
+                                              CUjit_option* options, void** option_values,
+                                              unsigned int option_count,
+                                              CUlibraryOption* library_options,
+                                              void** library_option_values,
+                                              unsigned int library_option_count) {
+    return guard_modeled_cuda_boundary([&] {
+        return glimmer::interceptor::intercept_library_load_data(
+            library, image, options, option_values, option_count, library_options,
+            library_option_values, library_option_count);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuLibraryLoadFromFile(CUlibrary* library, const char* path,
+                                                  CUjit_option* options, void** option_values,
+                                                  unsigned int option_count,
+                                                  CUlibraryOption* library_options,
+                                                  void** library_option_values,
+                                                  unsigned int library_option_count) {
+    return guard_modeled_cuda_boundary([&] {
+        return glimmer::interceptor::intercept_library_load_from_file(
+            library, path, options, option_values, option_count, library_options,
+            library_option_values, library_option_count);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuLibraryGetModule(CUmodule* module, CUlibrary library) {
+    return guard_modeled_cuda_boundary(
+        [&] { return glimmer::interceptor::intercept_library_get_module(module, library); });
+}
+
+extern "C" CUresult CUDAAPI cuLibraryUnload(CUlibrary library) {
+    return guard_modeled_cuda_boundary(
+        [&] { return glimmer::interceptor::intercept_library_unload(library); });
 }
 
 extern "C" CUresult CUDAAPI cuLaunchKernel(CUfunction function, unsigned int grid_dim_x,
@@ -160,9 +260,9 @@ extern "C" CUresult CUDAAPI cuLaunchKernel(CUfunction function, unsigned int gri
                                            unsigned int block_dim_z,
                                            unsigned int shared_memory_bytes, CUstream stream,
                                            void** kernel_parameters, void** extra) {
-    return guard_cuda_boundary([function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x,
-                                block_dim_y, block_dim_z, shared_memory_bytes, stream,
-                                kernel_parameters, extra] {
+    return guard_modeled_cuda_boundary([function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x,
+                                        block_dim_y, block_dim_z, shared_memory_bytes, stream,
+                                        kernel_parameters, extra] {
         return glimmer::interceptor::intercept_launch_kernel(
             function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y, block_dim_z,
             shared_memory_bytes, stream, kernel_parameters, extra, false);
@@ -175,9 +275,9 @@ extern "C" CUresult CUDAAPI cuLaunchKernel_ptsz(CUfunction function, unsigned in
                                                 unsigned int block_dim_z,
                                                 unsigned int shared_memory_bytes, CUstream stream,
                                                 void** kernel_parameters, void** extra) {
-    return guard_cuda_boundary([function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x,
-                                block_dim_y, block_dim_z, shared_memory_bytes, stream,
-                                kernel_parameters, extra] {
+    return guard_modeled_cuda_boundary([function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x,
+                                        block_dim_y, block_dim_z, shared_memory_bytes, stream,
+                                        kernel_parameters, extra] {
         return glimmer::interceptor::intercept_launch_kernel(
             function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y, block_dim_z,
             shared_memory_bytes, stream, kernel_parameters, extra, true);
@@ -185,14 +285,14 @@ extern "C" CUresult CUDAAPI cuLaunchKernel_ptsz(CUfunction function, unsigned in
 }
 
 extern "C" CUresult CUDAAPI cuGraphLaunch(CUgraphExec graph_exec, CUstream stream) {
-    return guard_cuda_boundary([graph_exec, stream] {
+    return guard_modeled_cuda_boundary([graph_exec, stream] {
         return glimmer::interceptor::intercept_graph_launch(graph_exec, stream, false);
     });
 }
 
 extern "C" CUresult CUDAAPI cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction function,
                                              void** kernel_parameters, void** extra) {
-    return guard_cuda_boundary([&] {
+    return guard_modeled_cuda_boundary([&] {
         return glimmer::interceptor::intercept_launch_kernel_ex(config, function, kernel_parameters,
                                                                 extra, false);
     });
@@ -200,21 +300,21 @@ extern "C" CUresult CUDAAPI cuLaunchKernelEx(const CUlaunchConfig* config, CUfun
 
 extern "C" CUresult CUDAAPI cuLaunchKernelEx_ptsz(const CUlaunchConfig* config, CUfunction function,
                                                   void** kernel_parameters, void** extra) {
-    return guard_cuda_boundary([&] {
+    return guard_modeled_cuda_boundary([&] {
         return glimmer::interceptor::intercept_launch_kernel_ex(config, function, kernel_parameters,
                                                                 extra, true);
     });
 }
 
 extern "C" CUresult CUDAAPI cuGraphLaunch_ptsz(CUgraphExec graph_exec, CUstream stream) {
-    return guard_cuda_boundary([graph_exec, stream] {
+    return guard_modeled_cuda_boundary([graph_exec, stream] {
         return glimmer::interceptor::intercept_graph_launch(graph_exec, stream, true);
     });
 }
 
 extern "C" CUresult CUDAAPI cuMemAllocManaged(CUdeviceptr* device_pointer, std::size_t memory_bytes,
                                               unsigned int flags) {
-    return guard_cuda_boundary([device_pointer, memory_bytes, flags] {
+    return guard_memory_cuda_boundary([device_pointer, memory_bytes, flags] {
         return glimmer::interceptor::intercept_mem_alloc_managed(device_pointer, memory_bytes,
                                                                  flags);
     });
@@ -223,10 +323,11 @@ extern "C" CUresult CUDAAPI cuMemAllocManaged(CUdeviceptr* device_pointer, std::
 extern "C" CUresult CUDAAPI cuMemAllocPitch_v2(CUdeviceptr* device_pointer, std::size_t* pitch,
                                                std::size_t width_bytes, std::size_t height,
                                                unsigned int element_size_bytes) {
-    return guard_cuda_boundary([device_pointer, pitch, width_bytes, height, element_size_bytes] {
-        return glimmer::interceptor::intercept_mem_alloc_pitch(device_pointer, pitch, width_bytes,
-                                                               height, element_size_bytes);
-    });
+    return guard_memory_cuda_boundary(
+        [device_pointer, pitch, width_bytes, height, element_size_bytes] {
+            return glimmer::interceptor::intercept_mem_alloc_pitch(
+                device_pointer, pitch, width_bytes, height, element_size_bytes);
+        });
 }
 
 extern "C" CUresult CUDAAPI cuMemAllocPitch(CUdeviceptr* device_pointer, std::size_t* pitch,
@@ -680,7 +781,7 @@ extern "C" CUresult CUDAAPI cuMemPoolImportPointer(CUdeviceptr* pointer_out, CUm
 }
 
 extern "C" CUresult CUDAAPI cuMemFree_v2(CUdeviceptr device_pointer) {
-    return guard_cuda_boundary(
+    return guard_memory_cuda_boundary(
         [device_pointer] { return glimmer::interceptor::intercept_mem_free(device_pointer); });
 }
 
@@ -689,19 +790,19 @@ extern "C" CUresult CUDAAPI cuMemFree(CUdeviceptr device_pointer) {
 }
 
 extern "C" CUresult CUDAAPI cuMemFreeAsync(CUdeviceptr device_pointer, CUstream stream) {
-    return guard_cuda_boundary([device_pointer, stream] {
+    return guard_modeled_cuda_boundary([device_pointer, stream] {
         return glimmer::interceptor::intercept_mem_free_async(device_pointer, stream, false);
     });
 }
 
 extern "C" CUresult CUDAAPI cuMemFreeAsync_ptsz(CUdeviceptr device_pointer, CUstream stream) {
-    return guard_cuda_boundary([device_pointer, stream] {
+    return guard_modeled_cuda_boundary([device_pointer, stream] {
         return glimmer::interceptor::intercept_mem_free_async(device_pointer, stream, true);
     });
 }
 
 extern "C" CUresult CUDAAPI cuMemGetInfo_v2(std::size_t* free_bytes, std::size_t* total_bytes) {
-    return guard_cuda_boundary([free_bytes, total_bytes] {
+    return guard_modeled_cuda_boundary([free_bytes, total_bytes] {
         return glimmer::interceptor::intercept_mem_get_info(free_bytes, total_bytes);
     });
 }
@@ -711,7 +812,7 @@ extern "C" CUresult CUDAAPI cuMemGetInfo(std::size_t* free_bytes, std::size_t* t
 }
 
 extern "C" CUresult CUDAAPI cuDeviceTotalMem_v2(std::size_t* total_bytes, CUdevice device) {
-    return guard_cuda_boundary([total_bytes, device] {
+    return guard_modeled_cuda_boundary([total_bytes, device] {
         return glimmer::interceptor::intercept_device_total_mem(total_bytes, device);
     });
 }
@@ -721,70 +822,159 @@ extern "C" CUresult CUDAAPI cuDeviceTotalMem(std::size_t* total_bytes, CUdevice 
 }
 
 extern "C" CUresult CUDAAPI cuCtxGetCurrent(CUcontext* context) {
-    return guard_cuda_boundary(
+    return guard_modeled_cuda_boundary(
         [context] { return glimmer::interceptor::intercept_context_get_current(context); });
 }
 
 extern "C" CUresult CUDAAPI cuCtxGetDevice(CUdevice* device) {
-    return guard_cuda_boundary(
+    return guard_modeled_cuda_boundary(
         [device] { return glimmer::interceptor::intercept_context_get_device(device); });
 }
 
 extern "C" CUresult CUDAAPI cuCtxDestroy_v2(CUcontext context) {
-    return guard_cuda_boundary(
+    return guard_modeled_cuda_boundary(
         [context] { return glimmer::interceptor::intercept_context_destroy(context); });
 }
 
 extern "C" CUresult CUDAAPI cuCtxDestroy(CUcontext context) {
-    return cuCtxDestroy_v2(context);
+    return guard_modeled_cuda_boundary(
+        [context] { return glimmer::interceptor::intercept_context_destroy(context, false); });
+}
+
+extern "C" CUresult CUDAAPI cuDevicePrimaryCtxReset(CUdevice device) {
+    return guard_modeled_cuda_boundary(
+        [device] { return glimmer::interceptor::intercept_primary_context_reset(device, false); });
+}
+
+extern "C" CUresult CUDAAPI cuDevicePrimaryCtxReset_v2(CUdevice device) {
+    return guard_modeled_cuda_boundary(
+        [device] { return glimmer::interceptor::intercept_primary_context_reset(device, true); });
+}
+
+extern "C" CUresult CUDAAPI cuDevicePrimaryCtxRelease(CUdevice device) {
+    return guard_modeled_cuda_boundary([device] {
+        return glimmer::interceptor::intercept_primary_context_release(device, false);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuDevicePrimaryCtxRelease_v2(CUdevice device) {
+    return guard_modeled_cuda_boundary(
+        [device] { return glimmer::interceptor::intercept_primary_context_release(device, true); });
 }
 
 extern "C" CUresult CUDAAPI cuStreamGetDevice(CUstream stream, CUdevice* device) {
-    return guard_cuda_boundary([stream, device] {
+    return guard_modeled_cuda_boundary([stream, device] {
         return glimmer::interceptor::intercept_stream_get_device(stream, device, false);
     });
 }
 
 extern "C" CUresult CUDAAPI cuStreamGetDevice_ptsz(CUstream stream, CUdevice* device) {
-    return guard_cuda_boundary([stream, device] {
+    return guard_modeled_cuda_boundary([stream, device] {
         return glimmer::interceptor::intercept_stream_get_device(stream, device, true);
     });
 }
 
 extern "C" CUresult CUDAAPI cuStreamGetCtx(CUstream stream, CUcontext* context) {
-    return guard_cuda_boundary([stream, context] {
+    return guard_modeled_cuda_boundary([stream, context] {
         return glimmer::interceptor::intercept_stream_get_context(stream, context, false);
     });
 }
 
 extern "C" CUresult CUDAAPI cuStreamGetCtx_ptsz(CUstream stream, CUcontext* context) {
-    return guard_cuda_boundary([stream, context] {
+    return guard_modeled_cuda_boundary([stream, context] {
         return glimmer::interceptor::intercept_stream_get_context(stream, context, true);
     });
 }
 
+extern "C" CUresult CUDAAPI cuEventCreate(CUevent* event, unsigned int flags) {
+    return guard_modeled_cuda_boundary(
+        [&] { return glimmer::interceptor::intercept_event_create(event, flags); });
+}
+
+extern "C" CUresult CUDAAPI cuEventRecord(CUevent event, CUstream stream) {
+    return guard_modeled_cuda_boundary(
+        [&] { return glimmer::interceptor::intercept_event_record(event, stream); });
+}
+
+extern "C" CUresult CUDAAPI cuEventQuery(CUevent event) {
+    return guard_modeled_cuda_boundary(
+        [&] { return glimmer::interceptor::intercept_event_query(event); });
+}
+
+extern "C" CUresult CUDAAPI cuEventDestroy_v2(CUevent event) {
+    return guard_modeled_cuda_boundary(
+        [&] { return glimmer::interceptor::intercept_event_destroy(event); });
+}
+
+extern "C" CUresult CUDAAPI cuEventRecord_ptsz(CUevent event, CUstream stream) {
+    return guard_modeled_cuda_boundary(
+        [&] { return glimmer::interceptor::intercept_event_record_ptsz(event, stream); });
+}
+
+extern "C" CUresult CUDAAPI cuEventRecordWithFlags(CUevent event, CUstream stream,
+                                                   unsigned int flags) {
+    return guard_modeled_cuda_boundary([&] {
+        return glimmer::interceptor::intercept_event_record_with_flags(event, stream, flags);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuEventRecordWithFlags_ptsz(CUevent event, CUstream stream,
+                                                        unsigned int flags) {
+    return guard_modeled_cuda_boundary([&] {
+        return glimmer::interceptor::intercept_event_record_with_flags_ptsz(event, stream, flags);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuEventSynchronize(CUevent event) {
+    return guard_modeled_cuda_boundary(
+        [&] { return glimmer::interceptor::intercept_event_synchronize(event); });
+}
+
+extern "C" CUresult CUDAAPI cuEventElapsedTime(float* milliseconds, CUevent start, CUevent end) {
+    return guard_modeled_cuda_boundary([&] {
+        return glimmer::interceptor::intercept_event_elapsed_time(milliseconds, start, end);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuStreamWaitEvent(CUstream stream, CUevent event, unsigned int flags) {
+    return guard_modeled_cuda_boundary(
+        [&] { return glimmer::interceptor::intercept_stream_wait_event(stream, event, flags); });
+}
+
+extern "C" CUresult CUDAAPI cuStreamWaitEvent_ptsz(CUstream stream, CUevent event,
+                                                   unsigned int flags) {
+    return guard_modeled_cuda_boundary([&] {
+        return glimmer::interceptor::intercept_stream_wait_event_ptsz(stream, event, flags);
+    });
+}
+
+extern "C" CUresult CUDAAPI cuEventDestroy(CUevent event) {
+    return guard_modeled_cuda_boundary(
+        [&] { return glimmer::interceptor::intercept_event_destroy(event); });
+}
+
 extern "C" CUresult CUDAAPI cuStreamQuery(CUstream stream) {
-    return guard_cuda_boundary(
+    return guard_modeled_cuda_boundary(
         [stream] { return glimmer::interceptor::intercept_stream_query(stream, false); });
 }
 
 extern "C" CUresult CUDAAPI cuStreamQuery_ptsz(CUstream stream) {
-    return guard_cuda_boundary(
+    return guard_modeled_cuda_boundary(
         [stream] { return glimmer::interceptor::intercept_stream_query(stream, true); });
 }
 
 extern "C" CUresult CUDAAPI cuStreamSynchronize(CUstream stream) {
-    return guard_cuda_boundary(
+    return guard_modeled_cuda_boundary(
         [stream] { return glimmer::interceptor::intercept_stream_synchronize(stream, false); });
 }
 
 extern "C" CUresult CUDAAPI cuStreamSynchronize_ptsz(CUstream stream) {
-    return guard_cuda_boundary(
+    return guard_modeled_cuda_boundary(
         [stream] { return glimmer::interceptor::intercept_stream_synchronize(stream, true); });
 }
 
 extern "C" CUresult CUDAAPI cuStreamDestroy_v2(CUstream stream) {
-    return guard_cuda_boundary(
+    return guard_modeled_cuda_boundary(
         [stream] { return glimmer::interceptor::intercept_stream_destroy(stream); });
 }
 
@@ -793,13 +983,13 @@ extern "C" CUresult CUDAAPI cuStreamDestroy(CUstream stream) {
 }
 
 extern "C" CUresult CUDAAPI cuCtxSynchronize() {
-    return guard_cuda_boundary(
+    return guard_modeled_cuda_boundary(
         [] { return glimmer::interceptor::intercept_context_synchronize(); });
 }
 
 extern "C" CUresult CUDAAPI cuGetProcAddress(const char* symbol, void** function_pointer,
                                              int cuda_version, cuuint64_t flags) {
-    return guard_cuda_boundary([symbol, function_pointer, cuda_version, flags] {
+    return guard_modeled_cuda_boundary([symbol, function_pointer, cuda_version, flags] {
         return glimmer::interceptor::intercept_get_proc_address(symbol, function_pointer,
                                                                 cuda_version, flags);
     });
@@ -808,8 +998,9 @@ extern "C" CUresult CUDAAPI cuGetProcAddress(const char* symbol, void** function
 extern "C" CUresult CUDAAPI cuGetProcAddress_v2(const char* symbol, void** function_pointer,
                                                 int cuda_version, cuuint64_t flags,
                                                 CUdriverProcAddressQueryResult* symbol_status) {
-    return guard_cuda_boundary([symbol, function_pointer, cuda_version, flags, symbol_status] {
-        return glimmer::interceptor::intercept_get_proc_address_v2(
-            symbol, function_pointer, cuda_version, flags, symbol_status);
-    });
+    return guard_modeled_cuda_boundary(
+        [symbol, function_pointer, cuda_version, flags, symbol_status] {
+            return glimmer::interceptor::intercept_get_proc_address_v2(
+                symbol, function_pointer, cuda_version, flags, symbol_status);
+        });
 }

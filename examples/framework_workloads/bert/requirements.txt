@@ -1,0 +1,7 @@
+--index-url https://pypi.org/simple
+transformers==4.45.1
+tokenizers==0.20.3
+huggingface-hub==0.26.2
+safetensors==0.4.5
+onnx==1.17.0
+onnxruntime-gpu==1.20.2

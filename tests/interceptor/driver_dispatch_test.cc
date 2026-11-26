@@ -1,6 +1,7 @@
 #include "internal/driver_dispatch.h"
 
 #include <cstdlib>
+#include <array>
 #include <cstdint>
 #include <iostream>
 #include <string_view>
@@ -29,11 +30,566 @@ void check_driver_guard() {
     }
 }
 
+struct PrimaryIdentityProbe {
+    CUcontext current{};
+    CUcontext primary{};
+    CUdevice device = 3;
+    int active = 0;
+    CUresult current_status = CUDA_SUCCESS;
+    CUresult device_status = CUDA_SUCCESS;
+    CUresult state_status = CUDA_SUCCESS;
+    CUresult retain_status = CUDA_SUCCESS;
+    CUresult release_status = CUDA_SUCCESS;
+    unsigned int state_calls{};
+    unsigned int retain_calls{};
+    unsigned int release_calls{};
+};
+PrimaryIdentityProbe g_primary_probe;
+
+CUresult CUDAAPI probe_current_context(CUcontext* output) {
+    check_driver_guard();
+    *output = g_primary_probe.current;
+    return g_primary_probe.current_status;
+}
+CUresult CUDAAPI probe_current_device(CUdevice* output) {
+    check_driver_guard();
+    *output = g_primary_probe.device;
+    return g_primary_probe.device_status;
+}
+CUresult CUDAAPI probe_primary_state(CUdevice device, unsigned int* flags, int* active) {
+    check_driver_guard();
+    ++g_primary_probe.state_calls;
+    if (device != g_primary_probe.device) {
+        return CUDA_ERROR_INVALID_DEVICE;
+    }
+    *flags = CU_CTX_SCHED_AUTO;
+    *active = g_primary_probe.active;
+    return g_primary_probe.state_status;
+}
+CUresult CUDAAPI probe_primary_retain(CUcontext* output, CUdevice device) {
+    check_driver_guard();
+    ++g_primary_probe.retain_calls;
+    if (device != g_primary_probe.device) {
+        return CUDA_ERROR_INVALID_DEVICE;
+    }
+    *output = g_primary_probe.primary;
+    return g_primary_probe.retain_status;
+}
+CUresult CUDAAPI probe_primary_release(CUdevice device) {
+    check_driver_guard();
+    ++g_primary_probe.release_calls;
+    return device == g_primary_probe.device ? g_primary_probe.release_status
+                                            : CUDA_ERROR_INVALID_DEVICE;
+}
+
+bool test_primary_context_state() {
+    DriverFunctionTable functions;
+    functions.primary_context_get_state = probe_primary_state;
+    const DriverDispatch dispatch(functions);
+    bool passed = true;
+    for (const int active : {0, 1, -1, 2}) {
+        g_primary_probe = {};
+        g_primary_probe.active = active;
+        bool output = true;
+        const auto expected = active < 0 || active > 1 ? CUDA_ERROR_UNKNOWN : CUDA_SUCCESS;
+        passed &= expect(dispatch.primary_context_is_active(3, output) == expected &&
+                             output == (active != 0) && g_primary_probe.state_calls == 1 &&
+                             g_primary_probe.retain_calls == 0 &&
+                             g_primary_probe.release_calls == 0 && !is_inside_driver_call(),
+                         "primary state is output-atomic metadata, never context ownership");
+    }
+    g_primary_probe = {};
+    g_primary_probe.state_status = CUDA_ERROR_INVALID_DEVICE;
+    bool output = true;
+    passed &= expect(dispatch.primary_context_is_active(3, output) == CUDA_ERROR_INVALID_DEVICE &&
+                         output && g_primary_probe.state_calls == 1,
+                     "failed original primary metadata preserves output");
+    g_primary_probe = {};
+    passed &=
+        expect(dispatch.primary_context_is_active(-1, output) == CUDA_ERROR_INVALID_DEVICE &&
+                   output && g_primary_probe.state_calls == 0 &&
+                   DriverDispatch(DriverFunctionTable{}).primary_context_is_active(3, output) ==
+                       CUDA_ERROR_NOT_SUPPORTED &&
+                   output && !is_inside_driver_call(),
+               "invalid or missing primary metadata issues nothing");
+    return passed;
+}
+
+bool test_primary_context_identity() {
+    DriverFunctionTable functions;
+    functions.context_get_current = probe_current_context;
+    functions.context_get_device = probe_current_device;
+    functions.primary_context_get_state = probe_primary_state;
+    functions.primary_context_retain = probe_primary_retain;
+    functions.primary_context_release = probe_primary_release;
+    const DriverDispatch dispatch(functions);
+    int current_token{}, other_token{};
+    const auto context = reinterpret_cast<CUcontext>(&current_token);
+    const auto other = reinterpret_cast<CUcontext>(&other_token);
+    bool passed = true;
+    const auto initialize = [&] {
+        g_primary_probe = {};
+        g_primary_probe.current = context;
+        g_primary_probe.primary = context;
+    };
+    initialize();
+    bool output = true;
+    passed &= expect(dispatch.current_context_is_active_primary(context, output) == CUDA_SUCCESS &&
+                         !output && g_primary_probe.state_calls == 1 &&
+                         g_primary_probe.retain_calls == 0 && g_primary_probe.release_calls == 0,
+                     "inactive primary must not be retained or initialized");
+    for (bool is_primary : {false, true}) {
+        initialize();
+        g_primary_probe.active = 1;
+        g_primary_probe.primary = is_primary ? context : other;
+        output = !is_primary;
+        passed &=
+            expect(dispatch.current_context_is_active_primary(context, output) == CUDA_SUCCESS &&
+                       output == is_primary && g_primary_probe.retain_calls == 1 &&
+                       g_primary_probe.release_calls == 1 && g_primary_probe.current == context,
+                   "active primary identity needs an exact balanced reference");
+    }
+    for (int failure = 0; failure < 8; ++failure) {
+        initialize();
+        g_primary_probe.active = 1;
+        CUresult expected = CUDA_ERROR_LAUNCH_FAILED;
+        switch (failure) {
+            case 0:
+                g_primary_probe.current_status = expected;
+                break;
+            case 1:
+                g_primary_probe.current = other;
+                expected = CUDA_ERROR_INVALID_CONTEXT;
+                break;
+            case 2:
+                g_primary_probe.device_status = expected;
+                break;
+            case 3:
+                g_primary_probe.state_status = expected;
+                break;
+            case 4:
+                g_primary_probe.active = -1;
+                expected = CUDA_ERROR_UNKNOWN;
+                break;
+            case 5:
+                g_primary_probe.retain_status = expected;
+                break;
+            case 6:
+                g_primary_probe.release_status = expected;
+                break;
+            default:
+                g_primary_probe.primary = nullptr;
+                expected = CUDA_ERROR_UNKNOWN;
+                break;
+        }
+        output = true;
+        passed &= expect(dispatch.current_context_is_active_primary(context, output) == expected &&
+                             output && g_primary_probe.retain_calls == (failure >= 5 ? 1U : 0U) &&
+                             g_primary_probe.release_calls == (failure >= 6 ? 1U : 0U),
+                         "failed identity proof preserves output and never retries a reference");
+    }
+    for (int missing = 0; missing < 5; ++missing) {
+        auto partial = functions;
+        switch (missing) {
+            case 0:
+                partial.context_get_current = nullptr;
+                break;
+            case 1:
+                partial.context_get_device = nullptr;
+                break;
+            case 2:
+                partial.primary_context_get_state = nullptr;
+                break;
+            case 3:
+                partial.primary_context_retain = nullptr;
+                break;
+            default:
+                partial.primary_context_release = nullptr;
+                break;
+        }
+        initialize();
+        const DriverDispatch missing_dispatch(partial);
+        output = true;
+        passed &=
+            expect(missing_dispatch.current_context_is_active_primary(context, output) ==
+                           CUDA_ERROR_NOT_SUPPORTED &&
+                       output && g_primary_probe.state_calls == 0 &&
+                       g_primary_probe.retain_calls == 0 && g_primary_probe.release_calls == 0,
+                   "missing primary proof must reject before acquiring a reference");
+    }
+    initialize();
+    output = true;
+    passed &= expect(
+        dispatch.current_context_is_active_primary(nullptr, output) == CUDA_ERROR_INVALID_CONTEXT &&
+            output && !is_inside_driver_call() && !g_guard_failed,
+        "null identity and native scope must remain checked");
+    return passed;
+}
+
+bool test_unbound_active_primary_identity() {
+    DriverFunctionTable functions;
+    // Selected-device lookup must not require a current context or bind one.
+    functions.primary_context_get_state = probe_primary_state;
+    functions.primary_context_retain = probe_primary_retain;
+    functions.primary_context_release = probe_primary_release;
+    const DriverDispatch dispatch(functions);
+    int token{}, sentinel{};
+    const auto primary = reinterpret_cast<CUcontext>(&token);
+    const auto unchanged = reinterpret_cast<CUcontext>(&sentinel);
+    const auto initialize = [&] {
+        g_primary_probe = {};
+        g_primary_probe.primary = primary;
+    };
+    bool passed = true;
+    for (bool is_active : {false, true}) {
+        initialize();
+        g_primary_probe.active = is_active ? 1 : 0;
+        CUcontext output = unchanged;
+        passed &= expect(
+            dispatch.active_primary_context(3, output) == CUDA_SUCCESS &&
+                output == (is_active ? primary : nullptr) && g_primary_probe.state_calls == 1 &&
+                g_primary_probe.retain_calls == (is_active ? 1U : 0U) &&
+                g_primary_probe.release_calls == (is_active ? 1U : 0U) && !g_primary_probe.current,
+            "selected primary is borrowed without binding or cold activation");
+    }
+    for (int failure = 0; failure < 7; ++failure) {
+        initialize();
+        g_primary_probe.active = 1;
+        CUresult expected = CUDA_ERROR_LAUNCH_FAILED;
+        CUdevice device = 3;
+        switch (failure) {
+            case 0:
+                device = -1;
+                expected = CUDA_ERROR_INVALID_DEVICE;
+                break;
+            case 1:
+                device = 4;
+                expected = CUDA_ERROR_INVALID_DEVICE;
+                break;
+            case 2:
+                g_primary_probe.state_status = expected;
+                break;
+            case 3:
+                g_primary_probe.active = 2;
+                expected = CUDA_ERROR_UNKNOWN;
+                break;
+            case 4:
+                g_primary_probe.retain_status = expected;
+                break;
+            case 5:
+                g_primary_probe.release_status = expected;
+                break;
+            default:
+                g_primary_probe.primary = nullptr;
+                expected = CUDA_ERROR_UNKNOWN;
+                break;
+        }
+        CUcontext output = unchanged;
+        passed &= expect(dispatch.active_primary_context(device, output) == expected &&
+                             output == unchanged &&
+                             g_primary_probe.state_calls == (failure == 0 ? 0U : 1U) &&
+                             g_primary_probe.retain_calls == (failure >= 4 ? 1U : 0U) &&
+                             g_primary_probe.release_calls == (failure >= 5 ? 1U : 0U) &&
+                             !g_primary_probe.current,
+                         "failed selected-primary proof is output-atomic with no reference retry");
+    }
+    for (int missing = 0; missing < 3; ++missing) {
+        auto partial = functions;
+        if (missing == 0) {
+            partial.primary_context_get_state = nullptr;
+        } else if (missing == 1) {
+            partial.primary_context_retain = nullptr;
+        } else {
+            partial.primary_context_release = nullptr;
+        }
+        initialize();
+        CUcontext output = unchanged;
+        passed &= expect(
+            DriverDispatch(partial).active_primary_context(3, output) == CUDA_ERROR_NOT_SUPPORTED &&
+                output == unchanged && g_primary_probe.state_calls == 0 &&
+                g_primary_probe.retain_calls == 0 && g_primary_probe.release_calls == 0,
+            "missing selected-primary proof rejects before native identity issue");
+    }
+    for (int phase = 0; phase < 4; ++phase) {
+        initialize();
+        g_primary_probe.active = 1;
+        if (phase == 0) {
+            g_primary_probe.state_status = CUDA_ERROR_DEINITIALIZED;
+        } else if (phase == 1) {
+            g_primary_probe.retain_status = CUDA_ERROR_DEINITIALIZED;
+        } else if (phase == 2) {
+            g_primary_probe.release_status = CUDA_ERROR_DEINITIALIZED;
+        }
+        CUcontext output = unchanged;
+        bool is_deinitialized_before_identity = true;
+        const auto status =
+            dispatch.active_primary_context(3, output, &is_deinitialized_before_identity);
+        passed &= expect(status == (phase == 3 ? CUDA_SUCCESS : CUDA_ERROR_DEINITIALIZED) &&
+                             output == (phase == 3 ? primary : unchanged) &&
+                             is_deinitialized_before_identity == (phase == 0) &&
+                             g_primary_probe.state_calls == 1 &&
+                             g_primary_probe.retain_calls == (phase == 0 ? 0U : 1U) &&
+                             g_primary_probe.release_calls == (phase < 2 ? 0U : 1U),
+                         "deinitialized proof is stage-specific, output-atomic and reset on every "
+                         "identity call");
+    }
+    initialize();
+    CUcontext output = unchanged;
+    bool is_deinitialized_before_identity = true;
+    passed &=
+        expect(dispatch.active_primary_context(-1, output, &is_deinitialized_before_identity) ==
+                       CUDA_ERROR_INVALID_DEVICE &&
+                   !is_deinitialized_before_identity && output == unchanged &&
+                   g_primary_probe.state_calls == 0,
+               "pre-query rejection also clears stale deinitialization proof without native calls");
+    return passed && !is_inside_driver_call() && !g_guard_failed;
+}
+
 void CUDAAPI fake_symbol() {}
+
+std::array<unsigned int, 2> g_primary_reset_calls{};
+std::array<CUdevice, 2> g_primary_reset_devices{};
+
+CUresult CUDAAPI fake_primary_reset_legacy(CUdevice device) {
+    check_driver_guard();
+    ++g_primary_reset_calls[0];
+    g_primary_reset_devices[0] = device;
+    return CUDA_ERROR_PRIMARY_CONTEXT_ACTIVE;
+}
+
+CUresult CUDAAPI fake_primary_reset_modern(CUdevice device) {
+    check_driver_guard();
+    ++g_primary_reset_calls[1];
+    g_primary_reset_devices[1] = device;
+    return CUDA_ERROR_INVALID_CONTEXT;
+}
+
+bool test_primary_reset_dispatch() {
+    DriverFunctionTable functions;
+    functions.primary_context_reset = fake_primary_reset_legacy;
+    functions.primary_context_reset_v2 = fake_primary_reset_modern;
+    const DriverDispatch dispatch(functions);
+    g_primary_reset_calls = {};
+    bool passed = expect(
+        dispatch.has_primary_context_reset(false) && dispatch.has_primary_context_reset(true),
+        "distinct optional reset entries are available");
+    passed &= expect(
+        dispatch.primary_context_reset(3, false) == CUDA_ERROR_PRIMARY_CONTEXT_ACTIVE &&
+            dispatch.primary_context_reset(-7, true) == CUDA_ERROR_INVALID_CONTEXT &&
+            g_primary_reset_calls == std::array<unsigned int, 2>{1, 1} &&
+            g_primary_reset_devices == std::array<CUdevice, 2>{3, -7} && !is_inside_driver_call(),
+        "reset preserves exact native version, input, error, count and guard");
+    for (bool modern : {false, true}) {
+        auto partial = functions;
+        if (modern) {
+            partial.primary_context_reset_v2 = nullptr;
+        } else {
+            partial.primary_context_reset = nullptr;
+        }
+        const DriverDispatch missing(partial);
+        const auto before = g_primary_reset_calls;
+        passed &= expect(!missing.has_primary_context_reset(modern) &&
+                             missing.has_primary_context_reset(!modern) &&
+                             missing.primary_context_reset(3, modern) == CUDA_ERROR_NOT_SUPPORTED &&
+                             g_primary_reset_calls == before && !is_inside_driver_call(),
+                         "missing reset ownership version never aliases or retries another entry");
+    }
+    return passed;
+}
+
+std::array<unsigned int, 2> g_primary_release_calls{};
+std::array<CUdevice, 2> g_primary_release_devices{};
+CUresult CUDAAPI fake_primary_release_legacy(CUdevice device) {
+    check_driver_guard();
+    ++g_primary_release_calls[0];
+    g_primary_release_devices[0] = device;
+    return CUDA_ERROR_INVALID_DEVICE;
+}
+CUresult CUDAAPI fake_primary_release_modern(CUdevice device) {
+    check_driver_guard();
+    ++g_primary_release_calls[1];
+    g_primary_release_devices[1] = device;
+    return CUDA_ERROR_INVALID_CONTEXT;
+}
+bool test_primary_release_dispatch() {
+    DriverFunctionTable functions;
+    functions.primary_context_release_legacy = fake_primary_release_legacy;
+    functions.primary_context_release = fake_primary_release_modern;
+    const DriverDispatch dispatch(functions);
+    g_primary_release_calls = {};
+    bool passed = expect(
+        dispatch.has_primary_context_release(false) && dispatch.has_primary_context_release(true),
+        "release ownership entries are optional and distinct");
+    passed &= expect(dispatch.primary_context_release(3, false) == CUDA_ERROR_INVALID_DEVICE &&
+                         dispatch.primary_context_release(-7, true) == CUDA_ERROR_INVALID_CONTEXT &&
+                         g_primary_release_calls == std::array<unsigned int, 2>{1, 1} &&
+                         g_primary_release_devices == std::array<CUdevice, 2>{3, -7} &&
+                         !is_inside_driver_call(),
+                     "release preserves exact native version, input, error, count and guard");
+    for (const bool is_modern : {false, true}) {
+        auto partial = functions;
+        if (is_modern) {
+            partial.primary_context_release = nullptr;
+        } else {
+            partial.primary_context_release_legacy = nullptr;
+        }
+        const DriverDispatch missing(partial);
+        const auto before = g_primary_release_calls;
+        passed &=
+            expect(!missing.has_primary_context_release(is_modern) &&
+                       missing.has_primary_context_release(!is_modern) &&
+                       missing.primary_context_release(3, is_modern) == CUDA_ERROR_NOT_SUPPORTED &&
+                       g_primary_release_calls == before && !is_inside_driver_call(),
+                   "missing release ABI never aliases or retries another ownership version");
+    }
+    return passed;
+}
+
+std::array<unsigned int, 2> g_context_destroy_calls{};
+std::array<CUcontext, 2> g_context_destroy_inputs{};
+CUresult CUDAAPI fake_context_destroy_legacy(CUcontext context) {
+    check_driver_guard();
+    ++g_context_destroy_calls[0];
+    g_context_destroy_inputs[0] = context;
+    return CUDA_ERROR_INVALID_HANDLE;
+}
+CUresult CUDAAPI fake_context_destroy_modern(CUcontext context) {
+    check_driver_guard();
+    ++g_context_destroy_calls[1];
+    g_context_destroy_inputs[1] = context;
+    return CUDA_ERROR_INVALID_CONTEXT;
+}
+bool test_context_destroy_dispatch() {
+    DriverFunctionTable functions;
+    functions.context_destroy_legacy = fake_context_destroy_legacy;
+    functions.context_destroy = fake_context_destroy_modern;
+    const DriverDispatch dispatch(functions);
+    g_context_destroy_calls = {};
+    const auto context = reinterpret_cast<CUcontext>(0x1234);
+    bool passed = expect(dispatch.has_context_destroy(false) && dispatch.has_context_destroy(),
+                         "context destroy versions are optional and distinct");
+    passed &= expect(dispatch.context_destroy(context, false) == CUDA_ERROR_INVALID_HANDLE &&
+                         dispatch.context_destroy(nullptr) == CUDA_ERROR_INVALID_CONTEXT &&
+                         g_context_destroy_calls == std::array<unsigned int, 2>{1, 1} &&
+                         g_context_destroy_inputs == std::array<CUcontext, 2>{context, nullptr} &&
+                         !is_inside_driver_call(),
+                     "destroy preserves exact native version, input, error, count and guard");
+    for (const bool is_modern : {false, true}) {
+        auto partial = functions;
+        if (is_modern) {
+            partial.context_destroy = nullptr;
+        } else {
+            partial.context_destroy_legacy = nullptr;
+        }
+        const DriverDispatch missing(partial);
+        const auto before = g_context_destroy_calls;
+        passed &= expect(
+            !missing.has_context_destroy(is_modern) && missing.has_context_destroy(!is_modern) &&
+                missing.context_destroy(context, is_modern) == CUDA_ERROR_NOT_SUPPORTED &&
+                g_context_destroy_calls == before && !is_inside_driver_call(),
+            "missing destroy ABI never aliases or retries another ownership version");
+    }
+    return passed;
+}
+
+unsigned int g_context_version_calls{};
+CUresult CUDAAPI fake_context_version(CUcontext context, unsigned int* version) {
+    check_driver_guard();
+    ++g_context_version_calls;
+    if (!context || !version) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *version = 3020;
+    return CUDA_SUCCESS;
+}
+bool test_context_version_dispatch() {
+    DriverFunctionTable functions;
+    const auto context = reinterpret_cast<CUcontext>(0x1234);
+    unsigned int version = 777;
+    g_context_version_calls = 0;
+    const DriverDispatch missing(functions);
+    bool passed =
+        expect(missing.context_get_api_version(context, &version) == CUDA_ERROR_NOT_SUPPORTED &&
+                   version == 777 && g_context_version_calls == 0 && !is_inside_driver_call(),
+               "optional context version never mutates output or issues an absent entry");
+    functions.context_get_api_version = fake_context_version;
+    const DriverDispatch dispatch(functions);
+    passed &=
+        expect(dispatch.context_get_api_version(context, &version) == CUDA_SUCCESS &&
+                   version == 3020 && g_context_version_calls == 1 && !is_inside_driver_call(),
+               "original context metadata preserves guarded ABI and exact native output");
+    version = 777;
+    {
+        const glimmer::interceptor::NativeDriverCallScope native;
+        passed &= expect(
+            dispatch.context_get_api_version(nullptr, &version) == CUDA_ERROR_INVALID_VALUE &&
+                version == 777 &&
+                dispatch.context_get_api_version(context, nullptr) == CUDA_ERROR_INVALID_VALUE &&
+                g_context_version_calls == 3 && is_inside_driver_call(),
+            "metadata delegates validation and preserves a nested original guard");
+    }
+    return passed && !is_inside_driver_call();
+}
 
 CUresult CUDAAPI fake_init(unsigned int) {
     check_driver_guard();
     return CUDA_SUCCESS;
+}
+
+unsigned int g_function_load_calls{};
+CUfunction g_expected_loaded_function{};
+CUresult CUDAAPI fake_function_load(CUfunction function) {
+    check_driver_guard();
+    ++g_function_load_calls;
+    return function == g_expected_loaded_function ? CUDA_ERROR_LAUNCH_FAILED
+                                                  : CUDA_ERROR_INVALID_VALUE;
+}
+
+bool test_function_loading_dispatch() {
+    DriverFunctionTable functions;
+    functions.function_load = fake_function_load;
+    DriverDispatch dispatch(functions);
+    DriverDispatch missing(DriverFunctionTable{});
+    int token{};
+    g_expected_loaded_function = reinterpret_cast<CUfunction>(&token);
+    const auto before = g_function_load_calls;
+    return dispatch.has_function_load() && !missing.has_function_load() &&
+           dispatch.function_load(g_expected_loaded_function) == CUDA_ERROR_LAUNCH_FAILED &&
+           g_function_load_calls == before + 1 &&
+           missing.function_load(g_expected_loaded_function) == CUDA_ERROR_NOT_SUPPORTED &&
+           g_function_load_calls == before + 1 && !is_inside_driver_call() && !g_guard_failed;
+}
+
+unsigned int g_function_module_calls{};
+CUmodule* g_expected_module_output{};
+CUresult CUDAAPI fake_function_module(CUmodule* output, CUfunction function) {
+    check_driver_guard();
+    ++g_function_module_calls;
+    if (output != g_expected_module_output || function != g_expected_loaded_function) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *output = reinterpret_cast<CUmodule>(function);
+    return CUDA_ERROR_NOT_FOUND;
+}
+
+bool test_function_module_dispatch() {
+    DriverFunctionTable functions;
+    functions.function_get_module = fake_function_module;
+    DriverDispatch dispatch(functions);
+    DriverDispatch missing(DriverFunctionTable{});
+    CUmodule output{};
+    int token{};
+    g_expected_loaded_function = reinterpret_cast<CUfunction>(&token);
+    g_expected_module_output = &output;
+    const auto before = g_function_module_calls;
+    return dispatch.has_function_get_module() && !missing.has_function_get_module() &&
+           dispatch.function_get_module(&output, g_expected_loaded_function) ==
+               CUDA_ERROR_NOT_FOUND &&
+           output == reinterpret_cast<CUmodule>(g_expected_loaded_function) &&
+           g_function_module_calls == before + 1 &&
+           missing.function_get_module(&output, g_expected_loaded_function) ==
+               CUDA_ERROR_NOT_SUPPORTED &&
+           g_function_module_calls == before + 1 && !is_inside_driver_call() && !g_guard_failed;
 }
 
 CUresult CUDAAPI fake_launch_kernel(CUfunction, unsigned int, unsigned int, unsigned int,
@@ -73,6 +629,43 @@ bool test_extended_dispatch() {
                                       arguments + 1, ptds) == CUDA_ERROR_LAUNCH_FAILED;
         passed &= missing.launch_kernel_ex(&config, nullptr, nullptr, nullptr, ptds) ==
                   CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return passed && !is_inside_driver_call();
+}
+
+CUresult CUDAAPI fake_capture_legacy(CUstream, CUstreamCaptureStatus* status) {
+    check_driver_guard();
+    if (status == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *status = CU_STREAM_CAPTURE_STATUS_ACTIVE;
+    return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI fake_capture_ptds(CUstream, CUstreamCaptureStatus* status) {
+    check_driver_guard();
+    if (status == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *status = CU_STREAM_CAPTURE_STATUS_INVALIDATED;
+    return CUDA_SUCCESS;
+}
+
+bool test_capture_dispatch() {
+    DriverFunctionTable functions;
+    functions.stream_capture_status = fake_capture_legacy;
+    functions.stream_capture_status_ptsz = fake_capture_ptds;
+    DriverDispatch dispatch(functions);
+    DriverDispatch missing(DriverFunctionTable{});
+    bool passed = true;
+    for (const bool ptds : {false, true}) {
+        CUstreamCaptureStatus status{};
+        passed &= dispatch.stream_capture_status(nullptr, &status, ptds) == CUDA_SUCCESS;
+        passed &= status ==
+                  (ptds ? CU_STREAM_CAPTURE_STATUS_INVALIDATED : CU_STREAM_CAPTURE_STATUS_ACTIVE);
+        passed &=
+            dispatch.stream_capture_status(nullptr, nullptr, ptds) == CUDA_ERROR_INVALID_VALUE;
+        passed &= missing.stream_capture_status(nullptr, &status, ptds) == CUDA_ERROR_NOT_SUPPORTED;
     }
     return passed && !is_inside_driver_call();
 }
@@ -496,10 +1089,98 @@ CUresult CUDAAPI recursive_get_proc_address_v2(const char* symbol, void** functi
                                                      symbol_status);
 }
 
+struct LibraryProbe {
+    CUlibrary* output{};
+    const void* image{};
+    CUjit_option* options{};
+    void** values{};
+    unsigned int count{};
+    CUlibraryOption* library_options{};
+    void** library_values{};
+    unsigned int library_count{};
+    unsigned int calls{};
+};
+LibraryProbe g_library_probe;
+
+CUresult probe_library_load(CUlibrary* output, const void* image, CUjit_option* options,
+                            void** values, unsigned int count, CUlibraryOption* library_options,
+                            void** library_values, unsigned int library_count) {
+    check_driver_guard();
+    g_library_probe = {output,         image,         options,
+                       values,         count,         library_options,
+                       library_values, library_count, g_library_probe.calls + 1};
+    return CUDA_ERROR_INVALID_IMAGE;
+}
+CUresult probe_library_file(CUlibrary* output, const char* path, CUjit_option* options,
+                            void** values, unsigned int count, CUlibraryOption* library_options,
+                            void** library_values, unsigned int library_count) {
+    return probe_library_load(output, path, options, values, count, library_options, library_values,
+                              library_count);
+}
+CUresult probe_library_module(CUmodule* module, CUlibrary library) {
+    check_driver_guard();
+    ++g_library_probe.calls;
+    return module && library ? CUDA_ERROR_NOT_FOUND : CUDA_ERROR_INVALID_VALUE;
+}
+
+bool test_library_dispatch() {
+    DriverFunctionTable functions;
+    functions.library_load_data = probe_library_load;
+    functions.library_load_from_file = probe_library_file;
+    functions.library_get_module = probe_library_module;
+    DriverDispatch driver(functions);
+    CUlibrary library{};
+    CUjit_option option = CU_JIT_MAX_REGISTERS;
+    CUlibraryOption library_option = CU_LIBRARY_HOST_UNIVERSAL_FUNCTION_AND_DATA_TABLE;
+    void* value = &library;
+    const char image[] = "opaque";
+    bool passed = true;
+    for (const bool is_file : {false, true}) {
+        const auto before = g_library_probe.calls;
+        const auto result = is_file
+                                ? driver.library_load_from_file(&library, image, &option, &value, 3,
+                                                                &library_option, &value, 4)
+                                : driver.library_load_data(&library, image, &option, &value, 3,
+                                                           &library_option, &value, 4);
+        passed &= expect(
+            result == CUDA_ERROR_INVALID_IMAGE && library == nullptr &&
+                g_library_probe.output == &library && g_library_probe.image == image &&
+                g_library_probe.options == &option && g_library_probe.values == &value &&
+                g_library_probe.count == 3 && g_library_probe.library_options == &library_option &&
+                g_library_probe.library_values == &value && g_library_probe.library_count == 4 &&
+                g_library_probe.calls == before + 1,
+            "library dispatch forwards all original options and errors exactly once");
+    }
+    const auto before = g_library_probe.calls;
+    passed &= expect(driver.library_get_module(nullptr, nullptr) == CUDA_ERROR_INVALID_VALUE &&
+                         g_library_probe.calls == before + 1 && !g_guard_failed &&
+                         !is_inside_driver_call(),
+                     "library module dispatch is guarded exact-once");
+    DriverDispatch absent(DriverFunctionTable{});
+    passed &=
+        expect(absent.library_load_data(nullptr, nullptr) == CUDA_ERROR_NOT_SUPPORTED &&
+                   absent.library_get_module(nullptr, nullptr) == CUDA_ERROR_NOT_SUPPORTED &&
+                   absent.library_load_from_file(nullptr, nullptr, nullptr, nullptr, 0, nullptr,
+                                                 nullptr, 0) == CUDA_ERROR_NOT_SUPPORTED &&
+                   g_library_probe.calls == before + 1,
+               "missing library APIs do not replay");
+    return passed;
+}
+
 }  // namespace
 
 int main() {
+    if (!test_library_dispatch()) return EXIT_FAILURE;
+    if (!expect(test_function_module_dispatch(),
+                "typed original function/module dispatch failed") ||
+        !expect(test_function_loading_dispatch(),
+                "function loading dispatch or native guard failed")) {
+        return EXIT_FAILURE;
+    }
     if (!expect(test_extended_dispatch(), "extended dispatch or missing-symbol handling failed")) {
+        return EXIT_FAILURE;
+    }
+    if (!expect(test_capture_dispatch(), "capture dispatch or missing-symbol handling failed")) {
         return EXIT_FAILURE;
     }
     const glimmer::interceptor::DriverFunctionTable functions{
@@ -569,9 +1250,33 @@ int main() {
     };
     const DriverDispatch dispatch(functions);
     bool all_passed = true;
+    all_passed &= test_primary_context_state();
+    all_passed &= test_primary_context_identity();
+    all_passed &= test_unbound_active_primary_identity();
+    all_passed &= test_primary_reset_dispatch();
+    all_passed &= test_primary_release_dispatch();
+    all_passed &= test_context_destroy_dispatch();
+    all_passed &= test_context_version_dispatch();
+    all_passed &=
+        expect(glimmer::interceptor::is_interceptor_driver_function(
+                   reinterpret_cast<void*>(&fake_symbol)) &&
+                   !glimmer::interceptor::is_interceptor_driver_function(
+                       reinterpret_cast<void*>(&std::malloc)) &&
+                   !glimmer::interceptor::is_interceptor_driver_function(nullptr),
+               "native dispatch ownership must distinguish this module from foreign native code");
 
     all_passed &= expect(dispatch.has_get_proc_address(), "legacy resolver was not available");
     all_passed &= expect(dispatch.has_get_proc_address_v2(), "v2 resolver was not available");
+    all_passed &= expect(
+        dispatch.is_proc_address_function(reinterpret_cast<void*>(&fake_get_proc_address), false) &&
+            !dispatch.is_proc_address_function(reinterpret_cast<void*>(&fake_get_proc_address),
+                                               true) &&
+            dispatch.is_proc_address_function(reinterpret_cast<void*>(&fake_get_proc_address_v2),
+                                              true) &&
+            !dispatch.is_proc_address_function(reinterpret_cast<void*>(&fake_get_proc_address_v2),
+                                               false) &&
+            !dispatch.is_proc_address_function(nullptr, false),
+        "resolver ABI identity did not match its native entry point");
     all_passed &= expect(dispatch.has_launch_kernel(), "kernel launch was not available");
     all_passed &= expect(dispatch.has_launch_kernel_ptsz(), "PTDS kernel launch was not available");
     all_passed &= expect(dispatch.has_mem_alloc_managed(), "managed allocator was not available");
@@ -958,5 +1663,12 @@ int main() {
     all_passed &=
         expect(legacy_only_dispatch.stream_synchronize_ptsz(nullptr) == CUDA_ERROR_NOT_SUPPORTED,
                "missing PTDS synchronization did not fail closed");
+    all_passed &= expect(
+        legacy_only_dispatch.event_record_ptsz(nullptr, nullptr) == CUDA_ERROR_NOT_SUPPORTED &&
+            legacy_only_dispatch.event_record_with_flags_ptsz(nullptr, nullptr, 0) ==
+                CUDA_ERROR_NOT_SUPPORTED &&
+            legacy_only_dispatch.stream_wait_event_ptsz(nullptr, nullptr, 0) ==
+                CUDA_ERROR_NOT_SUPPORTED,
+        "missing PTDS event APIs must not fall back to legacy semantics");
     return all_passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }

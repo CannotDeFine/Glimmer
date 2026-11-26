@@ -1,5 +1,3 @@
-enable_language(CUDA)
-
 add_executable(glimmer_cuda_workload
     baseline/cuda_workload.cu
 )

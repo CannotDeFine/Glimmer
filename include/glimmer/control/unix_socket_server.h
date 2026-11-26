@@ -3,11 +3,13 @@
 #include "glimmer/control/task_endpoint.h"
 
 #include <cstdint>
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -19,6 +21,7 @@ struct UnixSocketControlConfig {
     // If unset, only the effective uid of the server process is accepted.
     std::optional<std::uint32_t> allowed_uid;
     std::uint32_t io_timeout_ms = 1000;
+    bool enable_shared_memory = true;
 };
 
 enum class UnixSocketServeStatus : std::uint8_t {
@@ -54,6 +57,7 @@ class UnixSocketControlServer final {
     // Counts requests whose complete response was written successfully. The
     // count is safe to sample from a supervising service loop.
     [[nodiscard]] std::uint64_t served_request_count() const noexcept;
+    [[nodiscard]] std::uint64_t shared_memory_request_count() const noexcept;
 
     // Closes the listening descriptor and removes only the socket inode that
     // this instance created.
@@ -64,7 +68,7 @@ class UnixSocketControlServer final {
    private:
     [[nodiscard]] bool handle_client(int client_fd) noexcept;
     [[nodiscard]] bool authenticate_client(int client_fd, TaskPeerIdentity* peer) const noexcept;
-    [[nodiscard]] bool write_response(int client_fd, const std::string& response) const noexcept;
+    [[nodiscard]] bool write_response(int client_fd, std::string_view response) const noexcept;
     void register_client(int client_fd) noexcept;
     void unregister_client(int client_fd) noexcept;
     void close_client(int client_fd) noexcept;
@@ -82,6 +86,8 @@ class UnixSocketControlServer final {
     std::uint64_t socket_inode_ = 0;
     std::atomic<bool> stopping_{false};
     std::atomic<std::uint64_t> served_request_count_{0};
+    std::atomic<std::uint64_t> shared_memory_request_count_{0};
+    std::array<std::uint64_t, 2> service_incarnation_{};
     std::mutex clients_mutex_;
     std::unordered_set<int> client_fds_;
     std::vector<ClientThread> client_threads_;

@@ -1,5 +1,7 @@
 # CUDA workload matrix
 
+[Project home](../../README.md) / [Documentation](../../docs/README.md) / [Examples](../../examples/README.md) / CUDA workloads
+
 These programs are ordinary CUDA Runtime applications. They do not include
 Glimmer headers or call Glimmer APIs; the same executable can be run with no
 preload, with the interceptor, or with different quota settings.
@@ -25,16 +27,17 @@ cmake --build --preset cuda-gpu -j2
 Run one workload with an 8 MiB virtual quota:
 
 ```sh
-env GLIMMER_MEMORY_LIMIT_BYTES=8388608 \
+env -u LD_AUDIT GLIMMER_MEMORY_LIMIT_BYTES=8388608 \
     GLIMMER_TRACE_MEMORY_INFO=1 \
     LD_PRELOAD="$PWD/build/cuda-gpu/lib/libglimmer_cuda_interceptor.so" \
     "$PWD/build/cuda-gpu/examples/cuda_workloads/glimmer_cuda_async_workload"
 ```
 
-Each program prints one machine-readable summary line containing its workload
-name, requested bytes, visible memory snapshots, and a validation flag. A
-non-zero exit status means that CUDA execution, cleanup, or accounting
-validation failed.
+The specialized workloads print a key-value summary with requested bytes,
+visible memory snapshots and a validation flag. The baseline instead prints a
+CSV header and row with CUDA status codes; it does not validate the buffer's
+contents. A non-zero exit status indicates a reported CUDA, cleanup or
+workload-validation failure.
 
 The `cuda-gpu` CTest preset registers one test for each matrix entry when the
 interceptor and GPU tests are enabled. These tests are optional because they
@@ -42,9 +45,9 @@ require a compatible Linux CUDA driver and GPU.
 
 ## Baseline workload
 
-The baseline is a small, reproducible CUDA Runtime application for validating
-Glimmer on a real Linux GPU. It deliberately does not use Glimmer headers, so
-the same executable can be compared with and without `LD_PRELOAD`.
+The baseline is a small CUDA Runtime application for exercising memory
+accounting on a real Linux GPU. It deliberately does not use Glimmer headers,
+so the same executable can be run with and without `LD_PRELOAD`.
 
 Build it through the GPU preset:
 
@@ -56,25 +59,25 @@ cmake --build --preset cuda-gpu --target glimmer_cuda_workload -j2
 Run a 512 MiB workload without interception:
 
 ```sh
-./build/cuda-gpu/examples/cuda_workloads/glimmer_cuda_workload \
+env -u LD_PRELOAD -u LD_AUDIT \
+    ./build/cuda-gpu/examples/cuda_workloads/glimmer_cuda_workload \
     --bytes 536870912 \
-    --iterations 10 \
-    --output /tmp/glimmer-cuda-baseline.csv
+    --iterations 10
 ```
 
-Run the same workload with an 8 MiB Glimmer quota and memory diagnostics:
+Run a smaller 1 MiB allocation with an 8 MiB Glimmer quota and memory diagnostics:
 
 ```sh
-env GLIMMER_MEMORY_LIMIT_BYTES=8388608 \
+env -u LD_AUDIT GLIMMER_MEMORY_LIMIT_BYTES=8388608 \
     GLIMMER_TRACE_MEMORY_INFO=1 \
     LD_PRELOAD="$PWD/build/cuda-gpu/lib/libglimmer_cuda_interceptor.so" \
     ./build/cuda-gpu/examples/cuda_workloads/glimmer_cuda_workload \
     --bytes 1048576 \
-    --iterations 10 \
-    --output /tmp/glimmer-cuda-quota.csv
+    --iterations 10
 ```
 
-The CSV contains visible total/free bytes and numeric CUDA status codes. A
-request larger than the active quota should return a non-zero process status
-and report a failed allocation; that is an expected rejection, not a workload
-crash.
+The CSV is written to standard output and contains visible total/free bytes and
+numeric CUDA status codes. To save it, choose a new path with `--output PATH`;
+the program overwrites an existing file at that path. A request larger than the
+active quota should return a non-zero process status and report a failed
+allocation; that is an expected rejection, not a workload crash.

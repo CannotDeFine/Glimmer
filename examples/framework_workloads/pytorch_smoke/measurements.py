@@ -12,6 +12,23 @@ import time
 
 
 MEASUREMENT_VERSION = "wall_clock_v2"
+WORKLOAD_VERSIONS = {"mlp": "mlp_v1", "cnn": "cnn_v1"}
+
+
+def workload_identity(record: dict) -> tuple[str, str, str]:
+    fields = ("workload", "workload_version", "cudnn_version")
+    if not any(field in record for field in fields):
+        # Historical captures predate the CNN option and contain only the MLP.
+        return "mlp", "mlp_v1", "unused"
+    if any(field not in record for field in fields):
+        raise ValueError("incomplete workload identity")
+    name, version, cudnn = (str(record[field]) for field in fields)
+    if WORKLOAD_VERSIONS.get(name) != version:
+        raise ValueError("unknown workload or workload version")
+    if ((name == "mlp" and cudnn != "unused") or
+            (name == "cnn" and (not cudnn.isascii() or not cudnn.isdecimal() or int(cudnn) <= 0))):
+        raise ValueError("invalid workload cuDNN identity")
+    return name, version, cudnn
 
 
 def percentile(values: list[float], percentage: float) -> float:
@@ -74,8 +91,11 @@ def read_workload(directory: pathlib.Path, role: str, *, allow_profile: bool = F
     if role not in ("training", "inference"):
         raise ValueError("unknown workload role")
     record = read_metadata(directory / f"{role}.status")
+    workload_identity(record)
     if not allow_profile and record.get("cuda_profile", "0") != "0":
         raise ValueError("profiled diagnostics must not be analyzed as benchmark measurements")
+    if not allow_profile and record.get("cudnn_logging_configured", "0") != "0":
+        raise ValueError("cuDNN logging diagnostics must not be analyzed as benchmark measurements")
     if record.get("measurement_version") != MEASUREMENT_VERSION:
         raise ValueError("incompatible measurement version; rerun the workload")
     if (record.get("role") != role or record["validation"] != "1" or
@@ -128,6 +148,8 @@ def summarize_colocation(directory: pathlib.Path, minimum_coverage: float = 0.0)
     if training["pid"] == inference["pid"]:
         raise ValueError("co-location requires different process IDs")
     for record in metadata.values():
+        if workload_identity(record) != workload_identity(training):
+            raise ValueError("workloads must use the same workload and cuDNN identity")
         if any(record[field] != training[field] for field in
                ("device_uuid", "device_index", "torch_version", "cuda_version")):
             raise ValueError("workloads must use the same CUDA device and framework versions")

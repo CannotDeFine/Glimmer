@@ -12,6 +12,12 @@ UUIDs, process IDs, and overlapping wall-clock execution intervals.
 
 Options:
   --mode native|priority          execution mode (default: priority)
+  --cooperative-preview          enable both cooperative previews (priority only)
+  --persistent-worker-blocks N   cooperative worker count (default: 3)
+  --native-epoch-max-calls N       bounded native aggregation (all four required)
+  --native-epoch-prefix-calls N    original calls per physical prefix
+  --native-epoch-pending-prefixes N maximum pending physical prefixes
+  --native-epoch-acceptance-us N   immutable acceptance window in microseconds
   --build-dir DIR                 CUDA build directory (default: build/cuda-gpu)
   --output-dir DIR                output directory
   --python PATH                   Python executable (default: local venv or python3)
@@ -20,6 +26,7 @@ Options:
   --warmup N                      warmup iterations per process (default: 3)
   --batch-size N                  batch size (default: 32)
   --hidden-size N                 MLP hidden size (default: 1024)
+  --workload mlp|cnn               model selection (default: mlp; CNN uses fixed shapes)
   --training-work-units N         training work units (default: 2)
   --max-concurrent-kernels N      scheduler concurrency window (default: 1)
   --priority-reserved-slots N     slots reserved for high-priority work (default: 0)
@@ -41,6 +48,13 @@ EOF
 }
 
 mode="priority"
+cooperative_preview=0
+persistent_worker_blocks=3
+native_epoch_max_calls=""
+native_epoch_prefix_calls=""
+native_epoch_pending_prefixes=""
+native_epoch_acceptance_us=""
+native_epoch_selected=0
 build_dir="build/cuda-gpu"
 output_dir=""
 python_executable=""
@@ -49,6 +63,7 @@ duration_seconds=""
 warmup=3
 batch_size=32
 hidden_size=1024
+workload="mlp"
 training_work_units=2
 max_concurrent_kernels=1
 priority_reserved_slots=0
@@ -65,6 +80,32 @@ trace_scheduler=0
 
 while (($# > 0)); do
     case "$1" in
+        --native-epoch-max-calls|--native-epoch-prefix-calls|--native-epoch-pending-prefixes|--native-epoch-acceptance-us)
+            native_epoch_selected=1
+            if (($# < 2)); then
+                echo "$1 requires a value" >&2
+                exit 2
+            fi
+            case "$1" in
+                --native-epoch-max-calls) native_epoch_max_calls="$2" ;;
+                --native-epoch-prefix-calls) native_epoch_prefix_calls="$2" ;;
+                --native-epoch-pending-prefixes) native_epoch_pending_prefixes="$2" ;;
+                --native-epoch-acceptance-us) native_epoch_acceptance_us="$2" ;;
+            esac
+            shift 2
+            ;;
+        --cooperative-preview)
+            cooperative_preview=1
+            shift
+            ;;
+        --persistent-worker-blocks)
+            if (($# < 2)); then
+                echo "--persistent-worker-blocks requires a value" >&2
+                exit 2
+            fi
+            persistent_worker_blocks="$2"
+            shift 2
+            ;;
         --mode)
             if (($# < 2)); then
                 echo "--mode requires a value" >&2
@@ -127,6 +168,14 @@ while (($# > 0)); do
                 exit 2
             fi
             batch_size="$2"
+            shift 2
+            ;;
+        --workload)
+            if (($# < 2)); then
+                echo "--workload requires a value" >&2
+                exit 2
+            fi
+            workload="$2"
             shift 2
             ;;
         --hidden-size)
@@ -257,6 +306,11 @@ if [[ "$mode" != "native" && "$mode" != "priority" ]]; then
     usage >&2
     exit 2
 fi
+if [[ "$workload" != "mlp" && "$workload" != "cnn" ]] ||
+    { [[ "$workload" == "cnn" && "$hidden_size" != 1024 ]]; }; then
+    echo "--workload must be mlp or cnn; CNN requires the default unused MLP hidden size" >&2
+    exit 2
+fi
 for numeric_value in "$iterations" "$warmup" "$batch_size" "$hidden_size" \
     "$training_work_units" "$max_concurrent_kernels" "$training_launch_batch_size" \
     "$inference_launch_batch_size"; do
@@ -265,6 +319,37 @@ for numeric_value in "$iterations" "$warmup" "$batch_size" "$hidden_size" \
         exit 2
     fi
 done
+if [[ ! "$persistent_worker_blocks" =~ ^[1-9][0-9]*$ ]] ||
+    ! awk -v value="$persistent_worker_blocks" 'BEGIN { exit !(value <= 65536) }'; then
+    echo "--persistent-worker-blocks must be an integer in [1, 65536]" >&2
+    exit 2
+fi
+if ((cooperative_preview)) && { [[ "$mode" != "priority" ]] ||
+    [[ "$training_launch_batch_size" != 1 || "$inference_launch_batch_size" != 1 ]]; }; then
+    echo "cooperative preview requires priority mode and launch batch one" >&2
+    exit 2
+fi
+native_epoch_enabled=0
+if ((native_epoch_selected)); then
+    if [[ "$mode" != priority ]] || (( ! cooperative_preview )); then
+        echo "native epochs require explicit cooperative priority mode" >&2
+        exit 2
+    fi
+    for value in "$native_epoch_max_calls" "$native_epoch_prefix_calls" \
+        "$native_epoch_pending_prefixes" "$native_epoch_acceptance_us"; do
+        if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+            echo "all four native epoch bounds must be positive integers" >&2
+            exit 2
+        fi
+    done
+    if ! awk -v calls="$native_epoch_max_calls" -v width="$native_epoch_prefix_calls" \
+        -v pending="$native_epoch_pending_prefixes" -v lifetime="$native_epoch_acceptance_us" \
+        'BEGIN { exit !(calls <= 65536 && width <= calls && pending <= 16 && lifetime <= 1000000) }'; then
+        echo "native epoch extent exceeds protocol bounds" >&2
+        exit 2
+    fi
+    native_epoch_enabled=1
+fi
 if [[ -n "$inference_target_ms" ]] && {
     [[ ! "$inference_target_ms" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
     ! awk -v value="$inference_target_ms" 'BEGIN { exit !(value > 0.0) }';
@@ -361,6 +446,9 @@ fi
 
 interceptor="$build_dir/lib/libglimmer_cuda_interceptor.so"
 service="$build_dir/bin/glimmer_control_service"
+if ((cooperative_preview)); then
+    service="$build_dir/bin/glimmer_task_execution_service"
+fi
 client="$build_dir/bin/glimmer_control_client"
 if [[ "$mode" == "priority" ]]; then
     for required_file in "$interceptor" "$service" "$client"; do
@@ -373,9 +461,23 @@ if [[ "$mode" == "priority" ]]; then
 fi
 
 if [[ -z "$output_dir" ]]; then
-    output_dir="$repo_dir/examples/framework_workloads/pytorch_smoke/output/co-location-$mode"
+    output_dir="$(env -u LD_PRELOAD -u LD_AUDIT "$python_executable" -B \
+        "$repo_dir/scripts/artifact_paths.py" --name "pytorch-colocation-$mode" --category runs)"
 fi
 mkdir -p "$output_dir"
+
+for name in training.ready inference.ready start.signal training.status inference.status \
+    training.log inference.log control-service.log control-metrics.txt training.csv \
+    inference.csv colocation.json start.tmp colocation.tmp; do
+    if [[ -e "$output_dir/$name" || -L "$output_dir/$name" ]]; then
+        echo "output already exists: $output_dir/$name" >&2
+        exit 2
+    fi
+done
+if ! mkdir "$output_dir/.glimmer-pytorch-priority"; then
+    echo "output directory is already claimed: $output_dir" >&2
+    exit 2
+fi
 
 socket_dir=""
 socket_path=""
@@ -398,10 +500,6 @@ service_log="$output_dir/control-service.log"
 metrics_file="$output_dir/control-metrics.txt"
 training_csv="$output_dir/training.csv"
 inference_csv="$output_dir/inference.csv"
-rm -f "$training_ready" "$inference_ready" "$start_file" \
-    "$training_status_file" "$inference_status_file" "$training_log" \
-    "$inference_log" "$service_log" "$training_csv" "$inference_csv" \
-    "$metrics_file"
 
 cleanup() {
     local status=$?
@@ -430,15 +528,22 @@ if [[ "$mode" == "priority" ]]; then
     service_arguments=(
         --socket "$socket_path"
         --quota-bytes 4294967296
-        --execution-mode remote
-        --lease-timeout-ms 5000
         --max-queued-tasks 256
         --max-concurrent-tasks "$max_concurrent_kernels"
         --scheduler-policy priority
         --priority-reserved-slots "$priority_reserved_slots"
         --priority-threshold "$priority_threshold"
-        --bind-leases-to-process
     )
+    if (( ! cooperative_preview )); then
+        service_arguments+=(--execution-mode remote --lease-timeout-ms 5000
+            --bind-leases-to-process)
+    fi
+    if ((native_epoch_enabled)); then
+        service_arguments+=(--native-epoch-max-calls "$native_epoch_max_calls"
+            --native-epoch-prefix-calls "$native_epoch_prefix_calls"
+            --native-epoch-pending-prefixes "$native_epoch_pending_prefixes"
+            --native-epoch-acceptance-us "$native_epoch_acceptance_us")
+    fi
     if [[ -n "$adaptive_slo_target_queue_us" ]]; then
         service_arguments+=(--adaptive-slo-target-queue-us "$adaptive_slo_target_queue_us"
             --adaptive-slo-window "$adaptive_slo_window")
@@ -465,7 +570,7 @@ if [[ "$mode" == "priority" ]]; then
 fi
 
 inference_workload_arguments=()
-common_workload_arguments=()
+common_workload_arguments=(--workload "$workload")
 if [[ -n "$duration_seconds" ]]; then
     common_workload_arguments+=(--duration-seconds "$duration_seconds")
 fi
@@ -475,6 +580,13 @@ fi
 
 clean_environment=(
     -u LD_PRELOAD
+    -u GLIMMER_NATIVE_EPOCH_MAX_CALLS
+    -u GLIMMER_NATIVE_EPOCH_CALLS_PER_PREFIX
+    -u GLIMMER_NATIVE_EPOCH_PENDING_PREFIXES
+    -u GLIMMER_NATIVE_EPOCH_ACCEPTANCE_US
+    -u GLIMMER_COOPERATIVE_DRIVER_PREVIEW
+    -u GLIMMER_COOPERATIVE_RUNTIME_PREVIEW
+    -u GLIMMER_PERSISTENT_WORKER_BLOCKS
     -u GLIMMER_TRACE_KERNEL_LAUNCHES
     -u GLIMMER_TRACE_MEMORY_INFO
     -u GLIMMER_TRACE_LAUNCH_TIMINGS
@@ -522,6 +634,22 @@ if [[ "$mode" == "priority" ]]; then
     if ((trace_timings)); then
         training_environment+=(GLIMMER_TRACE_LAUNCH_TIMINGS=1)
         inference_environment+=(GLIMMER_TRACE_LAUNCH_TIMINGS=1)
+    fi
+    if ((cooperative_preview)); then
+        cooperative_environment=(GLIMMER_COOPERATIVE_DRIVER_PREVIEW=1
+            GLIMMER_COOPERATIVE_RUNTIME_PREVIEW=1
+            GLIMMER_PERSISTENT_WORKER_BLOCKS="$persistent_worker_blocks")
+        training_environment+=("${cooperative_environment[@]}")
+        inference_environment+=("${cooperative_environment[@]}")
+    fi
+    if ((native_epoch_enabled)); then
+        epoch_environment=(GLIMMER_NATIVE_EPOCH_MAX_CALLS="$native_epoch_max_calls"
+            GLIMMER_NATIVE_EPOCH_CALLS_PER_PREFIX="$native_epoch_prefix_calls"
+            GLIMMER_NATIVE_EPOCH_PENDING_PREFIXES="$native_epoch_pending_prefixes"
+            GLIMMER_NATIVE_EPOCH_ACCEPTANCE_US="$native_epoch_acceptance_us"
+            GLIMMER_MEMORY_LIMIT_BYTES=4294967296)
+        training_environment+=("${epoch_environment[@]}")
+        inference_environment+=("${epoch_environment[@]}")
     fi
 fi
 
@@ -647,7 +775,11 @@ scheduler_max_queue_wait_us=0
 scheduler_total_service_time_us=0
 scheduler_max_service_time_us=0
 if [[ "$mode" == "priority" ]]; then
-    if ! "$client" --socket "$socket_path" metrics >"$metrics_file"; then
+    client_arguments=()
+    if ((cooperative_preview)); then
+        client_arguments+=(--execution)
+    fi
+    if ! "$client" "${client_arguments[@]}" --socket "$socket_path" metrics >"$metrics_file"; then
         echo "failed to query scheduler metrics" >&2
         cat "$metrics_file" >&2 || true
         exit 1

@@ -1,4 +1,5 @@
 #include "glimmer/control/task_endpoint.h"
+#include "glimmer/control/native_epoch_protocol.h"
 #include "glimmer/control/task_protocol.h"
 
 #include "glimmer/core/scheduler.h"
@@ -158,6 +159,9 @@ std::optional<std::string> TaskControlEndpoint::handle(std::string_view line) no
 std::optional<std::string> TaskControlEndpoint::handle(
     std::string_view line, std::optional<TaskPeerIdentity> peer) noexcept {
     try {
+        if (line.starts_with(kNativeEpochProtocolVersion)) {
+            return handle_native_epoch(line, peer);
+        }
         const TaskProtocolRequestParseResult parsed = parse_task_protocol_request(line);
         if (!parsed.parsed()) {
             return format_response(error_response(parse_error_code(parsed.error)));
@@ -171,6 +175,47 @@ std::optional<std::string> TaskControlEndpoint::handle(
                     return format_response(error_response(admission_error(result.status)));
                 }
                 return format_response(accepted_response(result.task_id));
+            }
+            case TaskProtocolOperation::kExecutionAcquire: {
+                if (!admission_service_.supports_cooperative_execution()) {
+                    return format_response(error_response(TaskProtocolErrorCode::kInvalidRequest));
+                }
+                const auto result = admission_service_.submit(request.admission, registrar_,
+                                                              registrar_context_, peer);
+                if (!result.accepted()) {
+                    return format_response(error_response(admission_error(result.status)));
+                }
+                const auto snapshot = admission_service_.claim_execution(result.task_id, peer);
+                if (!snapshot) {
+                    // Preserve accepted ownership; denial is not cancellation authority.
+                    return format_response(accepted_response(result.task_id));
+                }
+                auto response = lease_response(*snapshot);
+                response.kind = TaskProtocolResponseKind::kExecutionLease;
+                response.generation = snapshot->dispatch_sequence;
+                return format_response(response);
+            }
+            case TaskProtocolOperation::kExecutionCompleteAcquire: {
+                const TaskExecutionIdentity execution{request.task_id, request.generation};
+                if (!admission_service_.supports_cooperative_execution() ||
+                    !admission_service_.complete_execution(execution, peer)) {
+                    return format_response(error_response(TaskProtocolErrorCode::kInvalidRequest));
+                }
+                TaskProtocolResponse response;
+                response.kind = TaskProtocolResponseKind::kExecutionHandoff;
+                response.completed_execution = execution;
+                // Completion is independently acknowledged even if new admission
+                // rejects. Separate service locks preserve competing policy work.
+                const auto result = admission_service_.submit(request.admission, registrar_,
+                                                              registrar_context_, peer);
+                if (result.accepted()) {
+                    response.task_id = result.task_id;
+                    const auto snapshot = admission_service_.claim_execution(result.task_id, peer);
+                    if (snapshot) {
+                        response.generation = snapshot->dispatch_sequence;
+                    }
+                }
+                return format_response(response);
             }
             case TaskProtocolOperation::kAcquire: {
                 const core::SubmitResult result = admission_service_.submit(
@@ -190,7 +235,12 @@ std::optional<std::string> TaskControlEndpoint::handle(
                 return format_response(error_response(TaskProtocolErrorCode::kInternalError));
             }
             case TaskProtocolOperation::kCancel: {
-                if (admission_service_.cancel_queued(request.task_id)) {
+                const auto before = admission_service_.find(request.task_id);
+                if (before.has_value() && before->dispatch_sequence != 0) {
+                    // A stopped continuation must use its authenticated generation.
+                    return format_response(error_response(TaskProtocolErrorCode::kInvalidRequest));
+                }
+                if (admission_service_.cancel_queued(request.task_id, peer)) {
                     return format_response(
                         state_response(request.task_id, core::TaskState::kCancelled));
                 }
@@ -205,6 +255,61 @@ std::optional<std::string> TaskControlEndpoint::handle(
                     return format_response(error_response(TaskProtocolErrorCode::kUnknownTask));
                 }
                 return format_response(state_response(snapshot->task_id, snapshot->state));
+            }
+            case TaskProtocolOperation::kExecutionClaim: {
+                if (!admission_service_.supports_cooperative_execution()) {
+                    return format_response(error_response(TaskProtocolErrorCode::kInvalidRequest));
+                }
+                if (!admission_service_.find(request.task_id).has_value()) {
+                    return format_response(error_response(TaskProtocolErrorCode::kUnknownTask));
+                }
+                const auto snapshot = admission_service_.claim_execution(request.task_id, peer);
+                if (!snapshot.has_value()) {
+                    TaskProtocolResponse response;
+                    response.kind = TaskProtocolResponseKind::kEmpty;
+                    return format_response(response);
+                }
+                auto response = lease_response(*snapshot);
+                response.kind = TaskProtocolResponseKind::kExecutionLease;
+                response.generation = snapshot->dispatch_sequence;
+                return format_response(response);
+            }
+            case TaskProtocolOperation::kRetreat: {
+                const auto retreat = admission_service_.retreat_requested(
+                    {request.task_id, request.generation}, peer);
+                if (!retreat.has_value()) {
+                    return format_response(error_response(TaskProtocolErrorCode::kInvalidRequest));
+                }
+                TaskProtocolResponse response;
+                response.kind = TaskProtocolResponseKind::kRetreat;
+                response.task_id = request.task_id;
+                response.generation = request.generation;
+                response.should_retreat = *retreat;
+                return format_response(response);
+            }
+            case TaskProtocolOperation::kSuspend:
+            case TaskProtocolOperation::kExecutionHeartbeat:
+            case TaskProtocolOperation::kExecutionComplete:
+            case TaskProtocolOperation::kExecutionFail:
+            case TaskProtocolOperation::kExecutionCancel: {
+                const TaskExecutionIdentity execution{request.task_id, request.generation};
+                bool updated = false;
+                if (request.operation == TaskProtocolOperation::kSuspend) {
+                    updated = admission_service_.suspend_execution(execution, peer);
+                } else if (request.operation == TaskProtocolOperation::kExecutionHeartbeat) {
+                    updated = admission_service_.heartbeat_execution(execution, peer);
+                } else if (request.operation == TaskProtocolOperation::kExecutionComplete) {
+                    updated = admission_service_.complete_execution(execution, peer);
+                } else if (request.operation == TaskProtocolOperation::kExecutionFail) {
+                    updated = admission_service_.fail_execution(execution, peer);
+                } else {
+                    updated = admission_service_.cancel_execution(execution, peer);
+                }
+                const auto current = admission_service_.find(request.task_id);
+                if (!updated || !current.has_value()) {
+                    return format_response(error_response(TaskProtocolErrorCode::kInvalidRequest));
+                }
+                return format_response(state_response(current->task_id, current->state));
             }
             case TaskProtocolOperation::kHeartbeat: {
                 if (admission_service_.heartbeat(request.task_id, peer)) {

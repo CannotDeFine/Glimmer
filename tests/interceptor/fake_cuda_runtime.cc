@@ -3,11 +3,43 @@
 #endif
 
 #include <cuda.h>
+#include "event_audit_fixture.h"
+#include <cstdlib>
+
+#ifdef cuEventDestroy
+#undef cuEventDestroy
+#endif
+
+#ifdef cuEventRecord
+#undef cuEventRecord
+#endif
+
+#ifdef cuEventRecordWithFlags
+#undef cuEventRecordWithFlags
+#endif
+
+#ifdef cuStreamWaitEvent
+#undef cuStreamWaitEvent
+#endif
+
+#ifdef cudaEventRecord
+#undef cudaEventRecord
+#endif
+
+#ifdef cudaEventRecordWithFlags
+#undef cudaEventRecordWithFlags
+#endif
+
+#ifdef cudaStreamWaitEvent
+#undef cudaStreamWaitEvent
+#endif
 #include <cuda_runtime_api.h>
 
 #include <dlfcn.h>
 
 #include <cstddef>
+#include <atomic>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -18,11 +50,15 @@
 #ifdef cudaGraphLaunch
 #undef cudaGraphLaunch
 #endif
+#ifdef cudaGraphInstantiateWithParams
+#undef cudaGraphInstantiateWithParams
+#endif
 #ifdef cudaLaunchKernelExC
 #undef cudaLaunchKernelExC
 #endif
 
 namespace {
+glimmer::tests::EventAudit g_event_audit;
 
 using DriverAllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes);
 using DriverManagedAllocFunction = CUresult (*)(CUdeviceptr* device_pointer,
@@ -74,6 +110,94 @@ CUdeviceptr to_device_pointer(void* runtime_pointer) noexcept {
 
 }  // namespace
 
+extern "C" glimmer::tests::EventAudit* glimmer_fake_event_audit() {
+    return &g_event_audit;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaEventCreate(cudaEvent_t* event) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kCreate, event,
+                                      nullptr, nullptr, nullptr, 0);
+    return static_cast<cudaError_t>(g_event_audit.result);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaEventCreateWithFlags(cudaEvent_t* event, unsigned int flags) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kCreateWithFlags,
+                                      event, nullptr, nullptr, nullptr, flags);
+    return static_cast<cudaError_t>(g_event_audit.result);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kRecord, nullptr,
+                                      event, stream, nullptr, 0);
+    return static_cast<cudaError_t>(g_event_audit.result);
+}
+
+#ifndef GLIMMER_FAKE_NO_EVENT_PTDS
+extern "C" cudaError_t CUDARTAPI cudaEventRecord_ptsz(cudaEvent_t event, cudaStream_t stream) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kRecordPtds,
+                                      nullptr, event, stream, nullptr, 0);
+    return static_cast<cudaError_t>(g_event_audit.result);
+}
+#endif
+
+extern "C" cudaError_t CUDARTAPI cudaEventRecordWithFlags(cudaEvent_t event, cudaStream_t stream,
+                                                          unsigned int flags) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kRecordFlags,
+                                      nullptr, event, stream, nullptr, flags);
+    return static_cast<cudaError_t>(g_event_audit.result);
+}
+
+#ifndef GLIMMER_FAKE_NO_EVENT_PTDS
+extern "C" cudaError_t CUDARTAPI cudaEventRecordWithFlags_ptsz(cudaEvent_t event,
+                                                               cudaStream_t stream,
+                                                               unsigned int flags) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kRecordFlagsPtds,
+                                      nullptr, event, stream, nullptr, flags);
+    return static_cast<cudaError_t>(g_event_audit.result);
+}
+#endif
+
+extern "C" cudaError_t CUDARTAPI cudaEventQuery(cudaEvent_t event) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kQuery, nullptr,
+                                      event, nullptr, nullptr, 0);
+    return static_cast<cudaError_t>(g_event_audit.result);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaEventSynchronize(cudaEvent_t event) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kSynchronize,
+                                      nullptr, event, nullptr, nullptr, 0);
+    return static_cast<cudaError_t>(g_event_audit.result);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaEventDestroy(cudaEvent_t event) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kDestroy, nullptr,
+                                      event, nullptr, nullptr, 0);
+    return static_cast<cudaError_t>(g_event_audit.result);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaEventElapsedTime(float* milliseconds, cudaEvent_t start,
+                                                      cudaEvent_t end) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kElapsed,
+                                      milliseconds, start, nullptr, end, 0);
+    return static_cast<cudaError_t>(g_event_audit.result);
+}
+
+extern "C" cudaError_t CUDARTAPI cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event,
+                                                     unsigned int flags) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kWait, nullptr,
+                                      event, stream, nullptr, flags);
+    return static_cast<cudaError_t>(g_event_audit.result);
+}
+
+#ifndef GLIMMER_FAKE_NO_EVENT_PTDS
+extern "C" cudaError_t CUDARTAPI cudaStreamWaitEvent_ptsz(cudaStream_t stream, cudaEvent_t event,
+                                                          unsigned int flags) {
+    glimmer::tests::record_event_call(g_event_audit, glimmer::tests::EventCall::kWaitPtds, nullptr,
+                                      event, stream, nullptr, flags);
+    return static_cast<cudaError_t>(g_event_audit.result);
+}
+#endif
+
 extern "C" cudaError_t CUDARTAPI cudaMalloc(void** device_pointer, std::size_t memory_bytes) {
     if (device_pointer == nullptr) {
         return cudaErrorInvalidValue;
@@ -91,6 +215,10 @@ extern "C" cudaError_t CUDARTAPI cudaMalloc(void** device_pointer, std::size_t m
     }
     *device_pointer = to_runtime_pointer(driver_pointer);
     return cudaSuccess;
+}
+
+extern "C" bool glimmer_fake_runtime_capacity_available() {
+    return true;
 }
 
 extern "C" cudaError_t CUDARTAPI cudaMallocManaged(void** device_pointer, std::size_t memory_bytes,
@@ -332,6 +460,47 @@ extern "C" cudaError_t CUDARTAPI cudaLaunchKernel(const void*, dim3, dim3, void*
     return cudaSuccess;
 }
 
+#ifndef GLIMMER_FAKE_NO_CAPTURE
+namespace {
+
+cudaError_t fake_runtime_capture_query(cudaStream_t stream, cudaStreamCaptureStatus* status,
+                                       const char* alias) {
+    using DriverQuery = CUresult (*)(CUstream, CUstreamCaptureStatus*);
+    if (status == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    // Existing preload fixtures load the native Driver locally. Capture APIs
+    // are not exported interceptor wrappers, so RTLD_DEFAULT cannot find them.
+    void* driver = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (driver == nullptr) {
+        return cudaErrorNotSupported;
+    }
+    const auto query = reinterpret_cast<DriverQuery>(dlsym(driver, alias));
+    CUstreamCaptureStatus driver_status{};
+    const CUresult result = query == nullptr
+                                ? CUDA_ERROR_NOT_SUPPORTED
+                                : query(reinterpret_cast<CUstream>(stream), &driver_status);
+    const bool library_closed = dlclose(driver) == 0;
+    if (result != CUDA_SUCCESS || !library_closed) {
+        return cudaErrorInitializationError;
+    }
+    *status = static_cast<cudaStreamCaptureStatus>(driver_status);
+    return cudaSuccess;
+}
+
+}  // namespace
+
+extern "C" cudaError_t CUDARTAPI cudaStreamIsCapturing(cudaStream_t stream,
+                                                       cudaStreamCaptureStatus* status) {
+    return fake_runtime_capture_query(stream, status, "cuStreamIsCapturing");
+}
+
+extern "C" cudaError_t CUDARTAPI cudaStreamIsCapturing_ptsz(cudaStream_t stream,
+                                                            cudaStreamCaptureStatus* status) {
+    return fake_runtime_capture_query(stream, status, "cuStreamIsCapturing_ptsz");
+}
+#endif
+
 extern "C" cudaError_t CUDARTAPI cudaLaunchKernel_ptsz(const void* function, dim3 grid_dim,
                                                        dim3 block_dim, void** arguments,
                                                        std::size_t shared_memory_bytes,
@@ -341,6 +510,202 @@ extern "C" cudaError_t CUDARTAPI cudaLaunchKernel_ptsz(const void* function, dim
 
 extern "C" cudaError_t CUDARTAPI cudaGraphLaunch(cudaGraphExec_t graph_exec, cudaStream_t) {
     return graph_exec == nullptr ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+namespace {
+std::atomic<unsigned int> g_graph_constructor_calls{};
+std::atomic<unsigned int> g_graph_destroy_calls{};
+std::array<std::atomic<unsigned int>, 2> g_graph_event_update_calls{};
+std::array<std::atomic<unsigned int>, 2> g_graph_node_update_calls{};
+std::array<std::atomic<unsigned int>, 2> g_graph_update_calls{};
+std::atomic<unsigned int> g_graph_child_update_calls{};
+#ifdef GLIMMER_FAKE_GRAPH_ABI_VERSIONS
+std::array<std::atomic<unsigned int>, 2> g_graph_base_calls{};
+#endif
+cudaError_t construct_fake_runtime_graph(cudaGraphExec_t* output, cudaGraph_t graph,
+                                         unsigned long long flags) {
+    ++g_graph_constructor_calls;
+    if (!output || graph != reinterpret_cast<cudaGraph_t>(0xfa020)) {
+        return cudaErrorInvalidValue;
+    }
+    if (flags == 10000) {
+        return cudaErrorApiFailureBase;
+    }
+    if (flags == 10002) {
+        *output = nullptr;
+        return cudaSuccess;
+    }
+    *output = reinterpret_cast<cudaGraphExec_t>(0xfa010);
+    return flags == 10001 ? cudaErrorApiFailureBase : cudaSuccess;
+}
+}  // namespace
+extern "C" unsigned int glimmer_fake_runtime_graph_constructor_calls() {
+    return g_graph_constructor_calls.load();
+}
+extern "C" unsigned int glimmer_fake_runtime_graph_destroy_calls() {
+    return g_graph_destroy_calls.load();
+}
+extern "C" unsigned int glimmer_fake_runtime_graph_event_update_calls(bool is_record) {
+    return g_graph_event_update_calls[is_record ? 0 : 1].load();
+}
+extern "C" unsigned int glimmer_fake_runtime_graph_node_update_calls(bool is_generic) {
+    return g_graph_node_update_calls[is_generic ? 0 : 1].load();
+}
+extern "C" unsigned int glimmer_fake_runtime_graph_update_calls(bool is_legacy) {
+    return g_graph_update_calls[is_legacy ? 0 : 1].load();
+}
+extern "C" unsigned int glimmer_fake_runtime_graph_child_update_calls() {
+    return g_graph_child_update_calls.load();
+}
+extern "C" cudaError_t CUDARTAPI cudaGraphExecChildGraphNodeSetParams(cudaGraphExec_t executable,
+                                                                      cudaGraphNode_t node,
+                                                                      cudaGraph_t graph) {
+    ++g_graph_child_update_calls;
+    if (executable != reinterpret_cast<cudaGraphExec_t>(0xfa010) || !node || !graph)
+        return cudaErrorInvalidValue;
+    return graph == reinterpret_cast<cudaGraph_t>(0xfa099) ? cudaErrorApiFailureBase : cudaSuccess;
+}
+extern "C" cudaError_t CUDARTAPI glimmer_runtime_graph_update_legacy(
+    cudaGraphExec_t executable, cudaGraph_t graph, cudaGraphNode_t* error_node,
+    cudaGraphExecUpdateResult* result) {
+    ++g_graph_update_calls[0];
+    if (!executable || !graph || !result) return cudaErrorInvalidValue;
+    if (error_node) *error_node = reinterpret_cast<cudaGraphNode_t>(0xfa052);
+    *result = cudaGraphExecUpdateSuccess;
+    return graph == reinterpret_cast<cudaGraph_t>(0xfa099) ? cudaErrorApiFailureBase : cudaSuccess;
+}
+#if CUDART_VERSION >= 12000
+extern "C" cudaError_t CUDARTAPI glimmer_runtime_graph_update_modern(
+    cudaGraphExec_t executable, cudaGraph_t graph, cudaGraphExecUpdateResultInfo* result) {
+    ++g_graph_update_calls[1];
+    if (!executable || !graph || !result) return cudaErrorInvalidValue;
+    result->result = cudaGraphExecUpdateSuccess;
+    result->errorNode = reinterpret_cast<cudaGraphNode_t>(0xfa053);
+    result->errorFromNode = reinterpret_cast<cudaGraphNode_t>(0xfa054);
+    return graph == reinterpret_cast<cudaGraph_t>(0xfa099) ? cudaErrorApiFailureBase : cudaSuccess;
+}
+#endif
+#ifdef GLIMMER_FAKE_GRAPH_ABI_VERSIONS
+#if CUDART_VERSION >= 12000
+asm(".symver glimmer_runtime_graph_update_legacy,cudaGraphExecUpdate@libcudart.so.11.0");
+asm(".symver glimmer_runtime_graph_update_modern,cudaGraphExecUpdate@@libcudart.so.12");
+#else
+asm(".symver glimmer_runtime_graph_update_legacy,cudaGraphExecUpdate@@libcudart.so.11.0");
+#endif
+#else
+#if CUDART_VERSION >= 12000
+extern "C" cudaError_t CUDARTAPI cudaGraphExecUpdate(cudaGraphExec_t executable, cudaGraph_t graph,
+                                                     cudaGraphExecUpdateResultInfo* result) {
+    return glimmer_runtime_graph_update_modern(executable, graph, result);
+}
+#else
+extern "C" cudaError_t CUDARTAPI cudaGraphExecUpdate(cudaGraphExec_t executable, cudaGraph_t graph,
+                                                     cudaGraphNode_t* error_node,
+                                                     cudaGraphExecUpdateResult* result) {
+    return glimmer_runtime_graph_update_legacy(executable, graph, error_node, result);
+}
+#endif
+#endif
+extern "C" cudaError_t CUDARTAPI cudaGraphNodeSetEnabled(cudaGraphExec_t executable,
+                                                         cudaGraphNode_t node,
+                                                         unsigned int is_enabled) {
+    ++g_graph_node_update_calls[1];
+    if (executable != reinterpret_cast<cudaGraphExec_t>(0xfa010) || !node)
+        return cudaErrorInvalidValue;
+    return is_enabled == 10000 ? cudaErrorApiFailureBase : cudaSuccess;
+}
+#if CUDART_VERSION >= 12020
+extern "C" cudaError_t CUDARTAPI cudaGraphExecNodeSetParams(cudaGraphExec_t executable,
+                                                            cudaGraphNode_t node,
+                                                            cudaGraphNodeParams* params) {
+    ++g_graph_node_update_calls[0];
+    if (executable != reinterpret_cast<cudaGraphExec_t>(0xfa010) || !node || !params)
+        return cudaErrorInvalidValue;
+    return params->reserved0[0] == 10000 ? cudaErrorApiFailureBase : cudaSuccess;
+}
+#endif
+namespace {
+cudaError_t update_fake_graph_event(cudaGraphExec_t executable, cudaGraphNode_t node,
+                                    cudaEvent_t event, bool is_record) {
+    ++g_graph_event_update_calls[is_record ? 0 : 1];
+    if (executable != reinterpret_cast<cudaGraphExec_t>(0xfa010) || !node || !event) {
+        return cudaErrorInvalidValue;
+    }
+    return event == reinterpret_cast<cudaEvent_t>(0xfa099) ? cudaErrorApiFailureBase : cudaSuccess;
+}
+}  // namespace
+extern "C" cudaError_t CUDARTAPI cudaGraphExecEventRecordNodeSetEvent(cudaGraphExec_t executable,
+                                                                      cudaGraphNode_t node,
+                                                                      cudaEvent_t event) {
+    return update_fake_graph_event(executable, node, event, true);
+}
+extern "C" cudaError_t CUDARTAPI cudaGraphExecEventWaitNodeSetEvent(cudaGraphExec_t executable,
+                                                                    cudaGraphNode_t node,
+                                                                    cudaEvent_t event) {
+    return update_fake_graph_event(executable, node, event, false);
+}
+#ifdef GLIMMER_FAKE_GRAPH_ABI_VERSIONS
+extern "C" unsigned int glimmer_fake_runtime_graph_base_calls(bool is_legacy) {
+    return g_graph_base_calls[is_legacy ? 0 : 1].load();
+}
+extern "C" cudaError_t CUDARTAPI glimmer_runtime_graph_instantiate_legacy(
+    cudaGraphExec_t* output, cudaGraph_t graph, cudaGraphNode_t* error_node, char* log,
+    std::size_t log_bytes) {
+    ++g_graph_base_calls[0];
+    if (error_node) *error_node = reinterpret_cast<cudaGraphNode_t>(0xfa060);
+    if (log && log_bytes) {
+        log[0] = 'L';
+        log[log_bytes - 1] = '!';
+    }
+    return construct_fake_runtime_graph(output, graph, 0);
+}
+extern "C" cudaError_t CUDARTAPI glimmer_runtime_graph_instantiate_modern(
+    cudaGraphExec_t* output, cudaGraph_t graph, unsigned long long flags) {
+    ++g_graph_base_calls[1];
+    return construct_fake_runtime_graph(output, graph, flags);
+}
+#if CUDART_VERSION >= 12000
+asm(".symver glimmer_runtime_graph_instantiate_legacy,cudaGraphInstantiate@libcudart.so.11.0");
+asm(".symver glimmer_runtime_graph_instantiate_modern,cudaGraphInstantiate@@libcudart.so.12");
+#else
+asm(".symver glimmer_runtime_graph_instantiate_legacy,cudaGraphInstantiate@@libcudart.so.11.0");
+asm(".symver glimmer_runtime_graph_instantiate_modern,cudaGraphInstantiate@libcudart.so.12");
+#endif
+#endif
+extern "C" cudaError_t CUDARTAPI cudaGraphInstantiateWithFlags(cudaGraphExec_t* output,
+                                                               cudaGraph_t graph,
+                                                               unsigned long long flags) {
+    return construct_fake_runtime_graph(output, graph, flags);
+}
+#if CUDART_VERSION >= 12000
+namespace {
+cudaError_t construct_fake_runtime_graph_params(cudaGraphExec_t* output, cudaGraph_t graph,
+                                                cudaGraphInstantiateParams* parameters,
+                                                bool is_ptds) {
+    if (!parameters || parameters->uploadStream != reinterpret_cast<cudaStream_t>(0xfa040)) {
+        return cudaErrorInvalidValue;
+    }
+    const auto legacy_node = reinterpret_cast<cudaGraphNode_t>(0xfa050);
+    const auto ptds_node = reinterpret_cast<cudaGraphNode_t>(0xfa051);
+    parameters->errNode_out = is_ptds ? ptds_node : legacy_node;
+    parameters->result_out = cudaGraphInstantiateSuccess;
+    return construct_fake_runtime_graph(output, graph, parameters->flags);
+}
+}  // namespace
+extern "C" cudaError_t CUDARTAPI cudaGraphInstantiateWithParams(
+    cudaGraphExec_t* output, cudaGraph_t graph, cudaGraphInstantiateParams* parameters) {
+    return construct_fake_runtime_graph_params(output, graph, parameters, false);
+}
+extern "C" cudaError_t CUDARTAPI cudaGraphInstantiateWithParams_ptsz(
+    cudaGraphExec_t* output, cudaGraph_t graph, cudaGraphInstantiateParams* parameters) {
+    return construct_fake_runtime_graph_params(output, graph, parameters, true);
+}
+#endif
+extern "C" cudaError_t CUDARTAPI cudaGraphExecDestroy(cudaGraphExec_t executable) {
+    ++g_graph_destroy_calls;
+    return executable == reinterpret_cast<cudaGraphExec_t>(0xfa099) ? cudaErrorApiFailureBase
+           : executable                                             ? cudaSuccess
+                                                                    : cudaErrorInvalidValue;
 }
 
 extern "C" cudaError_t CUDARTAPI cudaLaunchKernelExC(const cudaLaunchConfig_t* config,
@@ -612,4 +977,13 @@ extern "C" cudaError_t CUDARTAPI cudaMemGetInfo(std::size_t* free_bytes, std::si
     }
     const CUresult result = query(free_bytes, total_bytes);
     return result == CUDA_SUCCESS ? cudaSuccess : cudaErrorInvalidValue;
+}
+
+extern "C" cudaError_t CUDARTAPI cudaStreamGetFlags(cudaStream_t stream, unsigned int* flags) {
+    const auto query = resolve_driver_function<decltype(&cuStreamGetFlags)>("cuStreamGetFlags");
+    if (!query) {
+        return cudaErrorNotSupported;
+    }
+    return query(reinterpret_cast<CUstream>(stream), flags) == CUDA_SUCCESS ? cudaSuccess
+                                                                            : cudaErrorUnknown;
 }

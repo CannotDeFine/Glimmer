@@ -23,7 +23,7 @@ import tempfile
 import time
 
 from measurements import MEASUREMENT_VERSION, read_metadata, summarize_solo
-from run_slo_validation import EXAMPLE, REPOSITORY, benchmark_environment, run_bounded
+from run_slo_validation import EXAMPLE, REPOSITORY, benchmark_environment, prepare_output, run_bounded
 
 
 VERSION = "uncontended_overhead_v1"
@@ -35,7 +35,8 @@ IDENTITY = ("device_uuid", "device_index", "torch_version", "cuda_version")
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=pathlib.Path, default=REPOSITORY / "build/cuda-perf")
-    parser.add_argument("--output-dir", type=pathlib.Path)
+    parser.add_argument("--output-dir", type=pathlib.Path,
+                        help="exact empty result directory in artifacts/ or outside the repository")
     parser.add_argument("--analyze-only", type=pathlib.Path)
     parser.add_argument("--python", default=str(EXAMPLE / ".venv/bin/python"))
     parser.add_argument("--duration-seconds", type=float, default=10)
@@ -261,7 +262,8 @@ def artifact_hashes(args: argparse.Namespace) -> dict:
     paths = [args.build_dir / name for name in ("CMakeCache.txt", "compile_commands.json",
              "lib/libglimmer_cuda_interceptor.so", "bin/glimmer_control_service", "bin/glimmer_control_client")]
     paths += list(EXAMPLE.glob("*.py"))
-    paths += [REPOSITORY / "CMakeLists.txt", REPOSITORY / "CMakePresets.json"]
+    paths += [REPOSITORY / "CMakeLists.txt", REPOSITORY / "CMakePresets.json",
+              REPOSITORY / "scripts/artifact_paths.py"]
     for root in ("src", "include", "cmake"):
         paths += [path for path in (REPOSITORY / root).rglob("*") if path.is_file()]
     return {str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
@@ -278,15 +280,7 @@ def main(argv=None) -> int:
         build = optimized_build(args.build_dir)
         if os.environ.get("CUDA_LAUNCH_BLOCKING", "0") != "0":
             raise ValueError("disable CUDA_LAUNCH_BLOCKING for performance measurement")
-        if args.output_dir is None:
-            (EXAMPLE / "output").mkdir(exist_ok=True)
-            output = pathlib.Path(tempfile.mkdtemp(prefix="overhead-baseline-", dir=EXAMPLE / "output"))
-        else:
-            destination = args.output_dir.resolve()
-            if destination.exists() and any(destination.iterdir()):
-                raise ValueError(f"output directory must be empty: {destination}")
-            destination.mkdir(parents=True, exist_ok=True)
-            output = destination
+        output = prepare_output("pytorch-overhead-baseline", args.output_dir)
         manifest = {"version": VERSION, "collection_complete": False, "build": build,
                     "arguments": {key: str(value) if isinstance(value, pathlib.Path) else value
                                   for key, value in vars(args).items()},

@@ -19,20 +19,26 @@ namespace {
     return elapsed.count() <= 0 ? 0 : static_cast<std::uint64_t>(elapsed.count());
 }
 
+[[nodiscard]] std::uint64_t add_duration(std::uint64_t accumulated,
+                                         std::uint64_t duration) noexcept {
+    return duration > std::numeric_limits<std::uint64_t>::max() - accumulated
+               ? std::numeric_limits<std::uint64_t>::max()
+               : accumulated + duration;
+}
+
 }  // namespace
 
-TaskAdmissionService::TaskAdmissionService(core::Scheduler& scheduler,
-                                           std::chrono::milliseconds lease_timeout,
-                                           bool bind_leases_to_process,
-                                           TaskDispatchObserver dispatch_observer,
-                                           void* dispatch_observer_context,
-                                           TaskCompletionObserver completion_observer,
-                                           void* completion_observer_context) noexcept
+TaskAdmissionService::TaskAdmissionService(
+    core::Scheduler& scheduler, std::chrono::milliseconds lease_timeout,
+    bool bind_leases_to_process, TaskDispatchObserver dispatch_observer,
+    void* dispatch_observer_context, TaskCompletionObserver completion_observer,
+    void* completion_observer_context, std::optional<NativeEpochExtent> epoch_policy) noexcept
     : scheduler_(scheduler),
       lease_timeout_(lease_timeout > std::chrono::milliseconds::zero()
                          ? lease_timeout
                          : std::chrono::milliseconds::zero()),
       bind_leases_to_process_(bind_leases_to_process),
+      native_epoch_policy(epoch_policy),
       dispatch_observer_(dispatch_observer),
       dispatch_observer_context_(dispatch_observer_context),
       completion_observer_(completion_observer),
@@ -42,6 +48,14 @@ core::SubmitResult TaskAdmissionService::submit(const TaskAdmissionRequest& requ
                                                 TaskResourceRegistrar registrar,
                                                 void* registrar_context,
                                                 std::optional<TaskPeerIdentity> peer) {
+    return submit_impl(request, registrar, registrar_context, peer, std::nullopt);
+}
+
+core::SubmitResult TaskAdmissionService::submit_impl(const TaskAdmissionRequest& request,
+                                                     TaskResourceRegistrar registrar,
+                                                     void* registrar_context,
+                                                     std::optional<TaskPeerIdentity> peer,
+                                                     std::optional<NativeEpochExtent> extent) {
     if (registrar == nullptr) {
         return {.status = core::SubmitStatus::kInternalError};
     }
@@ -75,10 +89,13 @@ core::SubmitResult TaskAdmissionService::submit(const TaskAdmissionRequest& requ
                                           ? Clock::time_point::max()
                                           : submitted_at + lease_timeout_;
                 recorded = pending_leases_
-                               .emplace(admission.task_id, LeaseRecord{.deadline = deadline,
-                                                                       .submitted_at = submitted_at,
-                                                                       .reaping = false,
-                                                                       .owner = peer})
+                               .emplace(admission.task_id,
+                                        LeaseRecord{.deadline = deadline,
+                                                    .submitted_at = submitted_at,
+                                                    .reaping = false,
+                                                    .owner = peer,
+                                                    .is_cooperative = extent.has_value(),
+                                                    .native_epoch = extent})
                                .second;
             } catch (...) {
                 recorded = false;
@@ -99,6 +116,10 @@ core::SubmitResult TaskAdmissionService::submit(const TaskAdmissionRequest& requ
 
 bool TaskAdmissionService::cancel(core::TaskId task_id) {
     std::scoped_lock admission_lock(admission_mutex_);
+    const auto active = active_leases_.find(task_id);
+    if (active != active_leases_.end() && active->second.native_epoch.has_value()) {
+        return false;
+    }
     const bool cancelled = scheduler_.cancel(task_id);
     if (cancelled) {
         active_leases_.erase(task_id);
@@ -108,8 +129,17 @@ bool TaskAdmissionService::cancel(core::TaskId task_id) {
     return cancelled;
 }
 
-bool TaskAdmissionService::cancel_queued(core::TaskId task_id) {
+bool TaskAdmissionService::cancel_queued(core::TaskId task_id,
+                                         std::optional<TaskPeerIdentity> peer) {
     std::scoped_lock admission_lock(admission_mutex_);
+    const auto pending = pending_leases_.find(task_id);
+    if (bind_leases_to_process_ &&
+        (pending == pending_leases_.end() || !owner_matches(pending->second, peer))) {
+        return false;
+    }
+    if (pending != pending_leases_.end() && pending->second.is_cooperative) {
+        return false;
+    }
     const bool cancelled = scheduler_.cancel_queued(task_id);
     if (cancelled) {
         pending_leases_.erase(task_id);
@@ -144,6 +174,12 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::claim(
         return std::nullopt;
     }
     std::unique_lock admission_lock(admission_mutex_);
+    const auto active = active_leases_.find(task_id);
+    const auto pending = pending_leases_.find(task_id);
+    if ((active != active_leases_.end() && active->second.is_cooperative) ||
+        (pending != pending_leases_.end() && pending->second.is_cooperative)) {
+        return std::nullopt;
+    }
     auto existing = scheduler_.find(task_id);
     if (existing.has_value() && existing->state == core::TaskState::kRunning) {
         const auto iterator = active_leases_.find(task_id);
@@ -158,7 +194,7 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::claim(
     if (!pending_owner_matches(task_id, peer)) {
         return std::nullopt;
     }
-    const auto result = record_lease(scheduler_.dispatch_task(task_id), peer);
+    auto result = record_lease(scheduler_.dispatch_task(task_id), peer);
     admission_lock.unlock();
     if (result.has_value()) {
         observe_dispatch(result.value());
@@ -181,6 +217,12 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::wait_claim(
         const std::uint64_t observed_generation = state_generation_;
         state_lock.unlock();
         std::unique_lock admission_lock(admission_mutex_);
+        const auto active = active_leases_.find(task_id);
+        const auto pending = pending_leases_.find(task_id);
+        if ((active != active_leases_.end() && active->second.is_cooperative) ||
+            (pending != pending_leases_.end() && pending->second.is_cooperative)) {
+            return std::nullopt;
+        }
         auto existing = scheduler_.find(task_id);
         if (!existing.has_value()) {
             return std::nullopt;
@@ -237,7 +279,12 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::record_lease(
         return snapshot;
     }
     bool pending_owner_valid = true;
+    bool is_cooperative = false;
     Clock::time_point submitted_at{};
+    Clock::time_point queued_at{};
+    std::uint64_t queue_wait_microseconds = 0;
+    std::uint64_t service_time_microseconds = 0;
+    std::optional<NativeEpochExtent> extent;
     {
         const auto pending_iterator = pending_leases_.find(snapshot->task_id);
         if (bind_leases_to_process_ &&
@@ -249,6 +296,13 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::record_lease(
             }
         } else if (pending_iterator != pending_leases_.end()) {
             submitted_at = pending_iterator->second.submitted_at;
+            is_cooperative = pending_iterator->second.is_cooperative;
+            extent = pending_iterator->second.native_epoch;
+            queued_at = pending_iterator->second.queued_at == Clock::time_point{}
+                            ? submitted_at
+                            : pending_iterator->second.queued_at;
+            queue_wait_microseconds = pending_iterator->second.queue_wait_microseconds;
+            service_time_microseconds = pending_iterator->second.service_time_microseconds;
             pending_leases_.erase(pending_iterator);
         }
     }
@@ -270,12 +324,18 @@ std::optional<core::TaskSnapshot> TaskAdmissionService::record_lease(
         const auto deadline = lease_timeout_ == std::chrono::milliseconds::zero()
                                   ? Clock::time_point::max()
                                   : started_at + lease_timeout_;
-        const auto [iterator, inserted] =
-            active_leases_.emplace(snapshot->task_id, LeaseRecord{.deadline = deadline,
-                                                                  .submitted_at = submitted_at,
-                                                                  .started_at = started_at,
-                                                                  .reaping = false,
-                                                                  .owner = peer});
+        const auto [iterator, inserted] = active_leases_.emplace(
+            snapshot->task_id,
+            LeaseRecord{.deadline = deadline,
+                        .submitted_at = submitted_at,
+                        .started_at = started_at,
+                        .reaping = false,
+                        .owner = peer,
+                        .is_cooperative = is_cooperative,
+                        .queue_wait_microseconds = add_duration(
+                            queue_wait_microseconds, elapsed_microseconds(queued_at, started_at)),
+                        .service_time_microseconds = service_time_microseconds,
+                        .native_epoch = extent});
         static_cast<void>(iterator);
         if (!inserted && !bind_leases_to_process_) {
             // Preserve idempotence if an external dispatch was already recorded.
@@ -336,16 +396,29 @@ void TaskAdmissionService::observe_completion(const core::TaskSnapshot& snapshot
             .task = snapshot,
             .terminal_state = terminal_state,
             .queue_wait_microseconds =
-                lease.has_value() ? elapsed_microseconds(lease->submitted_at, lease->started_at)
+                lease.has_value() ? add_duration(lease->queue_wait_microseconds,
+                                                 lease->started_at == Clock::time_point{}
+                                                     ? elapsed_microseconds(lease->queued_at, now)
+                                                     : 0)
                                   : 0,
             .service_time_microseconds =
-                lease.has_value() ? elapsed_microseconds(lease->started_at, now) : 0};
+                lease.has_value() ? add_duration(lease->service_time_microseconds,
+                                                 elapsed_microseconds(lease->started_at, now))
+                                  : 0};
         completion_observer_(completion_observer_context_, observation);
     } catch (...) {
         // Observability is strictly best effort. A callback or allocation
         // failure must never change a terminal scheduler transition.
         return;
     }
+}
+
+void TaskAdmissionService::stop_lease_timing(LeaseRecord& lease) noexcept {
+    const auto now = Clock::now();
+    lease.service_time_microseconds =
+        add_duration(lease.service_time_microseconds, elapsed_microseconds(lease.started_at, now));
+    lease.started_at = {};
+    lease.queued_at = now;
 }
 
 bool TaskAdmissionService::heartbeat(core::TaskId task_id, std::optional<TaskPeerIdentity> peer) {
@@ -359,7 +432,7 @@ bool TaskAdmissionService::heartbeat(core::TaskId task_id, std::optional<TaskPee
     }
     const auto lease_iterator = active_leases_.find(task_id);
     if (lease_iterator == active_leases_.end() || lease_iterator->second.reaping ||
-        !owner_matches(lease_iterator->second, peer)) {
+        lease_iterator->second.is_cooperative || !owner_matches(lease_iterator->second, peer)) {
         return false;
     }
     if (lease_timeout_ != std::chrono::milliseconds::zero()) {
@@ -372,8 +445,9 @@ bool TaskAdmissionService::complete(core::TaskId task_id, std::optional<TaskPeer
     std::unique_lock admission_lock(admission_mutex_);
     {
         const auto lease_iterator = active_leases_.find(task_id);
-        if (bind_leases_to_process_ && (lease_iterator == active_leases_.end() ||
-                                        !owner_matches(lease_iterator->second, peer))) {
+        if (bind_leases_to_process_ &&
+            (lease_iterator == active_leases_.end() || lease_iterator->second.is_cooperative ||
+             !owner_matches(lease_iterator->second, peer))) {
             return false;
         }
     }
@@ -401,8 +475,9 @@ bool TaskAdmissionService::fail(core::TaskId task_id, std::optional<TaskPeerIden
     std::unique_lock admission_lock(admission_mutex_);
     {
         const auto lease_iterator = active_leases_.find(task_id);
-        if (bind_leases_to_process_ && (lease_iterator == active_leases_.end() ||
-                                        !owner_matches(lease_iterator->second, peer))) {
+        if (bind_leases_to_process_ &&
+            (lease_iterator == active_leases_.end() || lease_iterator->second.is_cooperative ||
+             !owner_matches(lease_iterator->second, peer))) {
             return false;
         }
     }
@@ -458,6 +533,14 @@ bool TaskAdmissionService::reap_expired() {
         } else {
             for (auto& [task_id, lease] : active_leases_) {
                 if (!lease.reaping && now >= lease.deadline) {
+                    if (lease.is_cooperative) {
+                        // A transport deadline cannot prove that physical CUDA
+                        // work stopped. Keep its capacity and ownership until
+                        // an authenticated stop/terminal report; never admit
+                        // overlapping work solely because a heartbeat was late.
+                        lease.deadline = Clock::time_point::max();
+                        continue;
+                    }
                     expired_running_task = task_id;
                     lease.reaping = true;
                     break;

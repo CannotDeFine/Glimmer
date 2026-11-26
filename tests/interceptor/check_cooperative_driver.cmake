@@ -1,0 +1,17 @@
+if(NOT DEFINED APPLICATION OR NOT EXISTS "${APPLICATION}")
+    message(FATAL_ERROR "Ordinary Driver fixture is unavailable")
+endif()
+execute_process(COMMAND "${APPLICATION}" ${APPLICATION_ARGS}
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE diagnostic TIMEOUT 45)
+message("${output}${diagnostic}")
+if(NOT result STREQUAL "0" OR NOT output MATCHES "driver_cooperative_transparency status=ok")
+    message(FATAL_ERROR "Ordinary Driver application failed: ${result}")
+endif()
+if(APPLICATION_ARGS STREQUAL "--cross-context")
+    if(NOT diagnostic MATCHES "cooperative_context grants=2 retreat=1 suspended=1 resumed=1 completed=1 failed=0" OR
+       NOT diagnostic MATCHES "cooperative_context grants=1 retreat=0 suspended=0 resumed=0 completed=1 failed=0")
+        message(FATAL_ERROR "Cross-context shared admission and exact resumption were not demonstrated")
+    endif()
+elseif(NOT diagnostic MATCHES "cooperative_context grants=3 retreat=1 suspended=1 resumed=1 completed=2 failed=0")
+    message(FATAL_ERROR "Actual partial stop and exact-generation resume were not demonstrated")
+endif()

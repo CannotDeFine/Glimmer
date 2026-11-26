@@ -17,12 +17,14 @@ import pathlib
 import sys
 import time
 
-from measurements import MEASUREMENT_VERSION, summarize_samples
+from measurements import MEASUREMENT_VERSION, WORKLOAD_VERSIONS, summarize_samples
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--role", choices=("inference", "training"), default="inference")
+    parser.add_argument("--workload", choices=tuple(WORKLOAD_VERSIONS), default="mlp",
+                        help="MLP or fixed FP32 cuDNN CNN; hidden/intermediate sizes are MLP-only")
     parser.add_argument("--device", default="cuda", help="Torch device, for example cuda or cuda:0")
     parser.add_argument("--dtype", choices=("float32", "float16", "bfloat16"), default="float32")
     parser.add_argument("--batch-size", type=int, default=32)
@@ -66,6 +68,9 @@ def validate_positive(arguments: argparse.Namespace) -> None:
         raise ValueError("--duration-seconds must be finite and in [0, 3600]")
     if arguments.expected_memory_total_bytes is not None and arguments.expected_memory_total_bytes <= 0:
         raise ValueError("--expected-memory-total-bytes must be positive")
+    if arguments.workload == "cnn" and (arguments.dtype != "float32" or
+                                        arguments.hidden_size != 1024 or arguments.intermediate_size != 0):
+        raise ValueError("CNN requires float32 and default unused MLP size options")
 
 
 def validate_memory_view(device_type: str, visible_total: int, expected_total: int) -> None:
@@ -100,12 +105,40 @@ def import_torch():
     return torch
 
 
-def build_model(torch, hidden_size: int, intermediate_size: int, device, dtype):
-    model = torch.nn.Sequential(
-        torch.nn.Linear(hidden_size, intermediate_size),
-        torch.nn.GELU(),
-        torch.nn.Linear(intermediate_size, hidden_size),
-    )
+def configure_cnn_backend(torch, device_type: str) -> str:
+    if device_type != "cuda":
+        return "unused"
+    if not torch.backends.cudnn.is_available() or not torch.backends.cudnn.enabled:
+        raise RuntimeError("CNN requires available and enabled cuDNN")
+    version = torch.backends.cudnn.version()
+    if not version or version <= 0:
+        raise RuntimeError("CNN requires a known cuDNN version")
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = False
+    return str(version)
+
+
+def build_model(torch, hidden_size: int, intermediate_size: int, device, dtype, workload="mlp"):
+    if workload == "cnn":
+        model = torch.nn.Sequential(
+            torch.nn.Conv2d(3, 16, 3, padding=1),
+            torch.nn.GELU(),
+            torch.nn.Conv2d(16, 32, 3, padding=1),
+            torch.nn.GELU(),
+            torch.nn.AdaptiveAvgPool2d(1),
+            torch.nn.Flatten(),
+            torch.nn.Linear(32, 10),
+        )
+    elif workload == "mlp":
+        model = torch.nn.Sequential(
+            torch.nn.Linear(hidden_size, intermediate_size),
+            torch.nn.GELU(),
+            torch.nn.Linear(intermediate_size, hidden_size),
+        )
+    else:
+        raise ValueError("unknown workload")
     return model.to(device=device, dtype=dtype)
 
 
@@ -131,7 +164,7 @@ def run_step(torch, model, inputs, targets, optimizer, role: str, work_units: in
 
 def write_measurements(output: pathlib.Path, rows: list[dict[str, object]]) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", newline="", encoding="utf-8") as stream:
+    with output.open("x", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=rows[0].keys())
         writer.writeheader()
         writer.writerows(rows)
@@ -173,6 +206,8 @@ def main() -> int:
     arguments = parse_args()
     try:
         validate_positive(arguments)
+        if arguments.output is not None and (arguments.output.exists() or arguments.output.is_symlink()):
+            raise ValueError(f"output already exists: {arguments.output}")
         if arguments.ready_file is not None and arguments.start_file is None:
             raise ValueError("--ready-file requires --start-file")
     except ValueError as error:
@@ -226,10 +261,17 @@ def main() -> int:
         device_name = "cpu"
         device_uuid = "cpu"
 
-    model = build_model(torch, arguments.hidden_size, intermediate_size, device, dtype)
+    cudnn_version = (configure_cnn_backend(torch, device.type)
+                     if arguments.workload == "cnn" else "unused")
+    workload_metadata = {"workload": arguments.workload,
+                         "workload_version": WORKLOAD_VERSIONS[arguments.workload],
+                         "cudnn_version": cudnn_version}
+    model = build_model(torch, arguments.hidden_size, intermediate_size, device, dtype, arguments.workload)
     model.train(arguments.role == "training")
-    inputs = torch.randn(arguments.batch_size, arguments.hidden_size, device=device, dtype=dtype)
-    targets = torch.randn(arguments.batch_size, arguments.hidden_size, device=device, dtype=dtype)
+    input_shape = (3, 32, 32) if arguments.workload == "cnn" else (arguments.hidden_size,)
+    output_shape = (10,) if arguments.workload == "cnn" else (arguments.hidden_size,)
+    inputs = torch.randn(arguments.batch_size, *input_shape, device=device, dtype=dtype)
+    targets = torch.randn(arguments.batch_size, *output_shape, device=device, dtype=dtype)
     optimizer = (
         torch.optim.SGD(model.parameters(), lr=arguments.learning_rate)
         if arguments.role == "training"
@@ -259,6 +301,7 @@ def main() -> int:
                     "device_name": device_name,
                     "device_uuid": device_uuid,
                     "ready_ns": ready_ns,
+                    **workload_metadata,
                 },
             )
             measurement_deadline_ns = wait_for_start(arguments.start_file, arguments.duration_seconds)
@@ -357,9 +400,12 @@ def main() -> int:
                     "measurement_deadline_ns": measurement_deadline_ns,
                     "torch_version": torch.__version__,
                     "cuda_version": torch.version.cuda,
+                    **workload_metadata,
                     "validation": int(validation),
                     "visible_memory_total_bytes": visible_memory_total,
                     "cuda_profile": int(arguments.profile_cuda),
+                    "cudnn_logging_configured": int(any(
+                        key.startswith(("CUDNN_LOG", "CUDNN_FRONTEND_LOG")) for key in os.environ)),
                     "mean_ms": f"{mean_ms:.3f}",
                     "p50_ms": f"{p50_ms:.3f}",
                     "p95_ms": f"{p95_ms:.3f}",
@@ -378,6 +424,8 @@ def main() -> int:
     print(
         "pytorch_smoke "
         f"role={arguments.role} status=ok validation=1 device={device} "
+        f"workload={arguments.workload} workload_version={workload_metadata['workload_version']} "
+        f"cudnn_version={cudnn_version} "
         f"device_name={device_name!r} torch={torch.__version__} "
         f"cuda={torch.version.cuda!r} iterations={len(rows)} measurement_version={MEASUREMENT_VERSION} "
         f"cuda_profile={int(arguments.profile_cuda)} "

@@ -51,6 +51,7 @@ class LaunchCompletionTracker final {
     void stop() noexcept;
 
     DriverDispatch& driver_;
+    decltype(&cuThreadExchangeStreamCaptureMode) exchange_capture_mode_ = nullptr;
     control::LaunchGate& gate_;
     mutable std::mutex mutex_;
     std::condition_variable condition_;

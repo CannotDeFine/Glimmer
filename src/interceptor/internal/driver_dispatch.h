@@ -8,6 +8,27 @@ namespace glimmer::interceptor {
 
 using MemAllocFunction = CUresult (*)(CUdeviceptr* device_pointer, std::size_t memory_bytes);
 using InitFunction = CUresult (*)(unsigned int flags);
+using ModuleLoadDataFunction = CUresult (*)(CUmodule* module, const void* image);
+using ModuleLoadDataExFunction = CUresult (*)(CUmodule* module, const void* image,
+                                              unsigned int option_count, CUjit_option* options,
+                                              void** option_values);
+using ModuleGetFunctionFunction = CUresult (*)(CUfunction* function, CUmodule module,
+                                               const char* name);
+using ModuleUnloadFunction = CUresult (*)(CUmodule module);
+using LibraryLoadDataFunction = CUresult (*)(CUlibrary*, const void*, CUjit_option*, void**,
+                                             unsigned int, CUlibraryOption*, void**, unsigned int);
+using LibraryGetKernelFunction = CUresult (*)(CUkernel*, CUlibrary, const char*);
+using LibraryGetModuleFunction = CUresult (*)(CUmodule*, CUlibrary);
+using LibraryLoadFromFileFunction = CUresult (*)(CUlibrary*, const char*, CUjit_option*, void**,
+                                                 unsigned int, CUlibraryOption*, void**,
+                                                 unsigned int);
+using KernelGetFunctionFunction = CUresult (*)(CUfunction*, CUkernel);
+using FunctionLoadFunction = CUresult (*)(CUfunction);
+using FunctionGetModuleFunction = CUresult (*)(CUmodule*, CUfunction);
+using LibraryUnloadFunction = CUresult (*)(CUlibrary);
+using OccupancyFunction = CUresult (*)(int* block_count, CUfunction function, int block_size,
+                                       std::size_t dynamic_shared_memory_bytes);
+using DeviceGetAttributeFunction = CUresult (*)(int*, CUdevice_attribute, CUdevice);
 using LaunchKernelFunction = CUresult (*)(CUfunction function, unsigned int grid_dim_x,
                                           unsigned int grid_dim_y, unsigned int grid_dim_z,
                                           unsigned int block_dim_x, unsigned int block_dim_y,
@@ -141,12 +162,22 @@ using EventCreateFunction = CUresult (*)(CUevent* event, unsigned int flags);
 using EventRecordFunction = CUresult (*)(CUevent event, CUstream stream);
 using EventQueryFunction = CUresult (*)(CUevent event);
 using EventDestroyFunction = CUresult (*)(CUevent event);
+using EventRecordWithFlagsFunction = CUresult (*)(CUevent event, CUstream stream,
+                                                  unsigned int flags);
+using EventElapsedTimeFunction = CUresult (*)(float* milliseconds, CUevent start, CUevent end);
+using StreamWaitEventFunction = CUresult (*)(CUstream stream, CUevent event, unsigned int flags);
 using ContextGetCurrentFunction = CUresult (*)(CUcontext* context);
 using ContextGetDeviceFunction = CUresult (*)(CUdevice* device);
+using ContextGetApiVersionFunction = CUresult (*)(CUcontext context, unsigned int* version);
+using PrimaryContextGetStateFunction = CUresult (*)(CUdevice, unsigned int*, int*);
+using PrimaryContextRetainFunction = CUresult (*)(CUcontext*, CUdevice);
+using PrimaryContextReleaseFunction = CUresult (*)(CUdevice);
+using PrimaryContextResetFunction = CUresult (*)(CUdevice);
 using ContextDestroyFunction = CUresult (*)(CUcontext context);
 using StreamGetDeviceFunction = CUresult (*)(CUstream stream, CUdevice* device);
 using StreamGetContextFunction = CUresult (*)(CUstream stream, CUcontext* context);
 using StreamQueryFunction = CUresult (*)(CUstream stream);
+using StreamCaptureFunction = CUresult (*)(CUstream stream, CUstreamCaptureStatus* status);
 using StreamSynchronizeFunction = CUresult (*)(CUstream stream);
 using StreamDestroyFunction = CUresult (*)(CUstream stream);
 using DlsymFunction = void* (*)(void* handle, const char* name);
@@ -158,6 +189,20 @@ using GetProcAddressV2Function = CUresult (*)(const char* symbol, void** functio
 
 struct DriverFunctionTable {
     InitFunction init = nullptr;
+    ModuleLoadDataFunction module_load_data = nullptr;
+    LibraryLoadDataFunction library_load_data = nullptr;
+    LibraryLoadFromFileFunction library_load_from_file = nullptr;
+    LibraryGetKernelFunction library_get_kernel = nullptr;
+    LibraryGetModuleFunction library_get_module = nullptr;
+    KernelGetFunctionFunction kernel_get_function = nullptr;
+    FunctionLoadFunction function_load = nullptr;
+    FunctionGetModuleFunction function_get_module = nullptr;
+    LibraryUnloadFunction library_unload = nullptr;
+    ModuleLoadDataExFunction module_load_data_ex = nullptr;
+    ModuleGetFunctionFunction module_get_function = nullptr;
+    ModuleUnloadFunction module_unload = nullptr;
+    OccupancyFunction occupancy = nullptr;
+    DeviceGetAttributeFunction device_get_attribute = nullptr;
     LaunchKernelFunction launch_kernel = nullptr;
     LaunchKernelFunction launch_kernel_ptsz = nullptr;
     LaunchKernelExFunction launch_kernel_ex = nullptr;
@@ -234,14 +279,31 @@ struct DriverFunctionTable {
     EventRecordFunction event_record = nullptr;
     EventQueryFunction event_query = nullptr;
     EventDestroyFunction event_destroy = nullptr;
+    EventRecordFunction event_record_ptsz = nullptr;
+    EventRecordWithFlagsFunction event_record_with_flags = nullptr;
+    EventRecordWithFlagsFunction event_record_with_flags_ptsz = nullptr;
+    EventQueryFunction event_synchronize = nullptr;
+    EventElapsedTimeFunction event_elapsed_time = nullptr;
+    StreamWaitEventFunction stream_wait_event = nullptr;
+    StreamWaitEventFunction stream_wait_event_ptsz = nullptr;
     ContextGetCurrentFunction context_get_current = nullptr;
     ContextGetDeviceFunction context_get_device = nullptr;
+    ContextGetApiVersionFunction context_get_api_version = nullptr;
+    PrimaryContextGetStateFunction primary_context_get_state = nullptr;
+    PrimaryContextRetainFunction primary_context_retain = nullptr;
+    PrimaryContextReleaseFunction primary_context_release = nullptr;
+    PrimaryContextReleaseFunction primary_context_release_legacy = nullptr;
+    PrimaryContextResetFunction primary_context_reset = nullptr;
+    PrimaryContextResetFunction primary_context_reset_v2 = nullptr;
     ContextDestroyFunction context_destroy = nullptr;
+    ContextDestroyFunction context_destroy_legacy = nullptr;
     StreamGetDeviceFunction stream_get_device = nullptr;
     StreamGetDeviceFunction stream_get_device_ptsz = nullptr;
     StreamGetContextFunction stream_get_context = nullptr;
     StreamGetContextFunction stream_get_context_ptsz = nullptr;
     StreamQueryFunction stream_query = nullptr;
+    StreamCaptureFunction stream_capture_status = nullptr;
+    StreamCaptureFunction stream_capture_status_ptsz = nullptr;
     StreamQueryFunction stream_query_ptsz = nullptr;
     StreamSynchronizeFunction stream_synchronize = nullptr;
     StreamSynchronizeFunction stream_synchronize_ptsz = nullptr;
@@ -252,6 +314,23 @@ struct DriverFunctionTable {
 
 [[nodiscard]] DlsymFunction resolve_real_dlsym() noexcept;
 [[nodiscard]] bool is_inside_driver_call() noexcept;
+[[nodiscard]] bool is_interceptor_driver_function(void* address) noexcept;
+// Trusted native executor scope. Paired on the same thread; no CUDA/loader calls.
+[[nodiscard]] bool enter_native_driver_scope() noexcept;
+void leave_native_driver_scope(bool previous_state) noexcept;
+
+class NativeDriverCallScope final {
+   public:
+    NativeDriverCallScope() noexcept : previous_(enter_native_driver_scope()) {}
+    ~NativeDriverCallScope() {
+        leave_native_driver_scope(previous_);
+    }
+    NativeDriverCallScope(const NativeDriverCallScope&) = delete;
+    NativeDriverCallScope& operator=(const NativeDriverCallScope&) = delete;
+
+   private:
+    bool previous_;
+};
 
 class DriverDispatch {
    public:
@@ -267,6 +346,43 @@ class DriverDispatch {
 
     [[nodiscard]] CUresult mem_alloc(CUdeviceptr* device_pointer, std::size_t memory_bytes) const;
     [[nodiscard]] CUresult init(unsigned int flags) const;
+    [[nodiscard]] CUresult module_load_data(CUmodule* module, const void* image) const;
+    [[nodiscard]] CUresult module_load_data_ex(CUmodule* module, const void* image,
+                                               unsigned int option_count, CUjit_option* options,
+                                               void** option_values) const;
+    [[nodiscard]] CUresult module_get_function(CUfunction* function, CUmodule module,
+                                               const char* name) const;
+    [[nodiscard]] CUresult module_unload(CUmodule module) const;
+    [[nodiscard]] CUresult occupancy(int* block_count, CUfunction function, int block_size,
+                                     std::size_t dynamic_shared_memory_bytes) const;
+    [[nodiscard]] CUresult device_get_attribute(int* value, CUdevice_attribute attribute,
+                                                CUdevice device) const;
+    [[nodiscard]] bool has_persistent_kernel_api() const;
+    [[nodiscard]] bool has_runtime_persistent_api() const;
+    [[nodiscard]] CUresult library_load_data(CUlibrary* library, const void* image,
+                                             CUjit_option* options = nullptr,
+                                             void** option_values = nullptr,
+                                             unsigned int option_count = 0,
+                                             CUlibraryOption* library_options = nullptr,
+                                             void** library_option_values = nullptr,
+                                             unsigned int library_option_count = 0) const;
+    [[nodiscard]] CUresult library_get_module(CUmodule* module, CUlibrary library) const;
+    [[nodiscard]] CUresult library_load_from_file(CUlibrary* library, const char* path,
+                                                  CUjit_option* options, void** option_values,
+                                                  unsigned int option_count,
+                                                  CUlibraryOption* library_options,
+                                                  void** library_option_values,
+                                                  unsigned int library_option_count) const;
+    [[nodiscard]] CUresult library_get_kernel(CUkernel* kernel, CUlibrary library,
+                                              const char* name) const;
+    [[nodiscard]] CUresult kernel_get_function(CUfunction* function, CUkernel kernel) const;
+    [[nodiscard]] bool has_function_load() const noexcept;
+    [[nodiscard]] CUresult function_load(CUfunction function) const;
+    [[nodiscard]] bool has_function_get_module() const noexcept;
+    [[nodiscard]] CUresult function_get_module(CUmodule* module, CUfunction function) const;
+    [[nodiscard]] CUresult library_unload(CUlibrary library) const;
+    [[nodiscard]] CUresult stream_capture_status(CUstream stream, CUstreamCaptureStatus* status,
+                                                 bool per_thread_default_stream) const;
     [[nodiscard]] CUresult launch_kernel(CUfunction function, unsigned int grid_dim_x,
                                          unsigned int grid_dim_y, unsigned int grid_dim_z,
                                          unsigned int block_dim_x, unsigned int block_dim_y,
@@ -418,9 +534,43 @@ class DriverDispatch {
     [[nodiscard]] CUresult event_record(CUevent event, CUstream stream) const;
     [[nodiscard]] CUresult event_query(CUevent event) const;
     [[nodiscard]] CUresult event_destroy(CUevent event) const;
+    [[nodiscard]] CUresult event_record_ptsz(CUevent event, CUstream stream) const;
+    [[nodiscard]] CUresult event_record_with_flags(CUevent event, CUstream stream,
+                                                   unsigned int flags) const;
+    [[nodiscard]] CUresult event_record_with_flags_ptsz(CUevent event, CUstream stream,
+                                                        unsigned int flags) const;
+    [[nodiscard]] CUresult event_synchronize(CUevent event) const;
+    [[nodiscard]] CUresult event_elapsed_time(float* milliseconds, CUevent start,
+                                              CUevent end) const;
+    [[nodiscard]] CUresult stream_wait_event(CUstream stream, CUevent event,
+                                             unsigned int flags) const;
+    [[nodiscard]] CUresult stream_wait_event_ptsz(CUstream stream, CUevent event,
+                                                  unsigned int flags) const;
     [[nodiscard]] CUresult context_get_current(CUcontext* context) const;
     [[nodiscard]] CUresult context_get_device(CUdevice* device) const;
-    [[nodiscard]] CUresult context_destroy(CUcontext context) const;
+    [[nodiscard]] CUresult context_get_api_version(CUcontext context, unsigned int* version) const;
+    // Metadata only: never retains, activates or binds a context. This device
+    // state does not identify the current context. Failed output is unchanged.
+    [[nodiscard]] CUresult primary_context_is_active(CUdevice device, bool& output) const;
+    // Externally serialized against reset/destruction. Never binds a context or
+    // activates an inactive primary; a successful temporary retain is balanced.
+    // Output changes only after complete checked identity proof.
+    [[nodiscard]] CUresult current_context_is_active_primary(CUcontext context, bool& output) const;
+    // Returns a borrowed identity, or null for an inactive primary, without
+    // binding/activation. Caller externally excludes reset through subsequent use.
+    // Optional proof is reset on entry and identifies only a DEINITIALIZED
+    // initial state query, never a failed retain or balancing release.
+    [[nodiscard]] CUresult active_primary_context(
+        CUdevice device, CUcontext& output, bool* is_deinitialized_before_identity = nullptr) const;
+    [[nodiscard]] bool has_primary_context_reset(bool is_modern) const noexcept {
+        return (is_modern ? primary_context_reset_v2_ : primary_context_reset_) != nullptr;
+    }
+    [[nodiscard]] CUresult primary_context_reset(CUdevice device, bool is_modern) const;
+    [[nodiscard]] bool has_primary_context_release(bool is_modern) const noexcept {
+        return (is_modern ? primary_context_release_ : primary_context_release_legacy_) != nullptr;
+    }
+    [[nodiscard]] CUresult primary_context_release(CUdevice device, bool is_modern) const;
+    [[nodiscard]] CUresult context_destroy(CUcontext context, bool is_modern = true) const;
     [[nodiscard]] CUresult stream_get_device(CUstream stream, CUdevice* device) const;
     [[nodiscard]] CUresult stream_get_device_ptsz(CUstream stream, CUdevice* device) const;
     [[nodiscard]] CUresult stream_get_context(CUstream stream, CUcontext* context) const;
@@ -439,6 +589,7 @@ class DriverDispatch {
 
     [[nodiscard]] bool has_get_proc_address() const;
     [[nodiscard]] bool has_get_proc_address_v2() const;
+    [[nodiscard]] bool is_proc_address_function(void* address, bool uses_extended_resolver) const;
     [[nodiscard]] CUresult launch_kernel_ex(const CUlaunchConfig* config, CUfunction function,
                                             void** kernel_parameters, void** extra,
                                             bool per_thread_default_stream) const;
@@ -510,7 +661,7 @@ class DriverDispatch {
     [[nodiscard]] bool has_context_synchronize() const;
     [[nodiscard]] bool has_event_api() const;
     [[nodiscard]] bool has_context_queries() const;
-    [[nodiscard]] bool has_context_destroy() const;
+    [[nodiscard]] bool has_context_destroy(bool is_modern = true) const;
     [[nodiscard]] bool has_stream_identity() const;
     [[nodiscard]] bool has_stream_identity_ptsz() const;
     [[nodiscard]] bool has_stream_query() const;
@@ -525,6 +676,20 @@ class DriverDispatch {
 
     void* library_handle_ = nullptr;
     InitFunction init_ = nullptr;
+    ModuleLoadDataFunction module_load_data_ = nullptr;
+    LibraryLoadDataFunction library_load_data_ = nullptr;
+    LibraryLoadFromFileFunction library_load_from_file_ = nullptr;
+    LibraryGetKernelFunction library_get_kernel_ = nullptr;
+    LibraryGetModuleFunction library_get_module_ = nullptr;
+    KernelGetFunctionFunction kernel_get_function_ = nullptr;
+    FunctionLoadFunction function_load_ = nullptr;
+    FunctionGetModuleFunction function_get_module_ = nullptr;
+    LibraryUnloadFunction library_unload_ = nullptr;
+    ModuleLoadDataExFunction module_load_data_ex_ = nullptr;
+    ModuleGetFunctionFunction module_get_function_ = nullptr;
+    ModuleUnloadFunction module_unload_ = nullptr;
+    OccupancyFunction occupancy_ = nullptr;
+    DeviceGetAttributeFunction device_get_attribute_ = nullptr;
     LaunchKernelFunction launch_kernel_ = nullptr;
     LaunchKernelFunction launch_kernel_ptsz_ = nullptr;
     LaunchKernelExFunction launch_kernel_ex_ = nullptr;
@@ -601,14 +766,31 @@ class DriverDispatch {
     EventRecordFunction event_record_ = nullptr;
     EventQueryFunction event_query_ = nullptr;
     EventDestroyFunction event_destroy_ = nullptr;
+    EventRecordFunction event_record_ptsz_ = nullptr;
+    EventRecordWithFlagsFunction event_record_with_flags_ = nullptr;
+    EventRecordWithFlagsFunction event_record_with_flags_ptsz_ = nullptr;
+    EventQueryFunction event_synchronize_ = nullptr;
+    EventElapsedTimeFunction event_elapsed_time_ = nullptr;
+    StreamWaitEventFunction stream_wait_event_ = nullptr;
+    StreamWaitEventFunction stream_wait_event_ptsz_ = nullptr;
     ContextGetCurrentFunction context_get_current_ = nullptr;
     ContextGetDeviceFunction context_get_device_ = nullptr;
+    ContextGetApiVersionFunction context_get_api_version_ = nullptr;
+    PrimaryContextGetStateFunction primary_context_get_state_ = nullptr;
+    PrimaryContextRetainFunction primary_context_retain_ = nullptr;
+    PrimaryContextReleaseFunction primary_context_release_ = nullptr;
+    PrimaryContextReleaseFunction primary_context_release_legacy_ = nullptr;
+    PrimaryContextResetFunction primary_context_reset_ = nullptr;
+    PrimaryContextResetFunction primary_context_reset_v2_ = nullptr;
     ContextDestroyFunction context_destroy_ = nullptr;
+    ContextDestroyFunction context_destroy_legacy_ = nullptr;
     StreamGetDeviceFunction stream_get_device_ = nullptr;
     StreamGetDeviceFunction stream_get_device_ptsz_ = nullptr;
     StreamGetContextFunction stream_get_context_ = nullptr;
     StreamGetContextFunction stream_get_context_ptsz_ = nullptr;
     StreamQueryFunction stream_query_ = nullptr;
+    StreamCaptureFunction stream_capture_status_ = nullptr;
+    StreamCaptureFunction stream_capture_status_ptsz_ = nullptr;
     StreamQueryFunction stream_query_ptsz_ = nullptr;
     StreamSynchronizeFunction stream_synchronize_ = nullptr;
     StreamSynchronizeFunction stream_synchronize_ptsz_ = nullptr;

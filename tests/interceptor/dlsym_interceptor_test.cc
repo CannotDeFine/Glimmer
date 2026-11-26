@@ -35,6 +35,14 @@ bool is_not_from_interceptor(void* symbol) {
 int main() {
     const char* const intercepted_names[] = {
         "cuInit",
+        "cuModuleLoadData",
+        "cuModuleLoadDataEx",
+        "cuModuleGetFunction",
+        "cuLibraryLoadData",
+        "cuLibraryLoadFromFile",
+        "cuLibraryGetModule",
+        "cuLibraryUnload",
+        "cuModuleUnload",
         "cuLaunchKernel",
         "cuLaunchKernel_ptsz",
         "cuLaunchKernelEx",
@@ -58,6 +66,10 @@ int main() {
         "cuCtxGetDevice",
         "cuCtxDestroy",
         "cuCtxDestroy_v2",
+        "cuDevicePrimaryCtxReset",
+        "cuDevicePrimaryCtxReset_v2",
+        "cuDevicePrimaryCtxRelease",
+        "cuDevicePrimaryCtxRelease_v2",
         "cuMemAllocAsync",
         "cuMemAllocAsync_ptsz",
         "cuMemAllocFromPoolAsync",
@@ -164,6 +176,11 @@ int main() {
         }
     }
 
+    if (dlsym(RTLD_DEFAULT, "cuCtxDestroy") == dlsym(RTLD_DEFAULT, "cuCtxDestroy_v2")) {
+        std::cerr << "historical and modern context-destroy loader entries must not alias\n";
+        return EXIT_FAILURE;
+    }
+
     const char* const runtime_names[] = {"cudaMalloc",
                                          "cudaMallocManaged",
                                          "cudaMallocPitch",
@@ -172,6 +189,8 @@ int main() {
                                          "cudaLaunchKernel_ptsz",
                                          "cudaGraphLaunch",
                                          "cudaGraphLaunch_ptsz",
+                                         "cudaGraphInstantiateWithFlags",
+                                         "cudaGraphExecDestroy",
                                          "__cudaLaunchKernel",
                                          "__cudaLaunchKernel_ptsz",
                                          "cudaMallocAsync",
@@ -203,6 +222,7 @@ int main() {
                                          "cudaFreeAsync_ptsz",
                                          "cudaMemGetInfo",
                                          "cudaDeviceSynchronize",
+                                         "cudaDeviceReset",
                                          "cudaStreamSynchronize",
                                          "cudaStreamSynchronize_ptsz",
                                          "cudaStreamQuery",

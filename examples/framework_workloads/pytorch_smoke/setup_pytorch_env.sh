@@ -4,14 +4,17 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: setup_pytorch_env.sh [--python PATH]
+Usage: setup_pytorch_env.sh [--python PATH] [--cuda cu126|cu132]
 
 Creates the ignored .venv directory next to this script and installs the
-versioned CUDA 13.2 PyTorch requirements from requirements-cu132.txt.
+versioned PyTorch requirements for the selected CUDA profile (default: cu132).
+Use cu126 for Volta GPUs or hosts with a CUDA 12.6-compatible driver.
+Requires Python 3.10 or newer; pins pip 26.2.1 inside the virtual environment.
 EOF
 }
 
 python_bootstrap="python3"
+cuda_profile="cu132"
 while (($# > 0)); do
     case "$1" in
         --python)
@@ -26,6 +29,14 @@ while (($# > 0)); do
             usage
             exit 0
             ;;
+        --cuda)
+            if (($# < 2)); then
+                echo "--cuda requires a value" >&2
+                exit 2
+            fi
+            cuda_profile="$2"
+            shift 2
+            ;;
         *)
             echo "unknown argument: $1" >&2
             usage >&2
@@ -34,9 +45,14 @@ while (($# > 0)); do
     esac
 done
 
+if [[ "$cuda_profile" != "cu126" && "$cuda_profile" != "cu132" ]]; then
+    echo "invalid CUDA profile: $cuda_profile" >&2
+    exit 2
+fi
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 venv_dir="$script_dir/.venv"
-requirements_file="$script_dir/requirements-cu132.txt"
+requirements_file="$script_dir/requirements-$cuda_profile.txt"
 
 if [[ "$python_bootstrap" == */* ]]; then
     if [[ ! -x "$python_bootstrap" ]]; then
@@ -48,8 +64,16 @@ elif ! command -v "$python_bootstrap" >/dev/null 2>&1; then
     exit 1
 fi
 
-"$python_bootstrap" -m venv "$venv_dir"
-"$venv_dir/bin/python" -m pip install --upgrade pip
-"$venv_dir/bin/python" -m pip install --requirement "$requirements_file"
+env -u PYTHONPATH -u PYTHONHOME PYTHONNOUSERSITE=1 \
+    "$python_bootstrap" -m venv "$venv_dir"
+pip_command=(
+    env -u PIP_INDEX_URL -u PIP_EXTRA_INDEX_URL -u PIP_TARGET -u PIP_PREFIX
+    -u PIP_ROOT -u PIP_LOG -u PYTHONPATH -u PYTHONHOME
+    PIP_CONFIG_FILE=/dev/null PIP_USER=0 PYTHONNOUSERSITE=1
+    "$venv_dir/bin/python" -m pip --cache-dir "$venv_dir/.cache/pip"
+    --timeout 120 --retries 5 --disable-pip-version-check
+)
+"${pip_command[@]}" install --index-url https://pypi.org/simple pip==26.2.1
+"${pip_command[@]}" install --requirement "$requirements_file"
 
-echo "pytorch_env status=ok python=$venv_dir/bin/python"
+echo "pytorch_env status=ok cuda=$cuda_profile python=$venv_dir/bin/python"

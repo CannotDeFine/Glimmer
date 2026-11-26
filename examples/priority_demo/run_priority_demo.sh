@@ -9,9 +9,8 @@ Usage: run_priority_demo.sh [--mode priority|native] [--build-dir DIR]
 
 Runs a mixed training/inference workload. The default priority mode routes
 launches through the transparent CUDA scheduler; native mode leaves CUDA
-untouched. The default output directory is
-examples/priority_demo/output/<mode> and contains per-process CSV traces, logs,
-and an SVG plot.
+untouched. Each run creates a fresh attempt under artifacts/runs/priority-demo-<mode>.
+--output-dir selects a dedicated parent directory for fresh attempts.
 EOF
 }
 
@@ -81,24 +80,33 @@ fi
 workload="$build_dir/examples/priority_demo/glimmer_cuda_priority_workload"
 service="$build_dir/bin/glimmer_control_service"
 interceptor="$build_dir/lib/libglimmer_cuda_interceptor.so"
-required_files=("$workload")
+required_executables=("$workload")
 if [[ "$mode" == "priority" ]]; then
-    required_files+=("$service" "$interceptor")
+    required_executables+=("$service")
 fi
-for required_file in "${required_files[@]}"; do
-    if [[ ! -x "$required_file" && ! -f "$required_file" ]]; then
-        echo "required build artifact is missing: $required_file" >&2
-        echo "build with: cmake --build --preset cuda-gpu --target glimmer_cuda_priority_demo -j2" >&2
+for required_file in "${required_executables[@]}"; do
+    if [[ ! -f "$required_file" || ! -x "$required_file" ]]; then
+        echo "required executable is missing or not executable: $required_file" >&2
+        echo "See examples/priority_demo/README.md for configuration and build commands." >&2
         exit 1
     fi
 done
-
-if [[ -z "$output_dir" ]]; then
-    output_dir="$repo_dir/examples/priority_demo/output/$mode"
-    mkdir -p "$output_dir"
-else
-    mkdir -p "$output_dir"
+if [[ "$mode" == "priority" && ! -f "$interceptor" ]]; then
+    echo "required interceptor is missing: $interceptor" >&2
+    echo "See examples/priority_demo/README.md for configuration and build commands." >&2
+    exit 1
 fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required to create a fresh output directory" >&2
+    exit 1
+fi
+artifact_args=(--name "priority-demo-$mode" --category runs)
+if [[ -n "$output_dir" ]]; then
+    artifact_args+=(--output-root "$output_dir")
+fi
+output_dir="$(env -u LD_PRELOAD -u LD_AUDIT \
+    python3 -B "$repo_dir/scripts/artifact_paths.py" "${artifact_args[@]}")"
 
 socket_dir=""
 socket_path=""
@@ -110,17 +118,6 @@ start_file="$output_dir/start.signal"
 service_pid=""
 training_pid=""
 inference_pid=""
-
-rm -f \
-    "$output_dir/control-service.log" \
-    "$output_dir/training.csv" \
-    "$output_dir/training.log" \
-    "$output_dir/training.ready" \
-    "$output_dir/inference.csv" \
-    "$output_dir/inference.log" \
-    "$output_dir/inference.ready" \
-    "$start_file" \
-    "$output_dir/priority_trace.svg"
 
 cleanup() {
     local status=$?
@@ -145,7 +142,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ "$mode" == "priority" ]]; then
-    "$service" \
+    env -u LD_PRELOAD -u LD_AUDIT "$service" \
         --socket "$socket_path" \
         --quota-bytes 8388608 \
         --execution-mode remote \
@@ -187,7 +184,7 @@ if [[ "$mode" == "priority" ]]; then
     inference_environment+=(GLIMMER_SCHEDULER_PRIORITY=100)
 fi
 
-env "${training_environment[@]}" \
+env -u LD_PRELOAD -u LD_AUDIT "${training_environment[@]}" \
     "$workload" \
     --role training \
     --kernel model \
@@ -201,7 +198,7 @@ env "${training_environment[@]}" \
     >"$output_dir/training.log" 2>&1 &
 training_pid=$!
 
-env "${inference_environment[@]}" \
+env -u LD_PRELOAD -u LD_AUDIT "${inference_environment[@]}" \
     "$workload" \
     --role inference \
     --kernel model \
@@ -230,7 +227,9 @@ touch "$start_file"
 training_status=0
 inference_status=0
 wait "$training_pid" || training_status=$?
+training_pid=""
 wait "$inference_pid" || inference_status=$?
+inference_pid=""
 if ((training_status != 0 || inference_status != 0)); then
     echo "priority demo failed: training=$training_status inference=$inference_status" >&2
     exit 1
@@ -241,7 +240,7 @@ if ((make_plot)); then
         echo "python3 is required to generate the SVG trace" >&2
         exit 1
     fi
-    python3 "$repo_dir/examples/priority_demo/plot_priority_trace.py" \
+    env -u LD_PRELOAD -u LD_AUDIT python3 "$repo_dir/examples/priority_demo/plot_priority_trace.py" \
         --input "$output_dir/training.csv" "$output_dir/inference.csv" \
         --output "$output_dir/priority_trace.svg"
 fi

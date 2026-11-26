@@ -1,99 +1,65 @@
-# Dependency Management
+# Dependency management
 
-## Purpose
+[Project home](../README.md) / [Documentation](../docs/README.md) / Dependencies
 
-Dependencies must be minimal, reproducible, licensed appropriately, and easy
-to update. A dependency is accepted only when the C++ standard library and
-existing project code cannot meet a concrete requirement.
+Dependencies must be minimal, reproducible and appropriately licensed. Add one
+only when the standard library and existing project code cannot satisfy a
+concrete requirement. Dependency changes require explicit authorization; this
+guide does not authorize installation or edits under `3rdparty/`.
 
-## Dependency classes
+## Integration rules
 
-| Class | Examples | Integration rule |
-| --- | --- | --- |
-| Source dependency | `spdlog`, a future test library | Use a Git submodule under `3rdparty/<name>` pinned to an exact commit. |
-| System dependency | Threads, `libdl` | Discover with CMake; do not copy system libraries into the repository. |
-| Vendor SDK | CUDA Toolkit, NVML | Require an installed SDK and discover it with CMake. Do not vendor NVIDIA binaries or headers. |
-| Development tool | clang-format, clang-tidy | Use only for development or CI; do not make it a runtime dependency. |
+| Class | Rule |
+| --- | --- |
+| Source dependency | Use a reviewed, exact Git submodule revision under `3rdparty/`, declared in `.gitmodules`. Do not track a branch tip. |
+| System dependency | Discover with CMake. Do not copy system libraries into the repository. |
+| Vendor SDK | Use an explicitly installed SDK and its matching ABI/provider. Do not vendor NVIDIA headers or binaries. |
+| Development tool | Keep formatters, analyzers and profilers out of runtime dependencies. |
+| Framework/workload environment | Keep optional, isolated and version-recorded; do not mutate system Python or SDK installations as part of a normal build. |
 
-`FetchContent` must not download dependencies during a normal configure step.
-Use it only after an explicit decision records why a pinned submodule or system
-package is unsuitable.
+Normal configure steps must not download dependencies. `FetchContent` needs an
+explicit decision explaining why a pinned submodule or system package is
+unsuitable. Use `EXCLUDE_FROM_ALL` for third-party build targets unless they
+must be built. Do not edit dependencies in place; upstream a fix or obtain
+approval for an explicit patch strategy. Keep third-party diagnostics separate
+from Glimmer-owned quality gates.
 
-## CUDA interceptor SDK dependency
+## Existing integration boundaries
 
-The optional CUDA interceptor and explicit CUDA task backend require NVIDIA
-CUDA Toolkit headers for the CUDA Driver API ABI declarations. The standalone
-CUDA workload harnesses also require the Toolkit to compile their Runtime
-programs. The priority demo additionally links the Toolkit's `CUDA::cublas`
-target for its model-shaped cuBLAS execution graph. The Toolkit is a vendor
-SDK dependency; it is discovered with
-`find_package(CUDAToolkit)` when `GLIMMER_BUILD_CUDA_INTERCEPTOR=ON`,
-`GLIMMER_BUILD_CUDA_BACKEND=ON`, or `GLIMMER_BUILD_CUDA_WORKLOAD=ON`. CUDA
-headers and binaries are not vendored in this repository.
+CMake builds `spdlog` from its source submodule for components including the
+control plane and backend; the scheduling core does not link it directly. The
+project uses system threading facilities. CUDA targets, cuDNN/NCCL SDKs and
+CUTLASS-based targets are optional. The pinned
+CUTLASS integration checks the approved source revision and inputs; do not
+bypass those checks. See the [build guide](BUILDING.md) for selection options.
 
-The interceptor resolves `libcuda.so.1` at runtime with the Linux dynamic
-loader rather than linking directly to the NVIDIA Driver. On split loader/vendor
-installations, such as WSL, it also discovers the already-loaded vendor
-`libcuda.so.1.1` object and resolves symbols from that object instead of the
-loader shim. This keeps the standard build and no-GPU tests independent of a
-CUDA installation while avoiding recursive Driver-internal lookups. CUDA
-integration tests must state the Toolkit, Driver, and loader layout they
-exercise when the layout is non-standard.
+Keep cuDNN major-version profiles in separate compatible builds. Do not point a
+qualified build at a different SDK ABI. Actual mapped library/provider identity,
+not a header version or successful link alone, determines a validation result's
+scope. SDK availability does not establish complete library API support.
 
-## Optional framework workload dependencies
+## Third-party notices
 
-The framework workload examples may use a framework installed by the user, for
-example a CUDA-enabled PyTorch installation. These are optional runtime test
-dependencies, not Glimmer build dependencies: they are not vendored, fetched
-by CMake, or linked into the interceptor. The example records pinned wheel
-requirements and creates an ignored local virtual environment beside the
-example when explicitly requested by the user. It reports the framework and
-CUDA versions it exercises. Compatibility results are scoped to that
-environment and must not be presented as universal framework support.
+The source submodules retain their own notices:
 
-## Optional profiling tools
+- `spdlog`: [MIT license](https://github.com/gabime/spdlog/blob/989d28dd768adef702538634857942db24e1058a/LICENSE), also at `3rdparty/spdlog/LICENSE`.
+- Its default bundled `{fmt}`: [license notice](https://github.com/gabime/spdlog/blob/989d28dd768adef702538634857942db24e1058a/include/spdlog/fmt/bundled/fmt.license.rst), also at `3rdparty/spdlog/include/spdlog/fmt/bundled/fmt.license.rst`.
+- Optional CUTLASS: [BSD-3-Clause license](https://github.com/NVIDIA/cutlass/blob/f7b19de32c5d1f3cedfc735c2849f12b537522ee/LICENSE.txt), also at `3rdparty/cutlass/LICENSE.txt`.
 
-The optional warmed-timeline example uses an existing NVIDIA Nsight Systems
-installation as a development tool. It provides CUDA activity timestamps that
-host-only timers cannot supply. The helper records `nsys --version` and uses
-the documented CLI plus Python's standard-library SQLite reader. Initial
-validation used Nsight Systems 2025.6.3; exports from other versions must pass
-schema checks. Obtain it from [NVIDIA](https://developer.nvidia.com/nsight-systems)
-under NVIDIA's applicable proprietary license; no binaries are redistributed.
-It adds no CMake/runtime dependency, but collection requires a supported
-host/Driver and introduces profiling overhead. Standard-library fixture tests
-and explicit real-GPU captures verify the integration.
+The links refer to the pinned revisions; update them when a submodule changes.
+Initialize the relevant submodule to read the local files. Other system libraries
+and vendor SDKs have their own terms. Review the dependencies actually used
+and preserve their required notices when distributing them.
 
-## Introducing a dependency
+## Adding, updating or removing a dependency
 
-Before adding one, document:
+Before adding one, record its concrete purpose, upstream source, exact version
+or commit, license, integration method, security/runtime/build/maintenance cost
+and verification plan. Update the relevant public architecture or deployment
+guide for public API, module or long-term operating-model changes.
 
-1. The concrete capability it provides and why existing code is insufficient.
-2. Its source repository, exact version or commit, and license.
-3. Its dependency class and CMake integration method.
-4. Its runtime, build, security, and maintenance cost.
-5. The tests or build checks that verify the integration.
-
-Update the architecture guide when the dependency affects a public API, module
-boundary, runtime deployment, or long-term operating model.
-
-## Source dependency rules
-
-- Add source dependencies as submodules under `3rdparty/` and declare them in
-  `.gitmodules`.
-- Pin the submodule to a reviewed commit. Do not track a branch tip.
-- Configure third-party code with `EXCLUDE_FROM_ALL` unless it must be built by
-  the project.
-- Do not edit a dependency in place. Upstream a fix or record an explicit,
-  reviewable patch strategy.
-- Keep third-party warnings and static-analysis results out of Glimmer's own
-  quality gate unless the dependency is intentionally maintained locally.
-
-## Updates and removal
-
-- Make each dependency update a dedicated commit with its reason and the old
-  and new revision in the commit body when useful.
-- Review upstream release notes, license changes, and compatibility notes.
-- Re-run the full build, tests, formatting check, and applicable sanitizers.
-- Remove unused dependencies and their CMake, documentation, and submodule
-  entries in the same logical change.
+For updates, review upstream release, license and compatibility changes and
+record old/new revisions. Run the applicable full build, tests, formatting and
+sanitizer checks. Remove unused CMake, documentation and submodule entries in
+the same logical change. Keep a dependency change independently reviewable and
+commit it only on explicit request under the [Git guidelines](GIT_GUIDELINES.md).

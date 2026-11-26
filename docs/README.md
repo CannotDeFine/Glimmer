@@ -4,24 +4,26 @@
 
 ## Using Glimmer
 
-- [Project overview](../README.md) — Capabilities and application quick start.
-- [Building](BUILDING.md) — Requirements and build configurations.
-- [Usage](USAGE.md) — Scheduling, allocation limits and shutdown.
-- [CUDA compatibility](CUDA_API_COVERAGE.md) — Interception scope and limitations.
-- [Architecture](ARCHITECTURE.md) — Components and their responsibilities.
+- [Project overview](../README.md) — Capabilities and a quick start with your own application.
+- [Building](BUILDING.md) — Dependencies, presets and optional CUDA components.
+- [Usage](USAGE.md) — Service startup, application configuration, priorities and shutdown.
+- [CUDA compatibility](CUDA_API_COVERAGE.md) — Execution-path support and limitations.
+- [Architecture](ARCHITECTURE.md) — How applications, scheduling and GPU execution fit together.
 
 ## Examples
 
-- [Priority demo](../examples/priority_demo/README.md) — Competing CUDA workloads.
-- [CUDA workloads](../examples/cuda_workloads/README.md) — CUDA workload examples.
-- [PyTorch workloads](../examples/framework_workloads/pytorch_smoke/README.md) — Framework workloads.
-- [Explicit task backend](../examples/cuda_task_backend/README.md) — Application-owned tasks.
+- [Example overview](../examples/README.md) — Choose a workload and execution path.
+- [Priority demo](../examples/priority_demo/README.md) — Two synthetic CUDA workloads with different priorities.
+- [CUDA workloads](../examples/cuda_workloads/README.md) — Allocation, memory accounting and streams.
+- [PyTorch workloads](../examples/framework_workloads/pytorch_smoke/README.md) — Run a framework workload alone or with a competing process.
+- [Explicit task backend](../examples/cuda_task_backend/README.md) — Submit application-owned task descriptors.
+- [GEMM comparison](../examples/gemm_comparison/README.md) — Compare isolated GEMM implementations under explicit correctness and coverage checks.
 
 ## Contributing
 
-- [Development lifecycle](DEVELOPMENT_LIFECYCLE.md) — Change and review gates.
-- [Coding guidelines](CODING_GUIDELINES.md) — Source and ownership conventions.
-- [Testing](TESTING.md) — Verification requirements.
-- [Dependency management](DEPENDENCY_MANAGEMENT.md) — Dependency selection and updates.
+- [Development lifecycle](DEVELOPMENT_LIFECYCLE.md) — Change scope, verification and review gates.
+- [Coding guidelines](CODING_GUIDELINES.md) — Source style, ownership and error handling.
+- [Testing](TESTING.md) — Host, CUDA and measurement checks.
+- [Dependency management](DEPENDENCY_MANAGEMENT.md) — Reproducible dependency and SDK integration.
 - [Git guidelines](GIT_GUIDELINES.md) — Logical changes and commit conventions.
-- [Storage layout](STORAGE_LAYOUT.md) — Build and artifact retention.
+- [Storage layout](STORAGE_LAYOUT.md) — Build reuse and generated-artifact retention.

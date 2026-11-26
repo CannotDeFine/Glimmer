@@ -1,5 +1,7 @@
 # Git Guidelines
 
+[Project home](../README.md) / [Documentation](../docs/README.md) / Git guidelines
+
 Glimmer currently uses a single shared `main` branch. Commit messages are the
 primary way to identify the kind, area, and intent of each change.
 
@@ -17,16 +19,26 @@ primary way to identify the kind, area, and intent of each change.
 - Do not rewrite or force-push commits that have already been shared with
   others. Add a corrective commit instead.
 
-Before committing, run the applicable checks:
+Before committing, inspect `git status --short`, `git diff` and
+`git diff --cached`. Verify that the staged snapshot includes the files and
+linked documentation needed by the change; a correct working-tree preview
+does not prove that its contents are staged. Preserve unrelated changes.
+
+Before committing, run the applicable checks from the
+[development lifecycle](DEVELOPMENT_LIFECYCLE.md#stage-4-verify-with-evidence).
+For code/build changes, the aggregate check entry point is:
 
 ```sh
 ./scripts/check.sh
 ```
 
-The check script runs the standard, sanitizer, lint, and CUDA lint presets
-when their toolchains are available. It also checks repository whitespace.
-If clang-tidy or the CUDA Toolkit is unavailable, the script reports the
-skipped checks explicitly; install the missing toolchain before a release or
+The script checks staged and unstaged whitespace, then runs the available host,
+sanitizer, lint and optional CUDA build and no-GPU checks. It does not run the
+GPU test suite. It configures several build slots;
+inspect their caches and the [test guide](TESTING.md#standard-commands) before
+running it. It stops rather than changing a frozen slot or a selected slot
+whose cache already enables GPU tests. If a toolchain is unavailable, the script
+reports skipped checks; install the required tools before a release or a
 CUDA-related commit.
 
 ## Commit message format

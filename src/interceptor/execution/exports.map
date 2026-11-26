@@ -1,0 +1,4 @@
+{
+    global: cu*; nccl*; __cudaRegister*; __cudaUnregisterFatBinary; __cudaInitModule; dlsym;
+    local: *;
+};

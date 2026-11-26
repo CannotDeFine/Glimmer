@@ -10,6 +10,34 @@ namespace {
 constexpr std::size_t kMaxTokens = 24;
 constexpr std::uint32_t kMaxWaitTimeoutMs = 60'000;
 
+constexpr std::array<std::pair<std::string_view, TaskProtocolOperation>, 7> kExecutionOperations{{
+    {"EXEC_CLAIM", TaskProtocolOperation::kExecutionClaim},
+    {"RETREAT", TaskProtocolOperation::kRetreat},
+    {"SUSPEND", TaskProtocolOperation::kSuspend},
+    {"EXEC_HEARTBEAT", TaskProtocolOperation::kExecutionHeartbeat},
+    {"EXEC_COMPLETE", TaskProtocolOperation::kExecutionComplete},
+    {"EXEC_FAIL", TaskProtocolOperation::kExecutionFail},
+    {"EXEC_CANCEL", TaskProtocolOperation::kExecutionCancel},
+}};
+
+std::optional<TaskProtocolOperation> execution_operation(std::string_view name) {
+    for (const auto& [token, operation] : kExecutionOperations) {
+        if (token == name) {
+            return operation;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string_view> execution_token(TaskProtocolOperation operation) {
+    for (const auto& [token, candidate] : kExecutionOperations) {
+        if (candidate == operation) {
+            return token;
+        }
+    }
+    return std::nullopt;
+}
+
 struct TokenList {
     std::array<std::string_view, kMaxTokens> values{};
     std::size_t count = 0;
@@ -200,22 +228,34 @@ TaskProtocolRequestParseResult parse_task_protocol_request(std::string_view line
         }
 
         TaskProtocolRequest request;
-        if (tokens.values[1] == "SUBMIT" || tokens.values[1] == "ACQUIRE") {
-            if ((tokens.count != 6 && tokens.count != 7) || !is_valid_tenant_id(tokens.values[2])) {
-                return request_error(tokens.count == 6 || tokens.count == 7
+        const bool is_handoff = tokens.values[1] == "EXEC_COMPLETE_ACQUIRE";
+        if (tokens.values[1] == "SUBMIT" || tokens.values[1] == "ACQUIRE" ||
+            tokens.values[1] == "EXEC_ACQUIRE" || is_handoff) {
+            const std::size_t offset = is_handoff ? 2 : 0;
+            if ((tokens.count != 6 + offset && tokens.count != 7 + offset) ||
+                !is_valid_tenant_id(tokens.values[2 + offset])) {
+                return request_error(tokens.count == 6 + offset || tokens.count == 7 + offset
                                          ? TaskProtocolParseError::kInvalidTenant
                                          : TaskProtocolParseError::kMalformed);
             }
-            request.operation = tokens.values[1] == "SUBMIT" ? TaskProtocolOperation::kSubmit
-                                                             : TaskProtocolOperation::kAcquire;
-            request.admission.tenant_id = std::string(tokens.values[2]);
-            if (!parse_positive_integer(tokens.values[3], &request.admission.memory_bytes) ||
-                !parse_positive_integer(tokens.values[4], &request.admission.weight) ||
-                !parse_positive_integer(tokens.values[5], &request.admission.work_units)) {
+            if (is_handoff && (!parse_positive_integer(tokens.values[2], &request.task_id) ||
+                               !parse_positive_integer(tokens.values[3], &request.generation))) {
                 return request_error(TaskProtocolParseError::kInvalidValue);
             }
-            if (tokens.count == 7 &&
-                !parse_unsigned_integer(tokens.values[6], &request.admission.priority)) {
+            request.operation = is_handoff ? TaskProtocolOperation::kExecutionCompleteAcquire
+                                : tokens.values[1] == "SUBMIT" ? TaskProtocolOperation::kSubmit
+                                : tokens.values[1] == "ACQUIRE"
+                                    ? TaskProtocolOperation::kAcquire
+                                    : TaskProtocolOperation::kExecutionAcquire;
+            request.admission.tenant_id = std::string(tokens.values[2 + offset]);
+            if (!parse_positive_integer(tokens.values[3 + offset],
+                                        &request.admission.memory_bytes) ||
+                !parse_positive_integer(tokens.values[4 + offset], &request.admission.weight) ||
+                !parse_positive_integer(tokens.values[5 + offset], &request.admission.work_units)) {
+                return request_error(TaskProtocolParseError::kInvalidValue);
+            }
+            if (tokens.count == 7 + offset &&
+                !parse_unsigned_integer(tokens.values[6 + offset], &request.admission.priority)) {
                 return request_error(TaskProtocolParseError::kInvalidValue);
             }
             return TaskProtocolRequestParseResult{.error = TaskProtocolParseError::kNone,
@@ -239,6 +279,19 @@ TaskProtocolRequestParseResult parse_task_protocol_request(std::string_view line
             }
             return TaskProtocolRequestParseResult{.error = TaskProtocolParseError::kNone,
                                                   .request = std::move(request)};
+        }
+
+        if (const auto operation = execution_operation(tokens.values[1]); operation.has_value()) {
+            const bool is_claim = *operation == TaskProtocolOperation::kExecutionClaim;
+            if (tokens.count != (is_claim ? 3 : 4)) {
+                return request_error(TaskProtocolParseError::kMalformed);
+            }
+            request.operation = *operation;
+            if (!parse_positive_integer(tokens.values[2], &request.task_id) ||
+                (!is_claim && !parse_positive_integer(tokens.values[3], &request.generation))) {
+                return request_error(TaskProtocolParseError::kInvalidValue);
+            }
+            return {.error = TaskProtocolParseError::kNone, .request = std::move(request)};
         }
 
         if (tokens.values[1] == "WAIT") {
@@ -292,24 +345,46 @@ TaskProtocolRequestParseResult parse_task_protocol_request(std::string_view line
 }
 
 std::optional<std::string> format_task_protocol_request(const TaskProtocolRequest& request) {
+    if (const auto operation = execution_token(request.operation); operation.has_value()) {
+        const bool is_claim = request.operation == TaskProtocolOperation::kExecutionClaim;
+        if (request.task_id == 0 || (!is_claim && request.generation == 0)) {
+            return std::nullopt;
+        }
+        auto formatted = std::string(kTaskProtocolVersion) + " " + std::string(*operation) + " " +
+                         std::to_string(request.task_id);
+        if (!is_claim) {
+            formatted += " " + std::to_string(request.generation);
+        }
+        return formatted + "\n";
+    }
     std::optional<std::string> formatted;
     if (request.operation == TaskProtocolOperation::kSubmit ||
-        request.operation == TaskProtocolOperation::kAcquire) {
+        request.operation == TaskProtocolOperation::kAcquire ||
+        request.operation == TaskProtocolOperation::kExecutionAcquire ||
+        request.operation == TaskProtocolOperation::kExecutionCompleteAcquire) {
+        const bool is_handoff =
+            request.operation == TaskProtocolOperation::kExecutionCompleteAcquire;
         if (!is_valid_tenant_id(request.admission.tenant_id) ||
             request.admission.memory_bytes == 0 || request.admission.weight == 0 ||
-            request.admission.work_units == 0) {
+            request.admission.work_units == 0 ||
+            (is_handoff && (request.task_id == 0 || request.generation == 0))) {
             return std::nullopt;
         }
         const std::string_view operation =
-            request.operation == TaskProtocolOperation::kSubmit ? "SUBMIT" : "ACQUIRE";
-        formatted = std::string(kTaskProtocolVersion) + " " + std::string(operation) + " " +
-                    request.admission.tenant_id + " " +
+            is_handoff                                             ? "EXEC_COMPLETE_ACQUIRE"
+            : request.operation == TaskProtocolOperation::kSubmit  ? "SUBMIT"
+            : request.operation == TaskProtocolOperation::kAcquire ? "ACQUIRE"
+                                                                   : "EXEC_ACQUIRE";
+        const auto prefix = std::string(kTaskProtocolVersion) + " " + std::string(operation) + " " +
+                            (is_handoff ? std::to_string(request.task_id) + " " +
+                                              std::to_string(request.generation) + " "
+                                        : "");
+        formatted = prefix + request.admission.tenant_id + " " +
                     std::to_string(request.admission.memory_bytes) + " " +
                     std::to_string(request.admission.weight) + " " +
                     std::to_string(request.admission.work_units) + "\n";
         if (request.admission.priority != 0) {
-            formatted = std::string(kTaskProtocolVersion) + " " + std::string(operation) + " " +
-                        request.admission.tenant_id + " " +
+            formatted = prefix + request.admission.tenant_id + " " +
                         std::to_string(request.admission.memory_bytes) + " " +
                         std::to_string(request.admission.weight) + " " +
                         std::to_string(request.admission.work_units) + " " +
@@ -383,6 +458,24 @@ TaskProtocolResponseParseResult parse_task_protocol_response(std::string_view li
         }
 
         TaskProtocolResponse response;
+        if (tokens.count == 6 && tokens.values[1] == "EXEC_HANDOFF" &&
+            parse_positive_integer(tokens.values[2], &response.completed_execution.task_id) &&
+            parse_positive_integer(tokens.values[3], &response.completed_execution.generation) &&
+            parse_unsigned_integer(tokens.values[4], &response.task_id) &&
+            parse_unsigned_integer(tokens.values[5], &response.generation) &&
+            response.task_id != response.completed_execution.task_id &&
+            (response.task_id != 0 || response.generation == 0)) {
+            response.kind = TaskProtocolResponseKind::kExecutionHandoff;
+            return {.error = TaskProtocolParseError::kNone, .response = response};
+        }
+        if (tokens.count == 5 && tokens.values[1] == "RETREAT" &&
+            parse_positive_integer(tokens.values[2], &response.task_id) &&
+            parse_positive_integer(tokens.values[3], &response.generation) &&
+            (tokens.values[4] == "0" || tokens.values[4] == "1")) {
+            response.kind = TaskProtocolResponseKind::kRetreat;
+            response.should_retreat = tokens.values[4] == "1";
+            return {.error = TaskProtocolParseError::kNone, .response = response};
+        }
         if (tokens.count == 2 && tokens.values[1] == "EMPTY") {
             response.kind = TaskProtocolResponseKind::kEmpty;
             return TaskProtocolResponseParseResult{.error = TaskProtocolParseError::kNone,
@@ -440,13 +533,16 @@ TaskProtocolResponseParseResult parse_task_protocol_response(std::string_view li
                                                        .response = response};
             }
         }
-        if (tokens.count == 7 && tokens.values[1] == "LEASE" &&
+        if (((tokens.count == 7 && tokens.values[1] == "LEASE") ||
+             (tokens.count == 8 && tokens.values[1] == "EXEC_LEASE" &&
+              parse_positive_integer(tokens.values[7], &response.generation))) &&
             parse_positive_integer(tokens.values[2], &response.task_id) &&
             is_valid_tenant_id(tokens.values[3]) &&
             parse_positive_integer(tokens.values[4], &response.memory_bytes) &&
             parse_positive_integer(tokens.values[5], &response.weight) &&
             parse_positive_integer(tokens.values[6], &response.work_units)) {
-            response.kind = TaskProtocolResponseKind::kLease;
+            response.kind = tokens.count == 8 ? TaskProtocolResponseKind::kExecutionLease
+                                              : TaskProtocolResponseKind::kLease;
             response.tenant_id = std::string(tokens.values[3]);
             return TaskProtocolResponseParseResult{.error = TaskProtocolParseError::kNone,
                                                    .response = response};
@@ -458,6 +554,18 @@ TaskProtocolResponseParseResult parse_task_protocol_response(std::string_view li
 }
 
 std::optional<std::string> format_task_protocol_response(const TaskProtocolResponse& response) {
+    if (response.kind == TaskProtocolResponseKind::kExecutionHandoff) {
+        if (response.completed_execution.task_id == 0 ||
+            response.completed_execution.generation == 0 ||
+            response.task_id == response.completed_execution.task_id ||
+            (response.task_id == 0 && response.generation != 0)) {
+            return std::nullopt;
+        }
+        return std::string(kTaskProtocolVersion) + " EXEC_HANDOFF " +
+               std::to_string(response.completed_execution.task_id) + " " +
+               std::to_string(response.completed_execution.generation) + " " +
+               std::to_string(response.task_id) + " " + std::to_string(response.generation) + "\n";
+    }
     if (response.kind == TaskProtocolResponseKind::kAccepted) {
         const auto task_id = format_task_id(response.task_id);
         if (!task_id.has_value()) {
@@ -468,20 +576,38 @@ std::optional<std::string> format_task_protocol_response(const TaskProtocolRespo
     if (response.kind == TaskProtocolResponseKind::kEmpty) {
         return std::string(kTaskProtocolVersion) + " EMPTY\n";
     }
-    if (response.kind == TaskProtocolResponseKind::kLease) {
+    if (response.kind == TaskProtocolResponseKind::kLease ||
+        response.kind == TaskProtocolResponseKind::kExecutionLease) {
         const auto task_id = format_task_id(response.task_id);
         if (!task_id.has_value() || !is_valid_tenant_id(response.tenant_id) ||
-            response.memory_bytes == 0 || response.weight == 0 || response.work_units == 0) {
+            response.memory_bytes == 0 || response.weight == 0 || response.work_units == 0 ||
+            (response.kind == TaskProtocolResponseKind::kExecutionLease &&
+             response.generation == 0)) {
             return std::nullopt;
         }
         std::string formatted =
-            std::string(kTaskProtocolVersion) + " LEASE " + task_id.value() + " " +
-            response.tenant_id + " " + std::to_string(response.memory_bytes) + " " +
-            std::to_string(response.weight) + " " + std::to_string(response.work_units) + "\n";
+            std::string(kTaskProtocolVersion) +
+            (response.kind == TaskProtocolResponseKind::kExecutionLease ? " EXEC_LEASE "
+                                                                        : " LEASE ") +
+            task_id.value() + " " + response.tenant_id + " " +
+            std::to_string(response.memory_bytes) + " " + std::to_string(response.weight) + " " +
+            std::to_string(response.work_units);
+        if (response.kind == TaskProtocolResponseKind::kExecutionLease) {
+            formatted += " " + std::to_string(response.generation);
+        }
+        formatted += "\n";
         if (formatted.size() > kTaskProtocolMaxLineBytes) {
             return std::nullopt;
         }
         return formatted;
+    }
+    if (response.kind == TaskProtocolResponseKind::kRetreat) {
+        if (response.task_id == 0 || response.generation == 0) {
+            return std::nullopt;
+        }
+        return std::string(kTaskProtocolVersion) + " RETREAT " + std::to_string(response.task_id) +
+               " " + std::to_string(response.generation) +
+               (response.should_retreat ? " 1\n" : " 0\n");
     }
     if (response.kind == TaskProtocolResponseKind::kState) {
         const auto task_id = format_task_id(response.task_id);

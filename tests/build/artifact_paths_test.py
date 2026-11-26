@@ -226,6 +226,28 @@ class BuildStorageTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('does not match the source', result.stderr)
 
+    def test_every_entrypoint_checks_before_project(self):
+        paths = [PROJECT / 'CMakeLists.txt', *sorted((PROJECT / 'cmake').glob('*/CMakeLists.txt')),
+                 PROJECT / 'examples/gemm_comparison/CMakeLists.txt']
+        self.assertEqual(len(paths), 5)
+        for path in paths:
+            text = path.read_text()
+            with self.subTest(path=path):
+                self.assertLess(text.index('glimmer_check_build_storage()'), text.index('project('))
+
+    def test_standalone_gemm_rejects_an_extra_build_before_cuda_configuration(self):
+        source = self.project / 'examples/gemm_comparison'
+        source.mkdir(parents=True)
+        shutil.copyfile(PROJECT / 'examples/gemm_comparison/CMakeLists.txt', source / 'CMakeLists.txt')
+        binary = self.project / 'build/gemm-comparison'
+        binary.mkdir(parents=True)
+        evidence = binary / 'retained-evidence'
+        evidence.write_bytes(b'preserved')
+        result = self.configure(binary, source=source)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Repository builds must use', result.stderr)
+        self.assertEqual(evidence.read_bytes(), b'preserved')
+
 
 if __name__ == "__main__":
     unittest.main()

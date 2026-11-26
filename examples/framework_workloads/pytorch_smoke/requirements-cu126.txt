@@ -1,0 +1,5 @@
+--index-url https://pypi.org/simple
+--find-links https://download.pytorch.org/whl/cu126/torch/
+--find-links https://download.pytorch.org/whl/cu126/torchvision/
+torch==2.12.1+cu126
+torchvision==0.27.1+cu126
