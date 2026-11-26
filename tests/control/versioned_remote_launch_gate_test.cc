@@ -138,7 +138,11 @@ void actual_legacy_fallback() {
     glimmer::core::Scheduler scheduler(100);
     TaskAdmissionService admission(scheduler, 0ms, true);
     TaskControlEndpoint endpoint(admission, registered, nullptr);
-    UnixSocketControlServer server(endpoint, {.socket_path = path, .allowed_uid = std::nullopt});
+    // A legacy service predates shared-memory negotiation and answers it as
+    // explicitly unsupported; the current server enables it by default.
+    UnixSocketControlServer server(
+        endpoint,
+        {.socket_path = path, .allowed_uid = std::nullopt, .enable_shared_memory = false});
     expect(server.start(), "start actual legacy socket server");
     std::jthread acceptor([&](const std::stop_token& stop) {
         while (!stop.stop_requested())
@@ -150,8 +154,10 @@ void actual_legacy_fallback() {
         const auto task = gate.acquire();
         expect(task && gate.heartbeat(*task) && gate.complete(*task) && !gate.quarantined(),
                "auto negotiates explicit unsupported, then uses one legacy socket session");
-        expect(server.served_request_count() == 4,
-               "exactly one negotiation and three domain requests were served");
+        // The rejected negotiation is answered by the transport, not served as
+        // a domain request.
+        expect(server.served_request_count() == 3 && server.shared_memory_request_count() == 0,
+               "exactly three domain requests were served over the legacy socket");
     }
     acceptor.request_stop();
     acceptor.join();
