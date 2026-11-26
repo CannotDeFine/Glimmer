@@ -175,14 +175,10 @@ struct CooperativeLaunchGate::Implementation {
     NativeEpochClaim epoch_claim_response(const std::optional<NativeEpochResponse>& response,
                                           NativeEpochGrant expected) const {
         const NativeEpochClaim uncertain{NativeEpochClaimStatus::kUncertain, expected};
+        // epoch_exchange quarantines the session and returns nothing for every
+        // service error, so an error reply never reaches this point.
         if (!response) {
             return uncertain;
-        }
-        if (response->kind == NativeEpochResponseKind::kError && expected.execution.task_id == 0 &&
-            (response->error == TaskProtocolErrorCode::kInvalidRequest ||
-             response->error == TaskProtocolErrorCode::kQuotaExceeded ||
-             response->error == TaskProtocolErrorCode::kQueueFull)) {
-            return {};
         }
         const auto grant = response->grant;
         if ((response->kind != NativeEpochResponseKind::kPending &&
