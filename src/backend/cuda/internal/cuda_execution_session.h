@@ -125,8 +125,8 @@ struct CudaContextDispatch {
     decltype(&cuCtxSetLimit) set_limit{};
     decltype(&cuCtxGetCacheConfig) get_cache{};
     decltype(&cuCtxSetCacheConfig) set_cache{};
-    CUresult(CUDAAPI* get_shared)(CUsharedconfig*){};
-    CUresult(CUDAAPI* set_shared)(CUsharedconfig){};
+    CUresult(CUDAAPI* get_shared)(CUsharedconfig*) {};
+    CUresult(CUDAAPI* set_shared)(CUsharedconfig) {};
     decltype(&cuCtxResetPersistingL2Cache) reset_cache{};
     decltype(&cuCtxGetApiVersion) api_version{};
     decltype(&cuCtxGetExecAffinity) affinity{};
@@ -136,8 +136,8 @@ struct CudaContextDispatch {
         decltype(&cudaDeviceSetLimit) set_limit{};
         decltype(&cudaDeviceGetCacheConfig) get_cache{};
         decltype(&cudaDeviceSetCacheConfig) set_cache{};
-        cudaError_t(CUDARTAPI* get_shared)(cudaSharedMemConfig*){};
-        cudaError_t(CUDARTAPI* set_shared)(cudaSharedMemConfig){};
+        cudaError_t(CUDARTAPI* get_shared)(cudaSharedMemConfig*) {};
+        cudaError_t(CUDARTAPI* set_shared)(cudaSharedMemConfig) {};
         decltype(&cudaCtxResetPersistingL2Cache) reset_cache{};
     } runtime{};
 };

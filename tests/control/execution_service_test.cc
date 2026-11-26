@@ -415,13 +415,13 @@ CUresult CUDAAPI launch(CUfunction function, unsigned int, unsigned int, unsigne
     return native.launch_status;
 }
 CUresult CUDAAPI host_allocate(void** pointer, std::size_t bytes, unsigned int) {
-    native.host = ::operator new (bytes, std::align_val_t{64});
+    native.host = ::operator new(bytes, std::align_val_t{64});
     *pointer = native.host;
     return CUDA_SUCCESS;
 }
 CUresult CUDAAPI host_release(void* pointer) {
     ++native.host_frees;
-    ::operator delete (pointer, std::align_val_t{64});
+    ::operator delete(pointer, std::align_val_t{64});
     native.host = nullptr;
     return CUDA_SUCCESS;
 }
