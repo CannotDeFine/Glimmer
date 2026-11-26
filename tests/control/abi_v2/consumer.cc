@@ -17,7 +17,7 @@ bool accept_resource(void*, glimmer::core::TaskId) noexcept {
 
 }  // namespace
 
-extern "C" bool glimmer_abi_v1_consumer(const std::size_t* current, std::size_t count) {
+extern "C" bool glimmer_abi_v2_consumer(const std::size_t* current, std::size_t count) {
     using namespace glimmer::control;
     const auto legacy = control_layout();
     if (current == nullptr || count != legacy.size() ||
@@ -59,7 +59,7 @@ extern "C" bool glimmer_abi_v1_consumer(const std::size_t* current, std::size_t 
     if (!endpoint.handle("GLIMMER_TASK_V1 STATS\n", std::nullopt)) {
         return false;
     }
-    char directory[] = "/tmp/glimmer-abi-v1-XXXXXX";
+    char directory[] = "/tmp/glimmer-abi-v2-XXXXXX";
     if (::mkdtemp(directory) == nullptr) {
         return false;
     }
@@ -74,7 +74,7 @@ extern "C" bool glimmer_abi_v1_consumer(const std::size_t* current, std::size_t 
     UnixSocketControlServer server(endpoint, config);
     if (server.running() || server.serve_one() || !server.start() || !server.running() ||
         server.serve_one_for(1) != UnixSocketServeStatus::kTimedOut ||
-        server.served_request_count() != 0) {
+        server.served_request_count() != 0 || server.shared_memory_request_count() != 0) {
         return false;
     }
     server.stop();

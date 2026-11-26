@@ -25,6 +25,8 @@ class TaskControlEndpoint final {
                                                     std::optional<TaskPeerIdentity> peer) noexcept;
 
    private:
+    [[nodiscard]] std::optional<std::string> handle_native_epoch(
+        std::string_view line, std::optional<TaskPeerIdentity> peer);
     TaskAdmissionService& admission_service_;
     TaskResourceRegistrar registrar_;
     void* registrar_context_;
