@@ -1,6 +1,8 @@
+#include "internal/shared_control_channel.h"
 #include "glimmer/control/async_cooperative_launch_gate.h"
 #include "glimmer/control/native_epoch_protocol.h"
-#include "glimmer/control/unix_socket_server.h"
+#include "glimmer/control/task_execution_endpoint.h"
+#include "glimmer/control/unix_socket_task_execution_server.h"
 
 #include <algorithm>
 #include <array>
@@ -10,11 +12,13 @@
 #include <future>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <poll.h>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <thread>
@@ -116,13 +120,50 @@ class ScriptedPeer final {
         is_blocking_ = false;
         condition_.notify_all();
     }
+    // Call while the gate is still alive: after the script, no further request
+    // or reconnection may reach this peer.
+    void finish() {
+        end(true);
+    }
     void join() {
+        end(false);
+    }
+
+   private:
+    void end(bool should_verify_silence) {
+        {
+            const std::lock_guard lock(mutex_);
+            is_blocking_ = false;
+            if (!is_ending_) {
+                is_ending_ = true;
+                should_verify_silence_ = should_verify_silence;
+            }
+            condition_.notify_all();
+        }
         if (thread_.joinable()) {
             thread_.join();
         }
     }
-
-   private:
+    static bool is_readable_now(int descriptor) {
+        pollfd state{descriptor, POLLIN, 0};
+        int status;
+        do {
+            status = ::poll(&state, 1, 0);
+        } while (status < 0 && errno == EINTR);
+        require(status >= 0, "peer descriptor polled");
+        return status > 0;
+    }
+    void verify_silence(int client, internal::SharedControlChannel& channel) {
+        if (channel.active()) {
+            std::string request;
+            require(channel.receive_request(client, 0, request) ==
+                        internal::SharedControlReadStatus::kIdle,
+                    "quarantined gate publishes no further request");
+        } else if (client >= 0) {
+            require(!is_readable_now(client), "quarantined gate sends no further socket request");
+        }
+        require(!is_readable_now(listener_), "quarantined gate does not reconnect");
+    }
     static void readable(int descriptor) {
         pollfd state{descriptor, POLLIN, 0};
         int status;
@@ -131,27 +172,66 @@ class ScriptedPeer final {
         } while (status < 0 && errno == EINTR);
         require(status > 0, "expected exact request arrives within deadline");
     }
-    void run() {
-        int client = -1;
-        std::string first_grant;
-        std::set<std::uint64_t> sequences;
-        for (std::size_t index = 0; index < script_.size(); ++index) {
+    static std::string read_socket_line(int client) {
+        std::string request;
+        for (;;) {
+            readable(client);
+            char byte{};
+            require(::recv(client, &byte, 1, 0) == 1, "exact frame received");
+            request += byte;
+            require(request.size() <= kTaskProtocolMaxLineBytes, "bounded request frame");
+            if (byte == '\n') {
+                return request;
+            }
+        }
+    }
+    static void send_socket_line(int client, std::string_view line) {
+        while (!line.empty()) {
+            const auto count = ::send(client, line.data(), line.size(), MSG_NOSIGNAL);
+            require(count > 0, "scripted reply delivered");
+            line.remove_prefix(static_cast<std::size_t>(count));
+        }
+    }
+    // The gate's client always upgrades to shared memory. The peer completes
+    // that upgrade like the real service, with one incarnation for all of its
+    // connections, then returns the next domain line. A domain line sent before
+    // the upgrade is returned unchanged so the exact script rejects it.
+    std::string next_request(int& client, internal::SharedControlChannel& channel) {
+        for (;;) {
             if (client < 0) {
                 readable(listener_);
                 client = ::accept4(listener_, nullptr, nullptr, SOCK_CLOEXEC);
                 require(client >= 0, "scripted connection accepted");
             }
-            std::string request;
-            for (;;) {
-                readable(client);
-                char byte{};
-                require(::recv(client, &byte, 1, 0) == 1, "exact frame received");
-                request += byte;
-                require(request.size() <= kTaskProtocolMaxLineBytes, "bounded request frame");
-                if (byte == '\n') {
-                    break;
+            if (channel.active()) {
+                const auto deadline = std::chrono::steady_clock::now() + 2s;
+                std::string request;
+                for (;;) {
+                    const auto status = channel.receive_request(client, 100, request);
+                    if (status == internal::SharedControlReadStatus::kLine) {
+                        return request;
+                    }
+                    require(status == internal::SharedControlReadStatus::kIdle &&
+                                std::chrono::steady_clock::now() < deadline,
+                            "expected exact request arrives within deadline");
                 }
             }
+            auto request = read_socket_line(client);
+            if (request != internal::kSharedControlOpen) {
+                return request;
+            }
+            require(channel.create_server(incarnation_), "scripted shared channel created");
+            send_socket_line(client, internal::kSharedControlReady);
+            require(channel.send_offer(client, 2s), "scripted shared channel offered");
+        }
+    }
+    void run() {
+        int client = -1;
+        internal::SharedControlChannel channel;
+        std::string first_grant;
+        std::set<std::uint64_t> sequences;
+        for (std::size_t index = 0; index < script_.size(); ++index) {
+            std::string request = next_request(client, channel);
             std::uint64_t sequence = 0;
             if (request.starts_with(kNativeEpochProtocolVersion)) {
                 const auto parsed = parse_native_epoch_request(request);
@@ -191,33 +271,47 @@ class ScriptedPeer final {
                 }
             }
             if (!response) {
+                channel.reset();
                 require(::shutdown(client, SHUT_RDWR) == 0 && ::close(client) == 0,
                         "lose response without replay");
                 client = -1;
+            } else if (channel.active()) {
+                require(channel.publish_response(checked(response)),
+                        "scripted shared reply delivered");
             } else {
-                std::size_t sent = 0;
-                while (sent < checked(response).size()) {
-                    const auto count = ::send(client, checked(response).data() + sent,
-                                              checked(response).size() - sent, MSG_NOSIGNAL);
-                    require(count > 0, "scripted reply delivered");
-                    sent += static_cast<std::size_t>(count);
-                }
+                send_socket_line(client, checked(response));
             }
         }
+        bool should_verify_silence = false;
+        {
+            std::unique_lock lock(mutex_);
+            condition_.wait(lock, [&] { return is_ending_; });
+            should_verify_silence = should_verify_silence_;
+        }
+        if (should_verify_silence) {
+            verify_silence(client, channel);
+        }
+        channel.reset();
         if (client >= 0) {
             require(::close(client) == 0, "completed scripted connection closed");
         }
     }
+    const internal::ServiceIncarnation incarnation_ = internal::new_service_incarnation();
     std::vector<Step> script_;
     bool is_blocking_{};
     bool has_entered_{};
+    bool is_ending_{};
+    bool should_verify_silence_{};
     std::mutex mutex_;
     std::condition_variable condition_;
     int listener_{-1};
     std::thread thread_;
 };
 
-void shared_policy(CooperativeLaunchGate& gate) {
+// A remote native-epoch error is not yet transactional and quarantines the
+// session, so negative native reports run only against the local owner here;
+// remote_error_quarantines and the scripted peers cover them remotely.
+void shared_policy(CooperativeLaunchGate& gate, bool is_remote) {
     const auto low = gate.acquire_native_epoch({kExtent, 1});
     require(low.status == NativeEpochClaimStatus::kGranted && low.grant.extent == kExtent,
             "distinct native grant");
@@ -227,28 +321,37 @@ void shared_policy(CooperativeLaunchGate& gate) {
     require(high.claim.status == CooperativeClaimStatus::kPending &&
                 gate.retreat_native_epoch(low.grant) == true,
             "ordinary priority shares native capacity and requests retreat");
-    auto stale = low.grant;
-    ++stale.execution.generation;
-    require(!gate.finish_native_epoch(stale, 1, false) && !gate.retreat_native_epoch(stale) &&
-                gate.heartbeat_native_epoch(low.grant),
-            "stale generation cannot release epoch");
-    require(!gate.finish_native_epoch(low.grant, 9, false) &&
-                gate.finish_native_epoch(low.grant, 3, false) &&
-                !gate.finish_native_epoch(low.grant, 3, false),
-            "exact terminal count/cap and no replay");
+    if (!is_remote) {
+        auto stale = low.grant;
+        ++stale.execution.generation;
+        require(!gate.finish_native_epoch(stale, 1, false) && !gate.retreat_native_epoch(stale) &&
+                    gate.heartbeat_native_epoch(low.grant),
+                "stale generation cannot release epoch");
+        require(!gate.finish_native_epoch(low.grant, 9, false),
+                "terminal count above the cap is rejected");
+    }
+    require(gate.heartbeat_native_epoch(low.grant) && gate.finish_native_epoch(low.grant, 3, false),
+            "exact terminal count releases the epoch");
+    if (!is_remote) {
+        require(!gate.finish_native_epoch(low.grant, 3, false), "terminal report is not replayed");
+    }
     const auto unit = gate.claim(high.task_id);
     require(unit.status == CooperativeClaimStatus::kGranted,
             "original unit claims after physical stop declaration");
-    auto fake = kGrant;
-    fake.execution = unit.execution;
-    require(!gate.finish_native_epoch(fake, 0, false), "native reports cannot consume unit");
+    if (!is_remote) {
+        auto fake = kGrant;
+        fake.execution = unit.execution;
+        require(!gate.finish_native_epoch(fake, 0, false), "native reports cannot consume unit");
+    }
     const auto pending = gate.acquire_native_epoch({kExtent});
     require(pending.status == NativeEpochClaimStatus::kPending &&
                 pending.grant.execution.generation == 0 &&
                 !gate.cancel_pending(pending.grant.execution.task_id),
             "pending approval is not dispatch or unit cancellation");
-    require(gate.cancel_native_epoch(pending.grant) && !gate.cancel_native_epoch(pending.grant),
-            "unused native cancellation once");
+    require(gate.cancel_native_epoch(pending.grant), "unused native cancellation");
+    if (!is_remote) {
+        require(!gate.cancel_native_epoch(pending.grant), "unused native cancellation once");
+    }
     const auto next = gate.acquire_native_epoch({kExtent, 10});
     require(next.status == NativeEpochClaimStatus::kPending && gate.complete(unit.execution),
             "second pending epoch shares unit owner");
@@ -268,7 +371,7 @@ void test_local() {
     CooperativeLaunchGate gate(
         {.scheduling_policy = glimmer::core::SchedulingPolicy::kPriority, .control_socket = {}},
         kExtent);
-    shared_policy(gate);
+    shared_policy(gate, false);
     require(checked(gate.local_stats()).total_task_count == 0 &&
                 checked(gate.local_stats()).quota.allocated_bytes == 0,
             "same local owner drains/forgets all unit/native tasks");
@@ -297,28 +400,30 @@ void test_bad_acquisition() {
         "GLIMMER_EPOCH_V1 GRANTED 10 20 8 4 2 1000000 1\n",
         "WRONG_SEQUENCE GLIMMER_EPOCH_V2 GRANTED 10 20 8 4 2 1000000 1\n",
         "malformed\n",
-        "GLIMMER_TASK_V1 EXEC_LEASE 10 default 1 1 1 20\n",
+        "GLIMMER_TASK_EXEC_V1 EXEC_LEASE 10 default 1 1 1 20\n",
         "GLIMMER_EPOCH_V2 GRANTED 10 20 9 4 2 1000000 1\n",
         "GLIMMER_EPOCH_V2 GRANTED 10 20 8 4 2 1000000 18446744073709551615\n",
         "GLIMMER_EPOCH_V2 PENDING 10 8 4 3 1000000\n",
         "GLIMMER_EPOCH_V2 ERROR INTERNAL_ERROR\n"};
     for (const auto& response : responses) {
-        ScriptedPeer peer({{kAcquire, response}, {kProbe, kProbeReply}});
+        ScriptedPeer peer({{kAcquire, response}});
         CooperativeLaunchGate gate({.control_socket = peer.path}, kExtent);
         const auto result = gate.acquire_native_epoch({kExtent});
         require(result.status == NativeEpochClaimStatus::kUncertain &&
                     result.grant.execution.task_id == 0,
                 "lost/wrong/legacy response does not invent a grant");
-        require(gate.heartbeat_native_epoch(kGrant),
-                "explicit next operation follows, no implicit retry/downgrade");
-        peer.join();
+        require(!gate.heartbeat_native_epoch(kGrant),
+                "uncertain acquisition quarantines the session without retry/downgrade");
+        peer.finish();
     }
-    ScriptedPeer rejected(
-        {{kAcquire, "GLIMMER_EPOCH_V2 ERROR QUOTA_EXCEEDED\n"}, {kProbe, kProbeReply}});
+    // A service error does not yet carry a transactional outcome, so even an
+    // explicit rejection cannot prove that admission was not published.
+    ScriptedPeer rejected({{kAcquire, "GLIMMER_EPOCH_V2 ERROR QUOTA_EXCEEDED\n"}});
     CooperativeLaunchGate gate({.control_socket = rejected.path}, kExtent);
-    require(gate.acquire_native_epoch({kExtent}).status == NativeEpochClaimStatus::kRejected &&
-                gate.heartbeat_native_epoch(kGrant),
-            "explicit service rejection differs from uncertain mutation");
+    require(gate.acquire_native_epoch({kExtent}).status == NativeEpochClaimStatus::kUncertain &&
+                !gate.heartbeat_native_epoch(kGrant),
+            "service error remains uncertain and quarantines the session");
+    rejected.finish();
 }
 
 void test_bad_pending_and_reports() {
@@ -330,29 +435,30 @@ void test_bad_pending_and_reports() {
         "GLIMMER_EPOCH_V2 GRANTED 10 20 8 3 2 1000000 1\n",
         "GLIMMER_EPOCH_V2 ERROR INVALID_REQUEST\n"};
     for (const auto& response : claims) {
-        ScriptedPeer peer({{"GLIMMER_EPOCH_V2 CLAIM 10\n", response}, {kProbe, kProbeReply}});
+        ScriptedPeer peer({{"GLIMMER_EPOCH_V2 CLAIM 10\n", response}});
         CooperativeLaunchGate gate({.control_socket = peer.path}, kExtent);
         const auto result = gate.claim_native_epoch(pending);
         require(result.status == NativeEpochClaimStatus::kUncertain &&
                     result.grant.execution.task_id == 10 && result.grant.extent == kExtent &&
-                    result.grant.execution.generation == 0 && gate.heartbeat_native_epoch(kGrant),
-                "uncertain claim preserves pending identity/extent without retry");
+                    result.grant.execution.generation == 0 && !gate.heartbeat_native_epoch(kGrant),
+                "uncertain claim preserves pending identity/extent and quarantines without retry");
+        peer.finish();
     }
     const std::vector<std::optional<std::string>> terminals{
         std::nullopt,
         "malformed\n",
-        "GLIMMER_TASK_V1 STATE 10 COMPLETED\n",
+        "GLIMMER_TASK_EXEC_V1 STATE 10 COMPLETED\n",
         "WRONG_SEQUENCE GLIMMER_EPOCH_V2 ACK COMPLETE 10 20 2\n",
         "GLIMMER_EPOCH_V2 ACK COMPLETE 11 20 2\n",
         "GLIMMER_EPOCH_V2 ACK COMPLETE 10 21 2\n",
         "GLIMMER_EPOCH_V2 ACK FAIL 10 20 2\n",
         "GLIMMER_EPOCH_V2 ACK COMPLETE 10 20 3\n"};
     for (const auto& response : terminals) {
-        ScriptedPeer peer(
-            {{"GLIMMER_EPOCH_V2 COMPLETE 10 20 2\n", response}, {kProbe, kProbeReply}});
+        ScriptedPeer peer({{"GLIMMER_EPOCH_V2 COMPLETE 10 20 2\n", response}});
         CooperativeLaunchGate gate({.control_socket = peer.path}, kExtent);
-        require(!gate.finish_native_epoch(kGrant, 2, false) && gate.heartbeat_native_epoch(kGrant),
-                "wrong/lost terminal cannot acknowledge release or replay");
+        require(!gate.finish_native_epoch(kGrant, 2, false) && !gate.heartbeat_native_epoch(kGrant),
+                "wrong/lost terminal cannot acknowledge release, replay or continue");
+        peer.finish();
     }
     ScriptedPeer expired(
         {{kAcquire, "GLIMMER_EPOCH_V2 GRANTED 10 20 8 4 2 1000000 1\n"}, {kProbe, kProbeReply}});
@@ -368,22 +474,24 @@ void test_bad_observations_and_disabled_policy() {
     for (const auto& reply :
          {"GLIMMER_EPOCH_V2 RETREAT 11 20 1\n", "GLIMMER_EPOCH_V2 RETREAT 10 21 1\n",
           "GLIMMER_EPOCH_V2 ACK HEARTBEAT 10 20 0\n"}) {
-        ScriptedPeer peer({{"GLIMMER_EPOCH_V2 RETREAT 10 20\n", reply}, {kProbe, kProbeReply}});
+        ScriptedPeer peer(std::vector<Step>{{"GLIMMER_EPOCH_V2 RETREAT 10 20\n", reply}});
         CooperativeLaunchGate gate({.control_socket = peer.path}, kExtent);
-        require(!gate.retreat_native_epoch(kGrant) && gate.heartbeat_native_epoch(kGrant),
-                "wrong retreat response stays unknown without replay");
+        require(!gate.retreat_native_epoch(kGrant) && !gate.heartbeat_native_epoch(kGrant),
+                "wrong retreat response stays unknown and quarantines without replay");
+        peer.finish();
     }
     auto pending = kGrant;
     pending.execution.generation = 0;
     pending.acceptance_deadline_nanoseconds = 0;
-    ScriptedPeer cancelled(
-        {{"GLIMMER_EPOCH_V2 CANCEL_PENDING 10\n", "GLIMMER_EPOCH_V2 ACK CANCEL_PENDING 11 0 0\n"},
-         {kProbe, kProbeReply}});
+    ScriptedPeer cancelled(std::vector<Step>{
+        {"GLIMMER_EPOCH_V2 CANCEL_PENDING 10\n", "GLIMMER_EPOCH_V2 ACK CANCEL_PENDING 11 0 0\n"}});
     CooperativeLaunchGate cancel_gate({.control_socket = cancelled.path}, kExtent);
-    require(!cancel_gate.cancel_native_epoch(pending) && cancel_gate.heartbeat_native_epoch(kGrant),
-            "wrong pending cancellation cannot acknowledge release");
+    require(
+        !cancel_gate.cancel_native_epoch(pending) && !cancel_gate.heartbeat_native_epoch(kGrant),
+        "wrong pending cancellation cannot acknowledge release and quarantines");
+    cancelled.finish();
     ScriptedPeer disabled(std::vector<Step>{
-        {"GLIMMER_TASK_V1 EXEC_HEARTBEAT 1 1\n", "GLIMMER_TASK_V1 STATE 1 RUNNING\n"}});
+        {"GLIMMER_TASK_EXEC_V1 EXEC_HEARTBEAT 1 1\n", "GLIMMER_TASK_EXEC_V1 STATE 1 RUNNING\n"}});
     CooperativeLaunchGate default_gate({.control_socket = disabled.path});
     require(
         default_gate.acquire_native_epoch({kExtent}).status == NativeEpochClaimStatus::kRejected &&
@@ -407,8 +515,7 @@ void test_replayed_grant() {
     ScriptedPeer peer(
         {{kAcquire, fresh},
          {"GLIMMER_EPOCH_V2 COMPLETE 30 40 2\n", "GLIMMER_EPOCH_V2 ACK COMPLETE 30 40 2\n"},
-         {kAcquire, "REPLAY_FIRST_GRANT"},
-         {kProbe, kProbeReply}});
+         {kAcquire, "REPLAY_FIRST_GRANT"}});
     CooperativeLaunchGate gate({.control_socket = peer.path}, kExtent);
     const auto first = gate.acquire_native_epoch({kExtent});
     require(first.status == NativeEpochClaimStatus::kGranted &&
@@ -418,8 +525,9 @@ void test_replayed_grant() {
     require(
         replay.status == NativeEpochClaimStatus::kUncertain && replay.grant.execution.task_id == 0,
         "replayed prior grant cannot fund a new epoch");
-    require(gate.heartbeat_native_epoch(kGrant),
-            "explicit next operation, no replay recovery request");
+    require(!gate.heartbeat_native_epoch(kGrant),
+            "replayed grant quarantines the session, no replay recovery request");
+    peer.finish();
 }
 
 void test_async_capacity_and_order() {
@@ -452,11 +560,11 @@ void test_async_capacity_and_order() {
     peer.join();
 
     ScriptedPeer interleaved(
-        {{"GLIMMER_TASK_V1 EXEC_HEARTBEAT 1 1\n", "GLIMMER_TASK_V1 STATE 1 RUNNING\n"},
-         {"GLIMMER_TASK_V1 EXEC_COMPLETE 1 1\n", "GLIMMER_TASK_V1 STATE 1 COMPLETED\n"},
+        {{"GLIMMER_TASK_EXEC_V1 EXEC_HEARTBEAT 1 1\n", "GLIMMER_TASK_EXEC_V1 STATE 1 RUNNING\n"},
+         {"GLIMMER_TASK_EXEC_V1 EXEC_COMPLETE 1 1\n", "GLIMMER_TASK_EXEC_V1 STATE 1 COMPLETED\n"},
          {"GLIMMER_EPOCH_V2 HEARTBEAT 2 2\n", "GLIMMER_EPOCH_V2 ACK HEARTBEAT 2 2 0\n"},
-         {"GLIMMER_TASK_V1 EXEC_ACQUIRE default 1 1 1\n",
-          "GLIMMER_TASK_V1 EXEC_LEASE 3 default 1 1 1 3\n"}},
+         {"GLIMMER_TASK_EXEC_V1 EXEC_ACQUIRE default 1 1 1\n",
+          "GLIMMER_TASK_EXEC_V1 EXEC_LEASE 3 default 1 1 1 3\n"}},
         true);
     AsyncCooperativeLaunchGate ordered({.control_socket = interleaved.path}, 8, kExtent);
     auto blocked = ordered.heartbeat({1, 1});
@@ -477,16 +585,38 @@ void test_async_capacity_and_order() {
 bool registered(void*, glimmer::core::TaskId) noexcept {
     return true;
 }
+void rolled_back(void*, glimmer::core::TaskId) noexcept {}
+
+void remote_error_quarantines(const std::string& path) {
+    CooperativeLaunchGate gate({.control_socket = path}, kExtent);
+    const auto epoch = gate.acquire_native_epoch({kExtent});
+    require(epoch.status == NativeEpochClaimStatus::kGranted,
+            "remote native grant for stale report");
+    auto stale = epoch.grant;
+    ++stale.execution.generation;
+    require(!gate.finish_native_epoch(stale, 1, false) && !gate.heartbeat_native_epoch(epoch.grant),
+            "service error for a stale report quarantines the remote session");
+    // The service still owns the epoch; a new session of the same process
+    // reports its exact terminal state.
+    CooperativeLaunchGate owner({.control_socket = path}, kExtent);
+    require(owner.finish_native_epoch(epoch.grant, 0, false),
+            "fresh session releases the epoch retained by the quarantined session");
+}
 
 void test_real_remote() {
     TemporaryDirectory directory;
-    glimmer::core::Scheduler scheduler(
-        100, {.scheduling_policy = glimmer::core::SchedulingPolicy::kPriority});
-    TaskAdmissionService admission(scheduler, {}, true, nullptr, nullptr, nullptr, nullptr,
-                                   kExtent);
-    TaskControlEndpoint endpoint(admission, registered, nullptr);
+    auto service = std::make_unique<TaskExecutionAdmissionService>(
+        100,
+        glimmer::core::SchedulerOptions{.scheduling_policy =
+                                            glimmer::core::SchedulingPolicy::kPriority},
+        std::chrono::milliseconds{0}, true, nullptr, nullptr, nullptr, nullptr, kExtent);
+    const auto& admission = *service;
+    TaskExecutionEndpoint endpoint(std::move(service), registered, rolled_back, nullptr);
     const auto path = directory.path + "/control.sock";
-    UnixSocketControlServer server(endpoint, {.socket_path = path, .allowed_uid = std::nullopt});
+    // The execution server serves only negotiated shared-memory sessions, so
+    // every native and unit operation below uses that transport.
+    UnixSocketTaskExecutionServer server(endpoint,
+                                         {.socket_path = path, .allowed_uid = std::nullopt});
     if (!server.start()) {
         throw SocketUnavailable{};
     }
@@ -498,20 +628,16 @@ void test_real_remote() {
     });
     {
         CooperativeLaunchGate gate({.control_socket = path}, kExtent);
-        shared_policy(gate);
+        shared_policy(gate, true);
         require(!gate.local_stats(), "remote path never switches local");
     }
+    remote_error_quarantines(path);
     acceptor.request_stop();
     acceptor.join();
-    if (const auto* transport = std::getenv("GLIMMER_CONTROL_TRANSPORT");
-        transport != nullptr && std::string_view(transport) == "shared_memory") {
-        require(server.shared_memory_request_count() > 0 &&
-                    server.shared_memory_request_count() == server.served_request_count(),
-                "real endpoint must use strict shared memory for all V2 and unit operations");
-    }
     server.stop();
-    require(scheduler.stats().running_task_count == 0 && scheduler.stats().queued_task_count == 0 &&
-                scheduler.stats().quota.allocated_bytes == 0,
+    const auto stats = admission.stats();
+    require(stats.running_task_count == 0 && stats.queued_task_count == 0 &&
+                stats.quota.allocated_bytes == 0,
             "actual shared remote policy drains");
 }
 
@@ -521,8 +647,8 @@ int main(int argc, char** argv) try {
     if (argc == 1) {
         test_local();
     } else {
-        // Raw scripted peers intentionally assert socket bytes without an
-        // upgrade handshake. This mode repeats only the real bound endpoint.
+        // Scripted peers complete the client's shared-memory upgrade, then
+        // assert exact domain lines. This mode repeats only the real endpoint.
         if (argc == 2 && std::string_view(argv[1]) == "--shared-socket") {
             const char* transport = std::getenv("GLIMMER_CONTROL_TRANSPORT");
             require(transport != nullptr && std::string_view(transport) == "shared_memory",
