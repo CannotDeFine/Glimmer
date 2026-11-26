@@ -39,58 +39,42 @@ if(GLIMMER_ENABLE_NCCL_EXECUTION)
     target_compile_definitions(glimmer_execution_service PRIVATE GLIMMER_ENABLE_NCCL_EXECUTION=1)
 endif()
 if(BUILD_TESTING)
-    add_executable(glimmer_execution_host_stage_metrics_test
-        "${PROJECT_SOURCE_DIR}/tests/control/execution_host_stage_metrics_test.cc" host_stage_metrics.cc)
-    target_include_directories(glimmer_execution_host_stage_metrics_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(glimmer_execution_host_stage_metrics_test PRIVATE Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_execution_host_stage_metrics_test)
-    add_test(NAME glimmer_execution_host_stage_metrics_test COMMAND glimmer_execution_host_stage_metrics_test)
-    set_tests_properties(glimmer_execution_host_stage_metrics_test PROPERTIES TIMEOUT 15)
+    glimmer_add_test_program(glimmer_execution_host_stage_metrics_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_host_stage_metrics_test.cc"
+            host_stage_metrics.cc
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}"
+        LIBRARIES Glimmer::project_options
+        TIMEOUT 15)
     glimmer_create_execution_test_runtime()
-    add_executable(glimmer_execution_sgemm_range_test
-        "${PROJECT_SOURCE_DIR}/tests/control/execution_sgemm_range_test.cc")
-    target_include_directories(glimmer_execution_sgemm_range_test PRIVATE "${PROJECT_SOURCE_DIR}/src/execution_service")
-    target_link_libraries(glimmer_execution_sgemm_range_test PRIVATE Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_execution_sgemm_range_test)
-    add_test(NAME glimmer_execution_sgemm_range_test COMMAND glimmer_execution_sgemm_range_test)
-    set_tests_properties(glimmer_execution_sgemm_range_test PROPERTIES TIMEOUT 15)
-    add_executable(glimmer_execution_graph_service_test
-        "${PROJECT_SOURCE_DIR}/tests/control/execution_graph_service_test.cc")
-    target_include_directories(glimmer_execution_graph_service_test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
-        "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-        "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_execution_graph_service_test PRIVATE
-        glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-        Glimmer::control Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_execution_graph_service_test)
-    add_test(NAME glimmer_execution_graph_service_test COMMAND glimmer_execution_graph_service_test)
-    set_tests_properties(glimmer_execution_graph_service_test PROPERTIES TIMEOUT 30)
-    add_executable(glimmer_execution_process_memory_service_test
-        "${PROJECT_SOURCE_DIR}/tests/control/execution_process_memory_service_test.cc")
-    target_include_directories(glimmer_execution_process_memory_service_test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
-        "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-        "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_execution_process_memory_service_test PRIVATE
-        glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-        Glimmer::control Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_execution_process_memory_service_test)
-    add_test(NAME glimmer_execution_process_memory_service_test
-        COMMAND glimmer_execution_process_memory_service_test)
-    set_tests_properties(glimmer_execution_process_memory_service_test PROPERTIES TIMEOUT 45)
-    add_executable(glimmer_execution_pair_service_test
-        "${PROJECT_SOURCE_DIR}/tests/control/execution_pair_service_test.cc")
-    target_include_directories(glimmer_execution_pair_service_test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
-        "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-        "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_execution_pair_service_test PRIVATE
-        glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-        Glimmer::control Glimmer::project_options Threads::Threads spdlog::spdlog)
-    glimmer_enable_clang_tidy(glimmer_execution_pair_service_test)
-    add_test(NAME glimmer_execution_pair_service_test COMMAND glimmer_execution_pair_service_test)
-    set_tests_properties(glimmer_execution_pair_service_test PROPERTIES TIMEOUT 90)
+    glimmer_add_test_program(glimmer_execution_sgemm_range_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_sgemm_range_test.cc"
+        INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service"
+        LIBRARIES Glimmer::project_options
+        TIMEOUT 15)
+    glimmer_add_test_program(glimmer_execution_graph_service_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_graph_service_test.cc"
+        INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
+            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
+            "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+            Glimmer::control Glimmer::project_options Threads::Threads
+        TIMEOUT 30)
+    glimmer_add_test_program(glimmer_execution_process_memory_service_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_process_memory_service_test.cc"
+        INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
+            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
+            "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+            Glimmer::control Glimmer::project_options
+        TIMEOUT 45)
+    glimmer_add_test_program(glimmer_execution_pair_service_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_pair_service_test.cc"
+        INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
+            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
+            "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+            Glimmer::control Glimmer::project_options Threads::Threads spdlog::spdlog
+        TIMEOUT 90)
     add_test(NAME glimmer_execution_priority_space_share_test
         COMMAND glimmer_execution_pair_service_test --priority-space-share)
     set_tests_properties(glimmer_execution_priority_space_share_test PROPERTIES TIMEOUT 30)
@@ -129,47 +113,33 @@ if(BUILD_TESTING)
     set_tests_properties(glimmer_execution_workload_aware_startup_test
         glimmer_execution_workload_aware_pairs_test PROPERTIES TIMEOUT 90)
     if(TARGET Glimmer::nccl_headers)
-        add_executable(glimmer_execution_nccl_actor_test
-            "${PROJECT_SOURCE_DIR}/tests/control/execution_nccl_actor_test.cc")
-        target_include_directories(glimmer_execution_nccl_actor_test PRIVATE
-            "${PROJECT_SOURCE_DIR}/src/execution_service"
-            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-            "${CUDAToolkit_INCLUDE_DIRS}")
-        target_link_libraries(glimmer_execution_nccl_actor_test PRIVATE
-            glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-            Glimmer::control Glimmer::nccl_headers Glimmer::project_options Threads::Threads)
-        glimmer_enable_clang_tidy(glimmer_execution_nccl_actor_test)
-        add_test(NAME glimmer_execution_nccl_actor_test COMMAND glimmer_execution_nccl_actor_test)
-        set_tests_properties(glimmer_execution_nccl_actor_test PROPERTIES TIMEOUT 90)
-        add_executable(glimmer_execution_nccl_service_test
-            "${PROJECT_SOURCE_DIR}/tests/control/execution_nccl_service_test.cc")
-        target_include_directories(glimmer_execution_nccl_service_test PRIVATE
-            "${PROJECT_SOURCE_DIR}/src/execution_service"
-            "${PROJECT_SOURCE_DIR}/src/control"
-            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-            "${CUDAToolkit_INCLUDE_DIRS}")
-        target_link_libraries(glimmer_execution_nccl_service_test PRIVATE
-            glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-            Glimmer::control Glimmer::nccl_headers Glimmer::project_options Threads::Threads)
-        glimmer_enable_clang_tidy(glimmer_execution_nccl_service_test)
-        add_test(NAME glimmer_execution_nccl_service_test COMMAND glimmer_execution_nccl_service_test)
-        set_tests_properties(glimmer_execution_nccl_service_test PROPERTIES TIMEOUT 90)
+        glimmer_add_test_program(glimmer_execution_nccl_actor_test
+            SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_nccl_actor_test.cc"
+            INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service"
+                "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
+                "${CUDAToolkit_INCLUDE_DIRS}"
+            LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+                Glimmer::control Glimmer::nccl_headers Glimmer::project_options Threads::Threads
+            TIMEOUT 90)
+        glimmer_add_test_program(glimmer_execution_nccl_service_test
+            SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_nccl_service_test.cc"
+            INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service"
+                "${PROJECT_SOURCE_DIR}/src/control" "${PROJECT_SOURCE_DIR}/src/backend/cuda"
+                "${PROJECT_SOURCE_DIR}/src/backend" "${CUDAToolkit_INCLUDE_DIRS}"
+            LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+                Glimmer::control Glimmer::nccl_headers Glimmer::project_options Threads::Threads
+            TIMEOUT 90)
         add_test(NAME glimmer_execution_nccl_async_source_cut_test
             COMMAND glimmer_execution_nccl_service_test --semantic async-source-cut)
         set_tests_properties(glimmer_execution_nccl_async_source_cut_test PROPERTIES TIMEOUT 30)
-        add_executable(glimmer_execution_nccl_output_effects_test
-            "${PROJECT_SOURCE_DIR}/tests/control/execution_nccl_output_effects_test.cc")
-        target_include_directories(glimmer_execution_nccl_output_effects_test PRIVATE
-            "${PROJECT_SOURCE_DIR}/src/execution_service"
-            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-            "${CUDAToolkit_INCLUDE_DIRS}")
-        target_link_libraries(glimmer_execution_nccl_output_effects_test PRIVATE
-            glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-            Glimmer::control Glimmer::nccl_headers Glimmer::project_options)
-        glimmer_enable_clang_tidy(glimmer_execution_nccl_output_effects_test)
-        add_test(NAME glimmer_execution_nccl_output_effects_test
-            COMMAND glimmer_execution_nccl_output_effects_test)
-        set_tests_properties(glimmer_execution_nccl_output_effects_test PROPERTIES TIMEOUT 30)
+        glimmer_add_test_program(glimmer_execution_nccl_output_effects_test
+            SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_nccl_output_effects_test.cc"
+            INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service"
+                "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
+                "${CUDAToolkit_INCLUDE_DIRS}"
+            LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+                Glimmer::control Glimmer::nccl_headers Glimmer::project_options
+            TIMEOUT 30)
     endif()
     add_test(NAME glimmer_execution_pointer_metadata_service_test
         COMMAND glimmer_execution_service_test --pointer-metadata)
@@ -181,58 +151,38 @@ if(BUILD_TESTING)
         COMMAND glimmer_execution_service_test --unified-copy-oom)
     set_tests_properties(glimmer_execution_unified_copy_oom_service_test PROPERTIES TIMEOUT 30)
     if(TARGET Glimmer::cudnn_headers)
-        add_executable(glimmer_execution_dnn_profile_service_test
-            "${PROJECT_SOURCE_DIR}/tests/control/execution_dnn_profile_service_test.cc")
-        target_include_directories(glimmer_execution_dnn_profile_service_test PRIVATE
-            "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
-            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-            "${CUDAToolkit_INCLUDE_DIRS}")
-        target_link_libraries(glimmer_execution_dnn_profile_service_test PRIVATE
-            glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-            Glimmer::control Glimmer::project_options Glimmer::cudnn_headers)
-        glimmer_enable_clang_tidy(glimmer_execution_dnn_profile_service_test)
-        add_test(NAME glimmer_execution_dnn_profile_service_test
-            COMMAND glimmer_execution_dnn_profile_service_test)
-        set_tests_properties(glimmer_execution_dnn_profile_service_test PROPERTIES TIMEOUT 30)
-        add_executable(glimmer_execution_dnn_service_test
-            "${PROJECT_SOURCE_DIR}/tests/control/execution_dnn_service_test.cc")
-        target_include_directories(glimmer_execution_dnn_service_test PRIVATE
-            "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
-            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-            "${CUDAToolkit_INCLUDE_DIRS}")
-        target_link_libraries(glimmer_execution_dnn_service_test PRIVATE
-            glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-            Glimmer::control Glimmer::project_options Glimmer::cudnn_headers)
-        glimmer_enable_clang_tidy(glimmer_execution_dnn_service_test)
-        add_test(NAME glimmer_execution_dnn_service_test COMMAND glimmer_execution_dnn_service_test)
-        set_tests_properties(glimmer_execution_dnn_service_test PROPERTIES TIMEOUT 30)
-        add_executable(glimmer_execution_dnn_backend_graph_service_test
-            "${PROJECT_SOURCE_DIR}/tests/control/execution_dnn_backend_graph_service_test.cc")
-        target_include_directories(glimmer_execution_dnn_backend_graph_service_test PRIVATE
-            "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
-            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-            "${CUDAToolkit_INCLUDE_DIRS}")
-        target_link_libraries(glimmer_execution_dnn_backend_graph_service_test PRIVATE
-            glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-            Glimmer::control Glimmer::project_options Glimmer::cudnn_headers)
-        glimmer_enable_clang_tidy(glimmer_execution_dnn_backend_graph_service_test)
-        add_test(NAME glimmer_execution_dnn_backend_graph_service_test
-            COMMAND glimmer_execution_dnn_backend_graph_service_test)
-        set_tests_properties(glimmer_execution_dnn_backend_graph_service_test PROPERTIES TIMEOUT 30)
-        add_executable(glimmer_execution_dnn_backend_execution_service_test
-            "${PROJECT_SOURCE_DIR}/tests/control/execution_dnn_backend_execution_service_test.cc")
-        target_include_directories(glimmer_execution_dnn_backend_execution_service_test PRIVATE
-            "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
-            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-            "${CUDAToolkit_INCLUDE_DIRS}")
-        target_link_libraries(glimmer_execution_dnn_backend_execution_service_test PRIVATE
-            glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-            Glimmer::control Glimmer::project_options Glimmer::cudnn_headers)
-        glimmer_enable_clang_tidy(glimmer_execution_dnn_backend_execution_service_test)
-        add_test(NAME glimmer_execution_dnn_backend_execution_service_test
-            COMMAND glimmer_execution_dnn_backend_execution_service_test)
-        set_tests_properties(glimmer_execution_dnn_backend_execution_service_test
-            PROPERTIES TIMEOUT 45)
+        glimmer_add_test_program(glimmer_execution_dnn_profile_service_test
+            SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_dnn_profile_service_test.cc"
+            INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service"
+                "${PROJECT_SOURCE_DIR}/src/control" "${PROJECT_SOURCE_DIR}/src/backend/cuda"
+                "${PROJECT_SOURCE_DIR}/src/backend" "${CUDAToolkit_INCLUDE_DIRS}"
+            LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+                Glimmer::control Glimmer::project_options Glimmer::cudnn_headers
+            TIMEOUT 30)
+        glimmer_add_test_program(glimmer_execution_dnn_service_test
+            SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_dnn_service_test.cc"
+            INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service"
+                "${PROJECT_SOURCE_DIR}/src/control" "${PROJECT_SOURCE_DIR}/src/backend/cuda"
+                "${PROJECT_SOURCE_DIR}/src/backend" "${CUDAToolkit_INCLUDE_DIRS}"
+            LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+                Glimmer::control Glimmer::project_options Glimmer::cudnn_headers
+            TIMEOUT 30)
+        glimmer_add_test_program(glimmer_execution_dnn_backend_graph_service_test
+            SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_dnn_backend_graph_service_test.cc"
+            INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service"
+                "${PROJECT_SOURCE_DIR}/src/control" "${PROJECT_SOURCE_DIR}/src/backend/cuda"
+                "${PROJECT_SOURCE_DIR}/src/backend" "${CUDAToolkit_INCLUDE_DIRS}"
+            LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+                Glimmer::control Glimmer::project_options Glimmer::cudnn_headers
+            TIMEOUT 30)
+        glimmer_add_test_program(glimmer_execution_dnn_backend_execution_service_test
+            SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_dnn_backend_execution_service_test.cc"
+            INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service"
+                "${PROJECT_SOURCE_DIR}/src/control" "${PROJECT_SOURCE_DIR}/src/backend/cuda"
+                "${PROJECT_SOURCE_DIR}/src/backend" "${CUDAToolkit_INCLUDE_DIRS}"
+            LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+                Glimmer::control Glimmer::project_options Glimmer::cudnn_headers
+            TIMEOUT 45)
         foreach(_backend_execution_mode disconnect foreign-pending queued-demand profile-rebind-pending)
             string(REPLACE "-" "_" _backend_execution_test "${_backend_execution_mode}")
             add_test(NAME glimmer_execution_dnn_backend_execution_${_backend_execution_test}_test
@@ -242,51 +192,37 @@ if(BUILD_TESTING)
                 PROPERTIES TIMEOUT 45)
         endforeach()
     endif()
-    add_executable(glimmer_profile_archive_test
-        "${PROJECT_SOURCE_DIR}/tests/control/profile_archive_test.cc")
-    target_include_directories(glimmer_profile_archive_test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/backend/cuda")
-    target_link_libraries(glimmer_profile_archive_test PRIVATE glimmer_execution_service_runtime
-        Glimmer::cuda_backend Glimmer::control Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_profile_archive_test)
-    add_test(NAME glimmer_profile_archive_test COMMAND glimmer_profile_archive_test)
-    set_tests_properties(glimmer_profile_archive_test PROPERTIES TIMEOUT 30)
-    add_executable(glimmer_execution_host_test
-        "${PROJECT_SOURCE_DIR}/tests/control/execution_host_test.cc")
-    target_include_directories(glimmer_execution_host_test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
-        "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-        "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_execution_host_test PRIVATE glimmer_execution_service_runtime
-        Glimmer::cuda_backend Glimmer::backend Glimmer::control Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_execution_host_test)
-    add_test(NAME glimmer_execution_host_test COMMAND glimmer_execution_host_test)
-    set_tests_properties(glimmer_execution_host_test PROPERTIES TIMEOUT 30)
-    add_executable(glimmer_execution_host_function_service_test
-        "${PROJECT_SOURCE_DIR}/tests/control/execution_host_function_service_test.cc")
-    target_include_directories(glimmer_execution_host_function_service_test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
-        "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-        "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_execution_host_function_service_test PRIVATE
-        glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-        Glimmer::control Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_execution_host_function_service_test)
-    add_test(NAME glimmer_execution_host_function_service_test
-        COMMAND glimmer_execution_host_function_service_test)
-    set_tests_properties(glimmer_execution_host_function_service_test PROPERTIES TIMEOUT 60)
-    add_executable(glimmer_execution_priority_service_test
-        "${PROJECT_SOURCE_DIR}/tests/control/execution_priority_service_test.cc")
-    target_include_directories(glimmer_execution_priority_service_test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
-        "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-        "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_execution_priority_service_test PRIVATE
-        glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-        Glimmer::control Glimmer::project_options spdlog::spdlog)
-    glimmer_enable_clang_tidy(glimmer_execution_priority_service_test)
-    add_test(NAME glimmer_execution_priority_service_test COMMAND glimmer_execution_priority_service_test)
-    set_tests_properties(glimmer_execution_priority_service_test PROPERTIES TIMEOUT 30)
+    glimmer_add_test_program(glimmer_profile_archive_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/control/profile_archive_test.cc"
+        INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service"
+            "${PROJECT_SOURCE_DIR}/src/backend/cuda"
+        LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::control
+            Glimmer::project_options
+        TIMEOUT 30)
+    glimmer_add_test_program(glimmer_execution_host_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_host_test.cc"
+        INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
+            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
+            "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+            Glimmer::control Glimmer::project_options
+        TIMEOUT 30)
+    glimmer_add_test_program(glimmer_execution_host_function_service_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_host_function_service_test.cc"
+        INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
+            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
+            "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+            Glimmer::control Glimmer::project_options
+        TIMEOUT 60)
+    glimmer_add_test_program(glimmer_execution_priority_service_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_priority_service_test.cc"
+        INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
+            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
+            "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+            Glimmer::control Glimmer::project_options spdlog::spdlog
+        TIMEOUT 30)
     add_test(NAME glimmer_execution_priority_service_intake_test
         COMMAND glimmer_execution_priority_service_test --intake-race)
     set_tests_properties(glimmer_execution_priority_service_intake_test PROPERTIES TIMEOUT 30)
@@ -305,18 +241,14 @@ if(BUILD_TESTING)
     add_test(NAME glimmer_execution_unissued_priority_audit_test
         COMMAND glimmer_execution_priority_service_test --unissued-audit)
     set_tests_properties(glimmer_execution_unissued_priority_audit_test PROPERTIES TIMEOUT 30)
-    add_executable(glimmer_execution_service_test
-        "${PROJECT_SOURCE_DIR}/tests/control/execution_service_test.cc")
-    target_include_directories(glimmer_execution_service_test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
-        "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-        "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_execution_service_test PRIVATE glimmer_execution_service_runtime
-        Glimmer::cuda_backend Glimmer::backend Glimmer::control Glimmer::project_options spdlog::spdlog)
-    target_link_options(glimmer_execution_service_test PRIVATE
-        "LINKER:--wrap=ppoll" "LINKER:--wrap=__ppoll_chk")
-    glimmer_enable_clang_tidy(glimmer_execution_service_test)
-    add_test(NAME glimmer_execution_service_test COMMAND glimmer_execution_service_test)
+    glimmer_add_test_program(glimmer_execution_service_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_service_test.cc"
+        INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
+            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
+            "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+            Glimmer::control Glimmer::project_options spdlog::spdlog
+        LINK_OPTIONS "LINKER:--wrap=ppoll" "LINKER:--wrap=__ppoll_chk")
     add_test(NAME glimmer_execution_sharded_signal_config_test
         COMMAND glimmer_execution_service_test --sharded-signal-config)
     add_test(NAME glimmer_execution_async_intake_boundaries_test
@@ -328,19 +260,14 @@ if(BUILD_TESTING)
     add_test(NAME glimmer_execution_issue_depth_test COMMAND glimmer_execution_service_test --issue-depth)
     set_tests_properties(glimmer_execution_issue_depth_test PROPERTIES TIMEOUT 30)
     set_tests_properties(glimmer_execution_service_test PROPERTIES TIMEOUT 30)
-    add_executable(glimmer_execution_async_frontier_service_test
-        "${PROJECT_SOURCE_DIR}/tests/control/execution_async_frontier_service_test.cc")
-    target_include_directories(glimmer_execution_async_frontier_service_test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
-        "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-        "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_execution_async_frontier_service_test PRIVATE
-        glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-        Glimmer::control Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_execution_async_frontier_service_test)
-    add_test(NAME glimmer_execution_async_frontier_service_test
-        COMMAND glimmer_execution_async_frontier_service_test)
-    set_tests_properties(glimmer_execution_async_frontier_service_test PROPERTIES TIMEOUT 30)
+    glimmer_add_test_program(glimmer_execution_async_frontier_service_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_async_frontier_service_test.cc"
+        INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
+            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
+            "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+            Glimmer::control Glimmer::project_options Threads::Threads
+        TIMEOUT 30)
     add_test(NAME glimmer_execution_context_purpose_service_test
         COMMAND glimmer_execution_service_test --context-purpose)
     set_tests_properties(glimmer_execution_context_purpose_service_test PROPERTIES TIMEOUT 30)
@@ -398,18 +325,13 @@ if(BUILD_TESTING)
         target_link_libraries(glimmer_execution_gemm_priority_gpu_client PRIVATE
             CUDA::cudart CUDA::cublas Glimmer::project_options)
         glimmer_enable_clang_tidy(glimmer_execution_gemm_priority_gpu_client)
-        add_executable(glimmer_execution_pair_profile_gpu_test
-            "${PROJECT_SOURCE_DIR}/tests/control/execution_pair_profile_gpu_test.cc")
-        target_include_directories(glimmer_execution_pair_profile_gpu_test PRIVATE
-            "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/control"
-            "${PROJECT_SOURCE_DIR}/src/backend/cuda" "${PROJECT_SOURCE_DIR}/src/backend"
-            "${CUDAToolkit_INCLUDE_DIRS}")
-        target_link_libraries(glimmer_execution_pair_profile_gpu_test PRIVATE
-            glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-            Glimmer::control CUDA::cuda_driver Glimmer::project_options Threads::Threads)
-        glimmer_enable_clang_tidy(glimmer_execution_pair_profile_gpu_test)
-        add_test(NAME glimmer_execution_pair_profile_gpu_test
-            COMMAND glimmer_execution_pair_profile_gpu_test)
+        glimmer_add_test_program(glimmer_execution_pair_profile_gpu_test
+            SOURCES "${PROJECT_SOURCE_DIR}/tests/control/execution_pair_profile_gpu_test.cc"
+            INCLUDES "${PROJECT_SOURCE_DIR}/src/execution_service"
+                "${PROJECT_SOURCE_DIR}/src/control" "${PROJECT_SOURCE_DIR}/src/backend/cuda"
+                "${PROJECT_SOURCE_DIR}/src/backend" "${CUDAToolkit_INCLUDE_DIRS}"
+            LIBRARIES glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+                Glimmer::control CUDA::cuda_driver Glimmer::project_options Threads::Threads)
         set_tests_properties(glimmer_execution_pair_profile_gpu_test PROPERTIES
             LABELS "cuda-gpu" TIMEOUT 120 RUN_SERIAL TRUE)
         add_executable(glimmer_execution_host_gpu_client

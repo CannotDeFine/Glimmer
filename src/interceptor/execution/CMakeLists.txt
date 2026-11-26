@@ -63,17 +63,12 @@ if(BUILD_TESTING)
         set_tests_properties(glimmer_execution_unified_copy_receipt_${glimmer_unified_case}_test
             PROPERTIES TIMEOUT 30)
     endforeach()
-    add_executable(glimmer_execution_copy_audit_test
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_copy_audit_test.cc")
-    target_include_directories(glimmer_execution_copy_audit_test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/interceptor" "${PROJECT_SOURCE_DIR}/include")
-    target_link_libraries(glimmer_execution_copy_audit_test PRIVATE
-        Glimmer::project_options Threads::Threads)
-    target_link_options(glimmer_execution_copy_audit_test PRIVATE
-        "LINKER:--wrap=clock_gettime" "LINKER:--wrap=write")
-    glimmer_enable_clang_tidy(glimmer_execution_copy_audit_test)
-    add_test(NAME glimmer_execution_copy_audit_test COMMAND glimmer_execution_copy_audit_test)
-    set_tests_properties(glimmer_execution_copy_audit_test PROPERTIES TIMEOUT 30)
+    glimmer_add_test_program(glimmer_execution_copy_audit_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_copy_audit_test.cc"
+        INCLUDES "${PROJECT_SOURCE_DIR}/src/interceptor" "${PROJECT_SOURCE_DIR}/include"
+        LIBRARIES Glimmer::project_options Threads::Threads
+        LINK_OPTIONS "LINKER:--wrap=clock_gettime" "LINKER:--wrap=write"
+        TIMEOUT 30)
     if(TARGET Glimmer::nccl_headers)
         if(TARGET Glimmer::nccl)
             # Identical ordinary SDK input for supervised native/public-owned
@@ -1188,24 +1183,18 @@ if(BUILD_TESTING)
     add_test(NAME glimmer_execution_runtime_lookup_concurrent_test COMMAND glimmer_execution_runtime_lookup_test
         $<TARGET_FILE:glimmer_execution_lookup_runtime> $<TARGET_FILE:glimmer_execution_lookup_other> --concurrent-first)
     set_tests_properties(glimmer_execution_runtime_lookup_concurrent_test PROPERTIES TIMEOUT 30)
-    add_executable(glimmer_execution_primary_test
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_primary_test.cc")
-    target_include_directories(glimmer_execution_primary_test PRIVATE
-        "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control")
-    target_link_libraries(glimmer_execution_primary_test PRIVATE glimmer_execution_interceptor
-        glimmer_execution_lookup_driver Glimmer::control Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_execution_primary_test)
-    add_test(NAME glimmer_execution_primary_test COMMAND glimmer_execution_primary_test)
-    set_tests_properties(glimmer_execution_primary_test PROPERTIES TIMEOUT 20)
-    add_executable(glimmer_execution_runtime_test
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_runtime_test.cc")
-    target_include_directories(glimmer_execution_runtime_test PRIVATE
-        "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control")
-    target_link_libraries(glimmer_execution_runtime_test PRIVATE glimmer_execution_interceptor
-        glimmer_execution_lookup_driver Glimmer::control Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_execution_runtime_test)
-    add_test(NAME glimmer_execution_runtime_test COMMAND glimmer_execution_runtime_test)
-    set_tests_properties(glimmer_execution_runtime_test PROPERTIES TIMEOUT 20)
+    glimmer_add_test_program(glimmer_execution_primary_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_primary_test.cc"
+        INCLUDES "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control"
+        LIBRARIES glimmer_execution_interceptor glimmer_execution_lookup_driver Glimmer::control
+            Glimmer::project_options
+        TIMEOUT 20)
+    glimmer_add_test_program(glimmer_execution_runtime_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_runtime_test.cc"
+        INCLUDES "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control"
+        LIBRARIES glimmer_execution_interceptor glimmer_execution_lookup_driver Glimmer::control
+            Glimmer::project_options
+        TIMEOUT 20)
     add_executable(glimmer_execution_async_receipt_test
         "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_async_receipt_test.cc")
     target_include_directories(glimmer_execution_async_receipt_test PRIVATE
@@ -1226,18 +1215,15 @@ if(BUILD_TESTING)
         set_tests_properties("glimmer_execution_async_receipt_${mode}" PROPERTIES TIMEOUT 15)
     endforeach()
     if(TARGET glimmer_execution_service_runtime)
-        add_executable(glimmer_execution_bootstrap_test
-            "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_bootstrap_test.cc")
-        target_include_directories(glimmer_execution_bootstrap_test PRIVATE
-            "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control"
-            "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/backend"
-            "${PROJECT_SOURCE_DIR}/src/backend/cuda")
-        target_link_libraries(glimmer_execution_bootstrap_test PRIVATE glimmer_execution_interceptor
-            glimmer_execution_lookup_driver glimmer_execution_service_runtime Glimmer::cuda_backend
-            Glimmer::backend Glimmer::control Glimmer::project_options)
-        glimmer_enable_clang_tidy(glimmer_execution_bootstrap_test)
-        add_test(NAME glimmer_execution_bootstrap_test COMMAND glimmer_execution_bootstrap_test)
-        set_tests_properties(glimmer_execution_bootstrap_test PROPERTIES TIMEOUT 30)
+        glimmer_add_test_program(glimmer_execution_bootstrap_test
+            SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_bootstrap_test.cc"
+            INCLUDES "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control"
+                "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/backend"
+                "${PROJECT_SOURCE_DIR}/src/backend/cuda"
+            LIBRARIES glimmer_execution_interceptor glimmer_execution_lookup_driver
+                glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
+                Glimmer::control Glimmer::project_options
+            TIMEOUT 30)
         add_executable(glimmer_execution_async_launch_test
             "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_async_launch_test.cc")
         target_include_directories(glimmer_execution_async_launch_test PRIVATE
@@ -1253,24 +1239,16 @@ if(BUILD_TESTING)
         add_test(NAME glimmer_execution_async_launch_test COMMAND glimmer_execution_async_launch_test)
         set_tests_properties(glimmer_execution_async_launch_test PROPERTIES TIMEOUT 60)
     endif()
-    add_executable(glimmer_execution_frontier_test
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_frontier_test.cc")
-    target_include_directories(glimmer_execution_frontier_test PRIVATE
-        "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control")
-    target_link_libraries(glimmer_execution_frontier_test PRIVATE
-        glimmer_execution_interceptor Glimmer::control Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_execution_frontier_test)
-    add_test(NAME glimmer_execution_frontier_test COMMAND glimmer_execution_frontier_test)
-    set_tests_properties(glimmer_execution_frontier_test PROPERTIES TIMEOUT 30)
-    add_executable(glimmer_execution_submission_test
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_submission_test.cc")
-    target_include_directories(glimmer_execution_submission_test PRIVATE
-        "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control")
-    target_link_libraries(glimmer_execution_submission_test PRIVATE
-        glimmer_execution_interceptor Glimmer::control Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_execution_submission_test)
-    add_test(NAME glimmer_execution_submission_test COMMAND glimmer_execution_submission_test)
-    set_tests_properties(glimmer_execution_submission_test PROPERTIES TIMEOUT 30)
+    glimmer_add_test_program(glimmer_execution_frontier_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_frontier_test.cc"
+        INCLUDES "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control"
+        LIBRARIES glimmer_execution_interceptor Glimmer::control Glimmer::project_options
+        TIMEOUT 30)
+    glimmer_add_test_program(glimmer_execution_submission_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_submission_test.cc"
+        INCLUDES "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control"
+        LIBRARIES glimmer_execution_interceptor Glimmer::control Glimmer::project_options
+        TIMEOUT 30)
     add_executable(glimmer_execution_frontend_test
         "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_frontend_test.cc")
     set_target_properties(glimmer_execution_frontend_test PROPERTIES ENABLE_EXPORTS ON)
@@ -1281,14 +1259,11 @@ if(BUILD_TESTING)
     glimmer_enable_clang_tidy(glimmer_execution_frontend_test)
     add_test(NAME glimmer_execution_frontend_test COMMAND glimmer_execution_frontend_test)
     set_tests_properties(glimmer_execution_frontend_test PROPERTIES TIMEOUT 30)
-    add_executable(glimmer_execution_graph_frontend_test
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_graph_frontend_test.cc")
-    target_include_directories(glimmer_execution_graph_frontend_test PRIVATE
-        "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control")
-    target_link_libraries(glimmer_execution_graph_frontend_test PRIVATE
-        glimmer_execution_interceptor Glimmer::control Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_execution_graph_frontend_test)
-    add_test(NAME glimmer_execution_graph_frontend_test COMMAND glimmer_execution_graph_frontend_test)
+    glimmer_add_test_program(glimmer_execution_graph_frontend_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_graph_frontend_test.cc"
+        INCLUDES "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control"
+        LIBRARIES glimmer_execution_interceptor Glimmer::control Glimmer::project_options
+            Threads::Threads)
     add_test(NAME glimmer_execution_graph_malformed_test
         COMMAND glimmer_execution_graph_frontend_test --malformed)
     add_test(NAME glimmer_execution_graph_partial_output_test
@@ -1313,39 +1288,26 @@ if(BUILD_TESTING)
     add_test(NAME glimmer_execution_reply_readiness_interrupt_test
         COMMAND glimmer_execution_ready_reply_test --interrupt-wait)
     set_tests_properties(glimmer_execution_reply_readiness_interrupt_test PROPERTIES TIMEOUT 30)
-    add_executable(glimmer_execution_async_status_progress_test
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_async_status_progress_test.cc")
-    target_include_directories(glimmer_execution_async_status_progress_test PRIVATE
-        "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control")
-    target_link_libraries(glimmer_execution_async_status_progress_test PRIVATE
-        glimmer_execution_interceptor glimmer_execution_lookup_driver Glimmer::control
-        Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_execution_async_status_progress_test)
-    add_test(NAME glimmer_execution_async_status_progress_test
-        COMMAND glimmer_execution_async_status_progress_test)
-    set_tests_properties(glimmer_execution_async_status_progress_test PROPERTIES TIMEOUT 30)
-    add_executable(glimmer_execution_preparation_config_test
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_preparation_config_test.cc")
-    target_include_directories(glimmer_execution_preparation_config_test PRIVATE
-        "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control")
-    target_link_libraries(glimmer_execution_preparation_config_test PRIVATE
-        glimmer_execution_interceptor Glimmer::control Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_execution_preparation_config_test)
-    add_test(NAME glimmer_execution_preparation_config_test
-        COMMAND glimmer_execution_preparation_config_test)
-    set_tests_properties(glimmer_execution_preparation_config_test PROPERTIES TIMEOUT 30)
-    add_executable(glimmer_execution_event_test
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_event_test.cc")
-    target_include_directories(glimmer_execution_event_test PRIVATE
-        "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control"
-        "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/backend/cuda"
-        "${PROJECT_SOURCE_DIR}/src/backend")
-    target_link_libraries(glimmer_execution_event_test PRIVATE glimmer_execution_interceptor
-        glimmer_execution_service_runtime Glimmer::cuda_backend Glimmer::backend
-        Glimmer::control Glimmer::project_options "${CMAKE_DL_LIBS}")
-    glimmer_enable_clang_tidy(glimmer_execution_event_test)
-    add_test(NAME glimmer_execution_event_test COMMAND glimmer_execution_event_test)
-    set_tests_properties(glimmer_execution_event_test PROPERTIES TIMEOUT 30)
+    glimmer_add_test_program(glimmer_execution_async_status_progress_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_async_status_progress_test.cc"
+        INCLUDES "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control"
+        LIBRARIES glimmer_execution_interceptor glimmer_execution_lookup_driver Glimmer::control
+            Glimmer::project_options
+        TIMEOUT 30)
+    glimmer_add_test_program(glimmer_execution_preparation_config_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_preparation_config_test.cc"
+        INCLUDES "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control"
+        LIBRARIES glimmer_execution_interceptor Glimmer::control Glimmer::project_options
+        TIMEOUT 30)
+    glimmer_add_test_program(glimmer_execution_event_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_event_test.cc"
+        INCLUDES "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control"
+            "${PROJECT_SOURCE_DIR}/src/execution_service" "${PROJECT_SOURCE_DIR}/src/backend/cuda"
+            "${PROJECT_SOURCE_DIR}/src/backend"
+        LIBRARIES glimmer_execution_interceptor glimmer_execution_service_runtime
+            Glimmer::cuda_backend Glimmer::backend Glimmer::control Glimmer::project_options
+            "${CMAKE_DL_LIBS}"
+        TIMEOUT 30)
     add_library(glimmer_execution_process_memory_driver SHARED
         "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_process_memory_driver.cc")
     set_target_properties(glimmer_execution_process_memory_driver PROPERTIES
@@ -1412,16 +1374,13 @@ if(BUILD_TESTING)
     target_include_directories(glimmer_execution_host_function_provider PRIVATE "${CUDAToolkit_INCLUDE_DIRS}")
     target_link_libraries(glimmer_execution_host_function_provider PRIVATE Glimmer::project_options)
     glimmer_enable_clang_tidy(glimmer_execution_host_function_provider)
-    add_executable(glimmer_execution_host_function_test
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_host_function_test.cc")
-    target_include_directories(glimmer_execution_host_function_test PRIVATE
-        "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control")
-    target_link_libraries(glimmer_execution_host_function_test PRIVATE glimmer_execution_interceptor
-        glimmer_execution_host_function_provider glimmer_execution_memory_driver
-        Glimmer::control Glimmer::project_options "${CMAKE_DL_LIBS}")
-    glimmer_enable_clang_tidy(glimmer_execution_host_function_test)
-    add_test(NAME glimmer_execution_host_function_test COMMAND glimmer_execution_host_function_test)
-    set_tests_properties(glimmer_execution_host_function_test PROPERTIES TIMEOUT 30)
+    glimmer_add_test_program(glimmer_execution_host_function_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_host_function_test.cc"
+        INCLUDES "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control"
+        LIBRARIES glimmer_execution_interceptor glimmer_execution_host_function_provider
+            glimmer_execution_memory_driver Glimmer::control Glimmer::project_options
+            "${CMAKE_DL_LIBS}"
+        TIMEOUT 30)
     add_test(NAME glimmer_execution_host_function_saturated_test
         COMMAND glimmer_execution_host_function_test --saturated)
     set_tests_properties(glimmer_execution_host_function_saturated_test PROPERTIES TIMEOUT 30)
@@ -1586,16 +1545,12 @@ if(BUILD_TESTING)
         glimmer_execution_lt_provider glimmer_execution_random_provider glimmer_execution_service_runtime Glimmer::cuda_backend
         Glimmer::backend Glimmer::control Glimmer::project_options "${CMAKE_DL_LIBS}")
     glimmer_enable_clang_tidy(glimmer_execution_lt_test)
-    add_executable(glimmer_execution_lt_capability_test
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_lt_capability_test.cc")
-    target_include_directories(glimmer_execution_lt_capability_test PRIVATE
-        "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control")
-    target_link_libraries(glimmer_execution_lt_capability_test PRIVATE
-        glimmer_execution_interceptor glimmer_execution_lt_provider Glimmer::control
-        Glimmer::project_options "${CMAKE_DL_LIBS}")
-    glimmer_enable_clang_tidy(glimmer_execution_lt_capability_test)
-    add_test(NAME glimmer_execution_lt_capability_test COMMAND glimmer_execution_lt_capability_test)
-    set_tests_properties(glimmer_execution_lt_capability_test PROPERTIES TIMEOUT 45)
+    glimmer_add_test_program(glimmer_execution_lt_capability_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/execution_lt_capability_test.cc"
+        INCLUDES "${CUDAToolkit_INCLUDE_DIRS}" "${PROJECT_SOURCE_DIR}/src/control"
+        LIBRARIES glimmer_execution_interceptor glimmer_execution_lt_provider Glimmer::control
+            Glimmer::project_options "${CMAKE_DL_LIBS}"
+        TIMEOUT 45)
     add_test(NAME glimmer_execution_lt_metadata_retirement_test COMMAND glimmer_execution_lt_test
         $<TARGET_FILE:glimmer_execution_lt_provider> --metadata-retirement)
     set_tests_properties(glimmer_execution_lt_metadata_retirement_test PROPERTIES TIMEOUT 30)

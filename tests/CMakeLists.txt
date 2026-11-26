@@ -1,108 +1,61 @@
-add_executable(glimmer_control_task_recovery_endpoint_test
-    control/task_recovery_endpoint_test.cc)
-target_include_directories(glimmer_control_task_recovery_endpoint_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/control" "${PROJECT_SOURCE_DIR}/src/core")
-target_link_libraries(glimmer_control_task_recovery_endpoint_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_task_recovery_endpoint_test)
-add_test(NAME glimmer_control_task_recovery_endpoint_test
-    COMMAND glimmer_control_task_recovery_endpoint_test)
-set_tests_properties(glimmer_control_task_recovery_endpoint_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_task_recovery_endpoint_test
+    SOURCES control/task_recovery_endpoint_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control" "${PROJECT_SOURCE_DIR}/src/core"
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
 
-add_executable(glimmer_control_task_recovery_protocol_test
-    control/task_recovery_protocol_test.cc)
-target_include_directories(glimmer_control_task_recovery_protocol_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_task_recovery_protocol_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_task_recovery_protocol_test)
-add_test(NAME glimmer_control_task_recovery_protocol_test
-    COMMAND glimmer_control_task_recovery_protocol_test)
-set_tests_properties(glimmer_control_task_recovery_protocol_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_task_recovery_protocol_test
+    SOURCES control/task_recovery_protocol_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
 
-add_executable(glimmer_control_task_recovery_journal_test
-    control/task_recovery_journal_test.cc)
-target_include_directories(glimmer_control_task_recovery_journal_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_task_recovery_journal_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_task_recovery_journal_test)
-add_test(NAME glimmer_control_task_recovery_journal_test
-    COMMAND glimmer_control_task_recovery_journal_test)
-set_tests_properties(glimmer_control_task_recovery_journal_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_task_recovery_journal_test
+    SOURCES control/task_recovery_journal_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
 
-add_executable(glimmer_control_unix_socket_task_execution_server_test
-    control/unix_socket_task_execution_server_test.cc
-    "${PROJECT_SOURCE_DIR}/src/control/task_execution_endpoint.cc")
-target_include_directories(glimmer_control_unix_socket_task_execution_server_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/control")
-target_compile_definitions(glimmer_control_unix_socket_task_execution_server_test PRIVATE
-    GLIMMER_ENDPOINT_TESTING)
-target_link_libraries(glimmer_control_unix_socket_task_execution_server_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-target_link_options(glimmer_control_unix_socket_task_execution_server_test PRIVATE
-    "LINKER:--wrap=lstat" "LINKER:--wrap=listen" "LINKER:--wrap=getrandom")
-glimmer_enable_clang_tidy(glimmer_control_unix_socket_task_execution_server_test)
-add_test(NAME glimmer_control_unix_socket_task_execution_server_test
-    COMMAND glimmer_control_unix_socket_task_execution_server_test)
-set_tests_properties(glimmer_control_unix_socket_task_execution_server_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_unix_socket_task_execution_server_test
+    SOURCES control/unix_socket_task_execution_server_test.cc
+        "${PROJECT_SOURCE_DIR}/src/control/task_execution_endpoint.cc"
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    DEFINITIONS GLIMMER_ENDPOINT_TESTING
+    LIBRARIES Glimmer::control Glimmer::project_options
+    LINK_OPTIONS "LINKER:--wrap=lstat" "LINKER:--wrap=listen" "LINKER:--wrap=getrandom"
+    TIMEOUT 30)
 
-add_executable(glimmer_control_shared_task_control_client_test
-    control/shared_task_control_client_test.cc)
-target_include_directories(glimmer_control_shared_task_control_client_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_shared_task_control_client_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_shared_task_control_client_test)
-add_test(NAME glimmer_control_shared_task_control_client_test
-    COMMAND glimmer_control_shared_task_control_client_test)
-set_tests_properties(glimmer_control_shared_task_control_client_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_shared_task_control_client_test
+    SOURCES control/shared_task_control_client_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
 
-add_executable(glimmer_control_task_execution_endpoint_test
-    control/task_execution_endpoint_test.cc
-    "${PROJECT_SOURCE_DIR}/src/control/task_execution_endpoint.cc")
-target_include_directories(glimmer_control_task_execution_endpoint_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/control")
-target_compile_definitions(glimmer_control_task_execution_endpoint_test PRIVATE
-    GLIMMER_ENDPOINT_TESTING)
-target_link_libraries(glimmer_control_task_execution_endpoint_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_task_execution_endpoint_test)
-add_test(NAME glimmer_control_task_execution_endpoint_test
-    COMMAND glimmer_control_task_execution_endpoint_test)
-set_tests_properties(glimmer_control_task_execution_endpoint_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_task_execution_endpoint_test
+    SOURCES control/task_execution_endpoint_test.cc
+        "${PROJECT_SOURCE_DIR}/src/control/task_execution_endpoint.cc"
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    DEFINITIONS GLIMMER_ENDPOINT_TESTING
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
 
-add_executable(glimmer_control_versioned_remote_launch_gate_test
-    control/versioned_remote_launch_gate_test.cc)
-target_include_directories(glimmer_control_versioned_remote_launch_gate_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_versioned_remote_launch_gate_test PRIVATE Glimmer::control)
-target_compile_definitions(glimmer_control_versioned_remote_launch_gate_test PRIVATE
-    GLIMMER_ENABLE_TEST_HOOKS)
-glimmer_enable_clang_tidy(glimmer_control_versioned_remote_launch_gate_test)
-add_test(NAME glimmer_control_versioned_remote_launch_gate_test
-    COMMAND glimmer_control_versioned_remote_launch_gate_test)
-set_tests_properties(glimmer_control_versioned_remote_launch_gate_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_versioned_remote_launch_gate_test
+    SOURCES control/versioned_remote_launch_gate_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    DEFINITIONS GLIMMER_ENABLE_TEST_HOOKS
+    LIBRARIES Glimmer::control
+    TIMEOUT 30)
 
-add_executable(glimmer_control_task_execution_admission_test
-    control/task_execution_admission_test.cc)
-target_include_directories(glimmer_control_task_execution_admission_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/control" "${PROJECT_SOURCE_DIR}/src/core")
-target_link_libraries(glimmer_control_task_execution_admission_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_task_execution_admission_test)
-add_test(NAME glimmer_control_task_execution_admission_test
-    COMMAND glimmer_control_task_execution_admission_test)
-set_tests_properties(glimmer_control_task_execution_admission_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_task_execution_admission_test
+    SOURCES control/task_execution_admission_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control" "${PROJECT_SOURCE_DIR}/src/core"
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
 
-add_executable(glimmer_control_task_execution_protocol_test
-    control/task_execution_protocol_test.cc)
-target_link_libraries(glimmer_control_task_execution_protocol_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_task_execution_protocol_test)
-add_test(NAME glimmer_control_task_execution_protocol_test
-    COMMAND glimmer_control_task_execution_protocol_test)
-set_tests_properties(glimmer_control_task_execution_protocol_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_task_execution_protocol_test
+    SOURCES control/task_execution_protocol_test.cc
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
 
 add_library(glimmer_control_abi_v2_consumer OBJECT control/abi_v2/consumer.cc)
 target_include_directories(glimmer_control_abi_v2_consumer BEFORE PRIVATE
@@ -119,115 +72,71 @@ glimmer_enable_clang_tidy(glimmer_control_abi_v2_test)
 add_test(NAME glimmer_control_abi_v2_test COMMAND glimmer_control_abi_v2_test)
 set_tests_properties(glimmer_control_abi_v2_test PROPERTIES TIMEOUT 30)
 
-add_executable(glimmer_control_native_epoch_protocol_test
-    control/native_epoch_protocol_test.cc)
-target_link_libraries(glimmer_control_native_epoch_protocol_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_native_epoch_protocol_test)
-add_test(NAME glimmer_control_native_epoch_protocol_test
-    COMMAND glimmer_control_native_epoch_protocol_test)
-set_tests_properties(glimmer_control_native_epoch_protocol_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_native_epoch_protocol_test
+    SOURCES control/native_epoch_protocol_test.cc
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
 
-add_executable(glimmer_control_execution_graph_protocol_test
-    control/execution_graph_protocol_test.cc)
-target_link_libraries(glimmer_control_execution_graph_protocol_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_execution_graph_protocol_test)
-add_test(NAME glimmer_control_execution_graph_protocol_test
-    COMMAND glimmer_control_execution_graph_protocol_test)
-set_tests_properties(glimmer_control_execution_graph_protocol_test PROPERTIES TIMEOUT 30)
-add_executable(glimmer_control_execution_process_memory_protocol_test
-    control/execution_process_memory_protocol_test.cc)
-target_link_libraries(glimmer_control_execution_process_memory_protocol_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_execution_process_memory_protocol_test)
-add_test(NAME glimmer_control_execution_process_memory_protocol_test
-    COMMAND glimmer_control_execution_process_memory_protocol_test)
-set_tests_properties(glimmer_control_execution_process_memory_protocol_test PROPERTIES TIMEOUT 30)
-add_executable(glimmer_control_execution_nccl_protocol_test
-    control/execution_nccl_protocol_test.cc)
-target_link_libraries(glimmer_control_execution_nccl_protocol_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_execution_nccl_protocol_test)
-add_test(NAME glimmer_control_execution_nccl_protocol_test
-    COMMAND glimmer_control_execution_nccl_protocol_test)
-set_tests_properties(glimmer_control_execution_nccl_protocol_test PROPERTIES TIMEOUT 45)
-add_executable(glimmer_control_execution_pointer_protocol_test
-    control/execution_pointer_protocol_test.cc)
-target_link_libraries(glimmer_control_execution_pointer_protocol_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_execution_pointer_protocol_test)
-add_test(NAME glimmer_control_execution_pointer_protocol_test
-    COMMAND glimmer_control_execution_pointer_protocol_test)
-set_tests_properties(glimmer_control_execution_pointer_protocol_test PROPERTIES TIMEOUT 30)
-add_executable(glimmer_control_execution_function_protocol_test
-    control/execution_function_protocol_test.cc)
-target_link_libraries(glimmer_control_execution_function_protocol_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_execution_function_protocol_test)
-add_test(NAME glimmer_control_execution_function_protocol_test
-    COMMAND glimmer_control_execution_function_protocol_test)
-set_tests_properties(glimmer_control_execution_function_protocol_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_execution_graph_protocol_test
+    SOURCES control/execution_graph_protocol_test.cc
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_execution_process_memory_protocol_test
+    SOURCES control/execution_process_memory_protocol_test.cc
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_execution_nccl_protocol_test
+    SOURCES control/execution_nccl_protocol_test.cc
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 45)
+glimmer_add_test_program(glimmer_control_execution_pointer_protocol_test
+    SOURCES control/execution_pointer_protocol_test.cc
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_execution_function_protocol_test
+    SOURCES control/execution_function_protocol_test.cc
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
 add_executable(glimmer_attention_oracle_test interceptor/attention_oracle_test.cc)
-add_executable(glimmer_control_execution_jit_protocol_test control/execution_jit_protocol_test.cc)
-target_link_libraries(glimmer_control_execution_jit_protocol_test PRIVATE Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_execution_jit_protocol_test)
-add_test(NAME glimmer_control_execution_jit_protocol_test COMMAND glimmer_control_execution_jit_protocol_test)
-set_tests_properties(glimmer_control_execution_jit_protocol_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_execution_jit_protocol_test
+    SOURCES control/execution_jit_protocol_test.cc
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
 target_link_libraries(glimmer_attention_oracle_test PRIVATE Glimmer::project_options)
 glimmer_enable_clang_tidy(glimmer_attention_oracle_test)
 add_test(NAME glimmer_attention_oracle_test COMMAND glimmer_attention_oracle_test)
 set_tests_properties(glimmer_attention_oracle_test PROPERTIES TIMEOUT 30)
-add_executable(glimmer_rnn_lstm_oracle_test interceptor/rnn_lstm_oracle_test.cc)
-target_link_libraries(glimmer_rnn_lstm_oracle_test PRIVATE Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_rnn_lstm_oracle_test)
-add_test(NAME glimmer_rnn_lstm_oracle_test COMMAND glimmer_rnn_lstm_oracle_test)
-set_tests_properties(glimmer_rnn_lstm_oracle_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_rnn_lstm_oracle_test
+    SOURCES interceptor/rnn_lstm_oracle_test.cc
+    LIBRARIES Glimmer::project_options
+    TIMEOUT 30)
 add_executable(glimmer_control_execution_dnn_protocol_test control/execution_dnn_protocol_test.cc)
-add_executable(glimmer_control_execution_dnn_profile_protocol_test
-    control/execution_dnn_profile_protocol_test.cc)
-target_link_libraries(glimmer_control_execution_dnn_profile_protocol_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_execution_dnn_profile_protocol_test)
-add_test(NAME glimmer_control_execution_dnn_profile_protocol_test
-    COMMAND glimmer_control_execution_dnn_profile_protocol_test)
-set_tests_properties(glimmer_control_execution_dnn_profile_protocol_test PROPERTIES TIMEOUT 30)
-add_executable(glimmer_control_execution_dnn_legacy_protocol_test
-    control/execution_dnn_legacy_protocol_test.cc)
-target_link_libraries(glimmer_control_execution_dnn_legacy_protocol_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_execution_dnn_legacy_protocol_test)
-add_test(NAME glimmer_control_execution_dnn_legacy_protocol_test
-    COMMAND glimmer_control_execution_dnn_legacy_protocol_test)
-set_tests_properties(glimmer_control_execution_dnn_legacy_protocol_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_execution_dnn_profile_protocol_test
+    SOURCES control/execution_dnn_profile_protocol_test.cc
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_execution_dnn_legacy_protocol_test
+    SOURCES control/execution_dnn_legacy_protocol_test.cc
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
 target_link_libraries(glimmer_control_execution_dnn_protocol_test PRIVATE
     Glimmer::control Glimmer::project_options)
 glimmer_enable_clang_tidy(glimmer_control_execution_dnn_protocol_test)
 add_test(NAME glimmer_control_execution_dnn_protocol_test
     COMMAND glimmer_control_execution_dnn_protocol_test)
 set_tests_properties(glimmer_control_execution_dnn_protocol_test PROPERTIES TIMEOUT 30)
-add_executable(glimmer_control_execution_dnn_backend_protocol_test
-    control/execution_dnn_backend_protocol_test.cc)
-target_link_libraries(glimmer_control_execution_dnn_backend_protocol_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_execution_dnn_backend_protocol_test)
-add_test(NAME glimmer_control_execution_dnn_backend_protocol_test
-    COMMAND glimmer_control_execution_dnn_backend_protocol_test)
-set_tests_properties(glimmer_control_execution_dnn_backend_protocol_test PROPERTIES TIMEOUT 30)
-add_executable(glimmer_control_execution_dnn_backend_execution_protocol_test
-    control/execution_dnn_backend_execution_protocol_test.cc)
-target_link_libraries(glimmer_control_execution_dnn_backend_execution_protocol_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_execution_dnn_backend_execution_protocol_test)
-add_test(NAME glimmer_control_execution_dnn_backend_execution_protocol_test
-    COMMAND glimmer_control_execution_dnn_backend_execution_protocol_test)
-set_tests_properties(glimmer_control_execution_dnn_backend_execution_protocol_test PROPERTIES TIMEOUT 30)
-add_executable(glimmer_ptx_uniform_loop_test transform/ptx_uniform_loop_test.cc)
-target_link_libraries(glimmer_ptx_uniform_loop_test PRIVATE
-    Glimmer::transform Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_ptx_uniform_loop_test)
-add_test(NAME glimmer_ptx_uniform_loop_test COMMAND glimmer_ptx_uniform_loop_test)
-set_tests_properties(glimmer_ptx_uniform_loop_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_execution_dnn_backend_protocol_test
+    SOURCES control/execution_dnn_backend_protocol_test.cc
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_execution_dnn_backend_execution_protocol_test
+    SOURCES control/execution_dnn_backend_execution_protocol_test.cc
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
+glimmer_add_test_program(glimmer_ptx_uniform_loop_test
+    SOURCES transform/ptx_uniform_loop_test.cc
+    LIBRARIES Glimmer::transform Glimmer::project_options
+    TIMEOUT 30)
 if(CUDAToolkit_NVCC_EXECUTABLE)
     add_test(NAME glimmer_ptx_uniform_loop_compiler_test COMMAND "${CMAKE_COMMAND}"
         "-DTRANSFORMER=$<TARGET_FILE:glimmer_ptx_uniform_loop_test>"
@@ -236,36 +145,28 @@ if(CUDAToolkit_NVCC_EXECUTABLE)
         -P "${CMAKE_CURRENT_SOURCE_DIR}/transform/check_uniform_loop_ptx.cmake")
     set_tests_properties(glimmer_ptx_uniform_loop_compiler_test PROPERTIES TIMEOUT 120)
 endif()
-add_executable(glimmer_transform_ptx_static_storage_test transform/ptx_static_storage_test.cc)
-target_link_libraries(glimmer_transform_ptx_static_storage_test PRIVATE
-    Glimmer::transform Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_transform_ptx_static_storage_test)
-add_test(NAME glimmer_transform_ptx_static_storage_test COMMAND glimmer_transform_ptx_static_storage_test)
-set_tests_properties(glimmer_transform_ptx_static_storage_test PROPERTIES TIMEOUT 30)
-add_executable(glimmer_transform_cuda_module_image_test transform/cuda_module_image_test.cc)
-target_link_libraries(glimmer_transform_cuda_module_image_test PRIVATE Glimmer::transform Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_transform_cuda_module_image_test)
-add_test(NAME glimmer_transform_cuda_module_image_test COMMAND glimmer_transform_cuda_module_image_test)
+glimmer_add_test_program(glimmer_transform_ptx_static_storage_test
+    SOURCES transform/ptx_static_storage_test.cc
+    LIBRARIES Glimmer::transform Glimmer::project_options
+    TIMEOUT 30)
+glimmer_add_test_program(glimmer_transform_cuda_module_image_test
+    SOURCES transform/cuda_module_image_test.cc
+    LIBRARIES Glimmer::transform Glimmer::project_options)
 if(TARGET glimmer_execution_binary_images)
     add_dependencies(glimmer_transform_cuda_module_image_test glimmer_execution_binary_images)
     get_property(glimmer_binary_compiler_inputs GLOBAL PROPERTY GLIMMER_BINARY_COMPILER_INPUTS)
     add_test(NAME glimmer_transform_cuda_compiler_image_test
         COMMAND glimmer_transform_cuda_module_image_test ${glimmer_binary_compiler_inputs})
 endif()
-add_executable(glimmer_core_execution_priority_test core/execution_priority_test.cc)
-target_link_libraries(glimmer_core_execution_priority_test PRIVATE Glimmer::core Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_core_execution_priority_test)
-add_test(NAME glimmer_core_execution_priority_test COMMAND glimmer_core_execution_priority_test)
-add_executable(glimmer_native_execution_epoch_test
-    interceptor/native_execution_epoch_test.cc
-    "${PROJECT_SOURCE_DIR}/src/interceptor/internal/native_execution_epoch.cc")
-target_include_directories(glimmer_native_execution_epoch_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/interceptor")
-target_link_libraries(glimmer_native_execution_epoch_test PRIVATE
-    Glimmer::control Glimmer::project_options Threads::Threads)
-glimmer_enable_clang_tidy(glimmer_native_execution_epoch_test)
-add_test(NAME glimmer_native_execution_epoch_test COMMAND glimmer_native_execution_epoch_test)
-set_tests_properties(glimmer_native_execution_epoch_test PROPERTIES TIMEOUT 20)
+glimmer_add_test_program(glimmer_core_execution_priority_test
+    SOURCES core/execution_priority_test.cc
+    LIBRARIES Glimmer::core Glimmer::project_options)
+glimmer_add_test_program(glimmer_native_execution_epoch_test
+    SOURCES interceptor/native_execution_epoch_test.cc
+        "${PROJECT_SOURCE_DIR}/src/interceptor/internal/native_execution_epoch.cc"
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/interceptor"
+    LIBRARIES Glimmer::control Glimmer::project_options Threads::Threads
+    TIMEOUT 20)
 add_library(glimmer_loaded_image_path_fixture SHARED interceptor/loaded_image_path_fixture.cc)
 target_link_libraries(glimmer_loaded_image_path_fixture PRIVATE Glimmer::project_options)
 glimmer_enable_clang_tidy(glimmer_loaded_image_path_fixture)
@@ -284,42 +185,28 @@ add_dependencies(glimmer_loaded_image_path_test glimmer_loaded_image_path_fixtur
 add_test(NAME glimmer_loaded_image_path_test
     COMMAND glimmer_loaded_image_path_test $<TARGET_FILE:glimmer_loaded_image_path_fixture>)
 set_tests_properties(glimmer_loaded_image_path_test PROPERTIES TIMEOUT 20)
-add_executable(glimmer_native_execution_heartbeat_test
-    interceptor/native_execution_heartbeat_test.cc
-    "${PROJECT_SOURCE_DIR}/src/interceptor/internal/native_execution_heartbeat.cc")
-target_include_directories(glimmer_native_execution_heartbeat_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/interceptor")
-target_link_libraries(glimmer_native_execution_heartbeat_test PRIVATE
-    Glimmer::control Glimmer::project_options Threads::Threads)
-glimmer_enable_clang_tidy(glimmer_native_execution_heartbeat_test)
-add_test(NAME glimmer_native_execution_heartbeat_test COMMAND glimmer_native_execution_heartbeat_test)
-set_tests_properties(glimmer_native_execution_heartbeat_test PROPERTIES TIMEOUT 20)
-add_executable(glimmer_process_call_gate_test
-    interceptor/process_call_gate_test.cc
-    "${PROJECT_SOURCE_DIR}/src/interceptor/internal/process_call_gate.cc")
-target_include_directories(glimmer_process_call_gate_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/interceptor")
-target_link_libraries(glimmer_process_call_gate_test PRIVATE
-    Glimmer::project_options Threads::Threads)
-glimmer_enable_clang_tidy(glimmer_process_call_gate_test)
-add_test(NAME glimmer_process_call_gate_test COMMAND glimmer_process_call_gate_test)
-set_tests_properties(glimmer_process_call_gate_test PROPERTIES TIMEOUT 20)
-add_executable(glimmer_operation_order_test
-    interceptor/operation_order_test.cc
-    "${PROJECT_SOURCE_DIR}/src/interceptor/internal/operation_order.cc")
-target_include_directories(glimmer_operation_order_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/interceptor")
-target_link_libraries(glimmer_operation_order_test PRIVATE Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_operation_order_test)
-add_test(NAME glimmer_operation_order_test COMMAND glimmer_operation_order_test)
-add_executable(glimmer_owned_kernel_arguments_test
-    interceptor/owned_kernel_arguments_test.cc
-    "${PROJECT_SOURCE_DIR}/src/interceptor/internal/owned_kernel_arguments.cc")
-target_include_directories(glimmer_owned_kernel_arguments_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/interceptor")
-target_link_libraries(glimmer_owned_kernel_arguments_test PRIVATE Glimmer::transform Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_owned_kernel_arguments_test)
-add_test(NAME glimmer_owned_kernel_arguments_test COMMAND glimmer_owned_kernel_arguments_test)
+glimmer_add_test_program(glimmer_native_execution_heartbeat_test
+    SOURCES interceptor/native_execution_heartbeat_test.cc
+        "${PROJECT_SOURCE_DIR}/src/interceptor/internal/native_execution_heartbeat.cc"
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/interceptor"
+    LIBRARIES Glimmer::control Glimmer::project_options Threads::Threads
+    TIMEOUT 20)
+glimmer_add_test_program(glimmer_process_call_gate_test
+    SOURCES interceptor/process_call_gate_test.cc
+        "${PROJECT_SOURCE_DIR}/src/interceptor/internal/process_call_gate.cc"
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/interceptor"
+    LIBRARIES Glimmer::project_options Threads::Threads
+    TIMEOUT 20)
+glimmer_add_test_program(glimmer_operation_order_test
+    SOURCES interceptor/operation_order_test.cc
+        "${PROJECT_SOURCE_DIR}/src/interceptor/internal/operation_order.cc"
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/interceptor"
+    LIBRARIES Glimmer::project_options)
+glimmer_add_test_program(glimmer_owned_kernel_arguments_test
+    SOURCES interceptor/owned_kernel_arguments_test.cc
+        "${PROJECT_SOURCE_DIR}/src/interceptor/internal/owned_kernel_arguments.cc"
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/interceptor"
+    LIBRARIES Glimmer::transform Glimmer::project_options)
 add_executable(glimmer_ptx_dump_fixture interceptor/ptx_dump_fixture.cc)
 target_link_libraries(glimmer_ptx_dump_fixture PRIVATE Glimmer::project_options)
 glimmer_enable_clang_tidy(glimmer_ptx_dump_fixture)
@@ -333,14 +220,10 @@ add_test(NAME glimmer_embedded_ptx_test
     COMMAND glimmer_embedded_ptx_test $<TARGET_FILE:glimmer_ptx_dump_fixture>)
 set_tests_properties(glimmer_embedded_ptx_test PROPERTIES
     ENVIRONMENT "GLIMMER_PERSISTENT_RUNTIME=1" TIMEOUT 20)
-add_executable(glimmer_ptx_transform_test
-    interceptor/ptx_transform_test.cc
-)
-target_include_directories(glimmer_ptx_transform_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/interceptor")
-target_link_libraries(glimmer_ptx_transform_test PRIVATE Glimmer::transform Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_ptx_transform_test)
-add_test(NAME glimmer_ptx_transform_test COMMAND glimmer_ptx_transform_test)
+glimmer_add_test_program(glimmer_ptx_transform_test
+    SOURCES interceptor/ptx_transform_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/interceptor"
+    LIBRARIES Glimmer::transform Glimmer::project_options)
 add_test(NAME glimmer_ptx_aggregate_parameters_test
     COMMAND glimmer_ptx_transform_test --aggregate-parameters)
 set_tests_properties(glimmer_ptx_aggregate_parameters_test PROPERTIES TIMEOUT 30)
@@ -582,91 +465,57 @@ if(Python3_Interpreter_FOUND)
     )
 endif()
 
-add_executable(glimmer_core_quota_ledger_test core/quota_ledger_test.cc)
+glimmer_add_test_program(glimmer_core_quota_ledger_test
+    SOURCES core/quota_ledger_test.cc
+    LIBRARIES Glimmer::core)
 
-target_link_libraries(glimmer_core_quota_ledger_test
-    PRIVATE
-        Glimmer::core
-)
+glimmer_add_test_program(glimmer_core_scheduler_test
+    SOURCES core/scheduler_test.cc
+    LIBRARIES Glimmer::core)
 
-glimmer_enable_clang_tidy(glimmer_core_quota_ledger_test)
-
-add_test(NAME glimmer_core_quota_ledger_test COMMAND glimmer_core_quota_ledger_test)
-
-add_executable(glimmer_core_scheduler_test core/scheduler_test.cc)
-
-target_link_libraries(glimmer_core_scheduler_test
-    PRIVATE
-        Glimmer::core
-)
-
-glimmer_enable_clang_tidy(glimmer_core_scheduler_test)
-
-add_test(NAME glimmer_core_scheduler_test COMMAND glimmer_core_scheduler_test)
-
-add_executable(glimmer_core_adaptive_slo_test core/adaptive_slo_test.cc)
-
-target_link_libraries(glimmer_core_adaptive_slo_test
-    PRIVATE
-        Glimmer::core
-)
-
-glimmer_enable_clang_tidy(glimmer_core_adaptive_slo_test)
-
-add_test(NAME glimmer_core_adaptive_slo_test COMMAND glimmer_core_adaptive_slo_test)
+glimmer_add_test_program(glimmer_core_adaptive_slo_test
+    SOURCES core/adaptive_slo_test.cc
+    LIBRARIES Glimmer::core)
 
 add_executable(glimmer_backend_simulated_test backend/simulated_backend_test.cc)
 
 add_executable(glimmer_control_execution_protocol_test control/execution_protocol_test.cc)
-add_executable(glimmer_control_execution_blas_protocol_test control/execution_blas_protocol_test.cc)
-target_link_libraries(glimmer_control_execution_blas_protocol_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_execution_blas_protocol_test)
-add_test(NAME glimmer_control_execution_blas_protocol_test
-    COMMAND glimmer_control_execution_blas_protocol_test)
-set_tests_properties(glimmer_control_execution_blas_protocol_test PROPERTIES TIMEOUT 30)
-add_executable(glimmer_control_execution_blas_extension_protocol_test
-    control/execution_blas_extension_protocol_test.cc)
-target_link_libraries(glimmer_control_execution_blas_extension_protocol_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_execution_blas_extension_protocol_test)
-add_test(NAME glimmer_control_execution_blas_extension_protocol_test
-    COMMAND glimmer_control_execution_blas_extension_protocol_test)
-set_tests_properties(glimmer_control_execution_blas_extension_protocol_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_execution_blas_protocol_test
+    SOURCES control/execution_blas_protocol_test.cc
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_execution_blas_extension_protocol_test
+    SOURCES control/execution_blas_extension_protocol_test.cc
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 30)
 target_link_libraries(glimmer_control_execution_protocol_test PRIVATE Glimmer::control)
 glimmer_enable_clang_tidy(glimmer_control_execution_protocol_test)
 add_test(NAME glimmer_control_execution_protocol_test COMMAND glimmer_control_execution_protocol_test)
 
-add_executable(glimmer_control_execution_socket_test control/execution_socket_test.cc)
-target_include_directories(glimmer_control_execution_socket_test PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_execution_socket_test PRIVATE Glimmer::control)
-target_link_options(glimmer_control_execution_socket_test PRIVATE
-    "LINKER:--wrap=send" "LINKER:--wrap=sendmsg" "LINKER:--wrap=recvmsg")
-glimmer_enable_clang_tidy(glimmer_control_execution_socket_test)
-add_test(NAME glimmer_control_execution_socket_test COMMAND glimmer_control_execution_socket_test)
-set_tests_properties(glimmer_control_execution_socket_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_execution_socket_test
+    SOURCES control/execution_socket_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control
+    LINK_OPTIONS "LINKER:--wrap=send" "LINKER:--wrap=sendmsg" "LINKER:--wrap=recvmsg"
+    TIMEOUT 30)
 add_test(NAME glimmer_control_execution_preparation_deadline_test
     COMMAND glimmer_control_execution_socket_test --preparation-deadlines)
 set_tests_properties(glimmer_control_execution_preparation_deadline_test PROPERTIES TIMEOUT 30)
 
-add_executable(glimmer_control_execution_receive_test control/execution_socket_receive_test.cc)
-target_include_directories(glimmer_control_execution_receive_test PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_execution_receive_test PRIVATE Glimmer::control)
-target_link_options(glimmer_control_execution_receive_test PRIVATE
-    "LINKER:--wrap=recvmsg" "LINKER:--wrap=eventfd" "LINKER:--wrap=read" "LINKER:--wrap=write"
-    "LINKER:--wrap=ppoll")
-glimmer_enable_clang_tidy(glimmer_control_execution_receive_test)
-add_test(NAME glimmer_control_execution_receive_test COMMAND glimmer_control_execution_receive_test)
-set_tests_properties(glimmer_control_execution_receive_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_execution_receive_test
+    SOURCES control/execution_socket_receive_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control
+    LINK_OPTIONS "LINKER:--wrap=recvmsg" "LINKER:--wrap=eventfd" "LINKER:--wrap=read"
+        "LINKER:--wrap=write" "LINKER:--wrap=ppoll"
+    TIMEOUT 30)
 
-add_executable(glimmer_control_execution_send_test control/execution_socket_send_test.cc)
-target_include_directories(glimmer_control_execution_send_test PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_execution_send_test PRIVATE Glimmer::control)
-target_link_options(glimmer_control_execution_send_test PRIVATE
-    "LINKER:--wrap=send" "LINKER:--wrap=sendmsg")
-glimmer_enable_clang_tidy(glimmer_control_execution_send_test)
-add_test(NAME glimmer_control_execution_send_test COMMAND glimmer_control_execution_send_test)
-set_tests_properties(glimmer_control_execution_send_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_execution_send_test
+    SOURCES control/execution_socket_send_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control
+    LINK_OPTIONS "LINKER:--wrap=send" "LINKER:--wrap=sendmsg"
+    TIMEOUT 30)
 
 target_link_libraries(glimmer_backend_simulated_test
     PRIVATE
@@ -677,118 +526,55 @@ glimmer_enable_clang_tidy(glimmer_backend_simulated_test)
 
 add_test(NAME glimmer_backend_simulated_test COMMAND glimmer_backend_simulated_test)
 
-add_executable(glimmer_backend_task_executor_test backend/task_executor_test.cc)
+glimmer_add_test_program(glimmer_backend_task_executor_test
+    SOURCES backend/task_executor_test.cc
+    LIBRARIES Glimmer::backend)
 
-target_link_libraries(glimmer_backend_task_executor_test
-    PRIVATE
-        Glimmer::backend
-)
+glimmer_add_test_program(glimmer_backend_execution_submission_queue_test
+    SOURCES backend/execution_submission_queue_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/backend"
+    LIBRARIES Glimmer::backend
+    TIMEOUT 30)
 
-glimmer_enable_clang_tidy(glimmer_backend_task_executor_test)
+glimmer_add_test_program(glimmer_control_process_memory_quota_test
+    SOURCES control/process_memory_quota_test.cc
+    LIBRARIES Glimmer::control)
 
-add_test(NAME glimmer_backend_task_executor_test COMMAND glimmer_backend_task_executor_test)
+glimmer_add_test_program(glimmer_control_composite_quota_test
+    SOURCES control/composite_quota_test.cc
+    LIBRARIES Glimmer::control)
 
-add_executable(glimmer_backend_execution_submission_queue_test
-    backend/execution_submission_queue_test.cc
-)
-target_include_directories(glimmer_backend_execution_submission_queue_test
-    PRIVATE "${PROJECT_SOURCE_DIR}/src/backend"
-)
-target_link_libraries(glimmer_backend_execution_submission_queue_test
-    PRIVATE Glimmer::backend
-)
-glimmer_enable_clang_tidy(glimmer_backend_execution_submission_queue_test)
-add_test(NAME glimmer_backend_execution_submission_queue_test
-    COMMAND glimmer_backend_execution_submission_queue_test
-)
-set_tests_properties(glimmer_backend_execution_submission_queue_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_device_capacity_quota_test
+    SOURCES control/device_capacity_quota_test.cc
+    LIBRARIES Glimmer::control)
 
-add_executable(glimmer_control_process_memory_quota_test control/process_memory_quota_test.cc)
-
-target_link_libraries(glimmer_control_process_memory_quota_test
-    PRIVATE
-        Glimmer::control
-)
-
-glimmer_enable_clang_tidy(glimmer_control_process_memory_quota_test)
-
-add_test(NAME glimmer_control_process_memory_quota_test
-    COMMAND glimmer_control_process_memory_quota_test)
-
-add_executable(glimmer_control_composite_quota_test control/composite_quota_test.cc)
-
-target_link_libraries(glimmer_control_composite_quota_test
-    PRIVATE
-        Glimmer::control
-)
-
-glimmer_enable_clang_tidy(glimmer_control_composite_quota_test)
-
-add_test(NAME glimmer_control_composite_quota_test
-    COMMAND glimmer_control_composite_quota_test)
-
-add_executable(glimmer_control_device_capacity_quota_test
-    control/device_capacity_quota_test.cc
-)
-
-target_link_libraries(glimmer_control_device_capacity_quota_test
-    PRIVATE
-        Glimmer::control
-)
-
-glimmer_enable_clang_tidy(glimmer_control_device_capacity_quota_test)
-
-add_test(NAME glimmer_control_device_capacity_quota_test
-    COMMAND glimmer_control_device_capacity_quota_test
-)
-
-add_executable(glimmer_control_shared_memory_quota_test
-    control/shared_memory_quota_test.cc
-)
-
-target_link_libraries(glimmer_control_shared_memory_quota_test
-    PRIVATE
-        Glimmer::control
-)
-
-glimmer_enable_clang_tidy(glimmer_control_shared_memory_quota_test)
-
-add_test(NAME glimmer_control_shared_memory_quota_test
-    COMMAND glimmer_control_shared_memory_quota_test)
+glimmer_add_test_program(glimmer_control_shared_memory_quota_test
+    SOURCES control/shared_memory_quota_test.cc
+    LIBRARIES Glimmer::control)
 
 add_executable(glimmer_control_task_admission_test control/task_admission_test.cc)
 
-add_executable(glimmer_control_native_epoch_admission_test control/native_epoch_admission_test.cc)
-target_link_libraries(glimmer_control_native_epoch_admission_test PRIVATE Glimmer::control)
-glimmer_enable_clang_tidy(glimmer_control_native_epoch_admission_test)
-add_test(NAME glimmer_control_native_epoch_admission_test
-    COMMAND glimmer_control_native_epoch_admission_test)
+glimmer_add_test_program(glimmer_control_native_epoch_admission_test
+    SOURCES control/native_epoch_admission_test.cc
+    LIBRARIES Glimmer::control)
 add_test(NAME glimmer_control_native_epoch_socket_test
     COMMAND glimmer_control_native_epoch_admission_test --socket)
 set_tests_properties(glimmer_control_native_epoch_admission_test PROPERTIES TIMEOUT 20)
 set_tests_properties(glimmer_control_native_epoch_socket_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 20)
 
 add_executable(glimmer_control_cooperative_admission_test control/cooperative_admission_test.cc)
-add_executable(glimmer_control_cooperative_gate_quarantine_test
-    control/cooperative_gate_quarantine_test.cc
-    "${PROJECT_SOURCE_DIR}/src/control/task_execution_endpoint.cc")
-target_include_directories(glimmer_control_cooperative_gate_quarantine_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/control")
-target_compile_definitions(glimmer_control_cooperative_gate_quarantine_test PRIVATE
-    GLIMMER_ENDPOINT_TESTING)
-target_link_libraries(glimmer_control_cooperative_gate_quarantine_test PRIVATE
-    Glimmer::control Glimmer::project_options)
-glimmer_enable_clang_tidy(glimmer_control_cooperative_gate_quarantine_test)
-add_test(NAME glimmer_control_cooperative_gate_quarantine_test
-    COMMAND glimmer_control_cooperative_gate_quarantine_test)
-set_tests_properties(glimmer_control_cooperative_gate_quarantine_test PROPERTIES TIMEOUT 20)
+glimmer_add_test_program(glimmer_control_cooperative_gate_quarantine_test
+    SOURCES control/cooperative_gate_quarantine_test.cc
+        "${PROJECT_SOURCE_DIR}/src/control/task_execution_endpoint.cc"
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    DEFINITIONS GLIMMER_ENDPOINT_TESTING
+    LIBRARIES Glimmer::control Glimmer::project_options
+    TIMEOUT 20)
 add_executable(glimmer_control_cooperative_launch_gate_test control/cooperative_launch_gate_test.cc)
-add_executable(glimmer_control_native_epoch_launch_gate_test control/native_epoch_launch_gate_test.cc)
-target_include_directories(glimmer_control_native_epoch_launch_gate_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_native_epoch_launch_gate_test PRIVATE Glimmer::control)
-glimmer_enable_clang_tidy(glimmer_control_native_epoch_launch_gate_test)
-add_test(NAME glimmer_control_native_epoch_launch_gate_test COMMAND glimmer_control_native_epoch_launch_gate_test)
+glimmer_add_test_program(glimmer_control_native_epoch_launch_gate_test
+    SOURCES control/native_epoch_launch_gate_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control)
 add_test(NAME glimmer_control_native_epoch_launch_gate_socket_test COMMAND glimmer_control_native_epoch_launch_gate_test --socket)
 set_tests_properties(glimmer_control_native_epoch_launch_gate_test PROPERTIES TIMEOUT 30)
 set_tests_properties(glimmer_control_native_epoch_launch_gate_socket_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
@@ -824,155 +610,91 @@ glimmer_enable_clang_tidy(glimmer_control_task_admission_test)
 add_test(NAME glimmer_control_task_admission_test
     COMMAND glimmer_control_task_admission_test)
 
-add_executable(glimmer_control_task_admission_concurrency_test
-    control/task_admission_concurrency_test.cc
-)
-target_link_libraries(glimmer_control_task_admission_concurrency_test PRIVATE Glimmer::control)
-glimmer_enable_clang_tidy(glimmer_control_task_admission_concurrency_test)
-add_test(NAME glimmer_control_task_admission_concurrency_test
-    COMMAND glimmer_control_task_admission_concurrency_test
-)
-set_tests_properties(glimmer_control_task_admission_concurrency_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_task_admission_concurrency_test
+    SOURCES control/task_admission_concurrency_test.cc
+    LIBRARIES Glimmer::control
+    TIMEOUT 30)
 
-add_executable(glimmer_control_launch_gate_test control/launch_gate_test.cc)
+glimmer_add_test_program(glimmer_control_launch_gate_test
+    SOURCES control/launch_gate_test.cc
+    LIBRARIES Glimmer::control)
 
-target_link_libraries(glimmer_control_launch_gate_test
-    PRIVATE
-        Glimmer::control
-)
-
-glimmer_enable_clang_tidy(glimmer_control_launch_gate_test)
-
-add_test(NAME glimmer_control_launch_gate_test
-    COMMAND glimmer_control_launch_gate_test)
-
-add_executable(glimmer_control_launch_gate_remote_process_test
-    control/launch_gate_remote_process_test.cc
-)
-
-target_link_libraries(glimmer_control_launch_gate_remote_process_test
-    PRIVATE
-        Glimmer::control
-)
-
-glimmer_enable_clang_tidy(glimmer_control_launch_gate_remote_process_test)
-
-add_test(NAME glimmer_control_launch_gate_remote_process_test
-    COMMAND glimmer_control_launch_gate_remote_process_test)
+glimmer_add_test_program(glimmer_control_launch_gate_remote_process_test
+    SOURCES control/launch_gate_remote_process_test.cc
+    LIBRARIES Glimmer::control)
 set_tests_properties(glimmer_control_launch_gate_remote_process_test PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 10
 )
 
-add_executable(glimmer_control_task_endpoint_test control/task_endpoint_test.cc)
+glimmer_add_test_program(glimmer_control_task_endpoint_test
+    SOURCES control/task_endpoint_test.cc
+    LIBRARIES Glimmer::backend Glimmer::control)
 
-target_link_libraries(glimmer_control_task_endpoint_test
-    PRIVATE
-        Glimmer::backend
-        Glimmer::control
-)
-
-glimmer_enable_clang_tidy(glimmer_control_task_endpoint_test)
-
-add_test(NAME glimmer_control_task_endpoint_test
-    COMMAND glimmer_control_task_endpoint_test)
-
-add_executable(glimmer_control_unix_socket_server_test
-    control/unix_socket_server_test.cc
-)
-
-target_link_libraries(glimmer_control_unix_socket_server_test
-    PRIVATE
-        Glimmer::control
-)
-
-glimmer_enable_clang_tidy(glimmer_control_unix_socket_server_test)
-
-add_test(NAME glimmer_control_unix_socket_server_test
-    COMMAND glimmer_control_unix_socket_server_test)
+glimmer_add_test_program(glimmer_control_unix_socket_server_test
+    SOURCES control/unix_socket_server_test.cc
+    LIBRARIES Glimmer::control)
 set_tests_properties(glimmer_control_unix_socket_server_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 15)
 
-add_executable(glimmer_control_socket_line_reader_test control/socket_line_reader_test.cc)
-target_include_directories(glimmer_control_socket_line_reader_test
-    PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_socket_line_reader_test PRIVATE Glimmer::control)
-glimmer_enable_clang_tidy(glimmer_control_socket_line_reader_test)
-add_test(NAME glimmer_control_socket_line_reader_test
-    COMMAND glimmer_control_socket_line_reader_test)
+glimmer_add_test_program(glimmer_control_socket_line_reader_test
+    SOURCES control/socket_line_reader_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control)
 set_tests_properties(glimmer_control_socket_line_reader_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 15)
 
 add_executable(glimmer_control_unix_socket_client_test control/unix_socket_client_test.cc)
-add_executable(glimmer_control_shared_control_channel_test control/shared_control_channel_test.cc)
-target_include_directories(glimmer_control_shared_control_channel_test
-    PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_shared_control_channel_test PRIVATE Glimmer::control)
-target_link_options(glimmer_control_shared_control_channel_test PRIVATE "LINKER:--wrap=poll")
-glimmer_enable_clang_tidy(glimmer_control_shared_control_channel_test)
-add_test(NAME glimmer_control_shared_control_channel_test
-    COMMAND glimmer_control_shared_control_channel_test)
+glimmer_add_test_program(glimmer_control_shared_control_channel_test
+    SOURCES control/shared_control_channel_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control
+    LINK_OPTIONS "LINKER:--wrap=poll")
 set_tests_properties(glimmer_control_shared_control_channel_test PROPERTIES
     SKIP_RETURN_CODE 77 TIMEOUT 30)
-add_executable(glimmer_control_owner_control_channel_test control/owner_control_channel_test.cc)
-target_include_directories(glimmer_control_owner_control_channel_test
-    PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_owner_control_channel_test PRIVATE Glimmer::control)
-glimmer_enable_clang_tidy(glimmer_control_owner_control_channel_test)
-add_test(NAME glimmer_control_owner_control_channel_test
-    COMMAND glimmer_control_owner_control_channel_test)
+glimmer_add_test_program(glimmer_control_owner_control_channel_test
+    SOURCES control/owner_control_channel_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control)
 set_tests_properties(glimmer_control_owner_control_channel_test PROPERTIES
     SKIP_RETURN_CODE 77 TIMEOUT 30)
 add_test(NAME glimmer_control_cooperative_shared_memory_test
     COMMAND glimmer_control_cooperative_launch_gate_test)
-add_executable(glimmer_control_owned_control_exchange_test control/owned_control_exchange_test.cc)
-target_include_directories(glimmer_control_owned_control_exchange_test
-    PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_owned_control_exchange_test PRIVATE Glimmer::control)
-glimmer_enable_clang_tidy(glimmer_control_owned_control_exchange_test)
-add_test(NAME glimmer_control_owned_control_exchange_test
-    COMMAND glimmer_control_owned_control_exchange_test)
+glimmer_add_test_program(glimmer_control_owned_control_exchange_test
+    SOURCES control/owned_control_exchange_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control)
 set_tests_properties(glimmer_control_owned_control_exchange_test PROPERTIES
     SKIP_RETURN_CODE 77 TIMEOUT 30)
-add_executable(glimmer_control_remote_control_operation_test control/remote_control_operation_test.cc)
-target_include_directories(glimmer_control_remote_control_operation_test
-    PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_remote_control_operation_test PRIVATE Glimmer::control)
-glimmer_enable_clang_tidy(glimmer_control_remote_control_operation_test)
-add_test(NAME glimmer_control_remote_control_operation_test
-    COMMAND glimmer_control_remote_control_operation_test)
-set_tests_properties(glimmer_control_remote_control_operation_test PROPERTIES TIMEOUT 30)
-add_executable(glimmer_control_process_control_mailbox_test control/process_control_mailbox_test.cc)
-target_include_directories(glimmer_control_process_control_mailbox_test
-    PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_process_control_mailbox_test PRIVATE Glimmer::control)
-glimmer_enable_clang_tidy(glimmer_control_process_control_mailbox_test)
-add_test(NAME glimmer_control_process_control_mailbox_test
-    COMMAND glimmer_control_process_control_mailbox_test)
-set_tests_properties(glimmer_control_process_control_mailbox_test PROPERTIES TIMEOUT 30)
-add_executable(glimmer_control_local_control_wake_test control/local_control_wake_test.cc)
-target_include_directories(glimmer_control_local_control_wake_test PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_local_control_wake_test PRIVATE Glimmer::control)
-glimmer_enable_clang_tidy(glimmer_control_local_control_wake_test)
-add_test(NAME glimmer_control_local_control_wake_test COMMAND glimmer_control_local_control_wake_test)
-set_tests_properties(glimmer_control_local_control_wake_test PROPERTIES TIMEOUT 30)
-add_executable(glimmer_control_prepared_control_future_test control/prepared_control_future_test.cc)
-target_include_directories(glimmer_control_prepared_control_future_test PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_prepared_control_future_test PRIVATE Glimmer::control)
-glimmer_enable_clang_tidy(glimmer_control_prepared_control_future_test)
-add_test(NAME glimmer_control_prepared_control_future_test COMMAND glimmer_control_prepared_control_future_test)
-set_tests_properties(glimmer_control_prepared_control_future_test PROPERTIES TIMEOUT 30)
-add_executable(glimmer_control_adjacent_control_handoff_test control/adjacent_control_handoff_test.cc)
-target_include_directories(glimmer_control_adjacent_control_handoff_test PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_adjacent_control_handoff_test PRIVATE Glimmer::control)
-glimmer_enable_clang_tidy(glimmer_control_adjacent_control_handoff_test)
-add_test(NAME glimmer_control_adjacent_control_handoff_test COMMAND glimmer_control_adjacent_control_handoff_test)
-set_tests_properties(glimmer_control_adjacent_control_handoff_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_remote_control_operation_test
+    SOURCES control/remote_control_operation_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control
+    TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_process_control_mailbox_test
+    SOURCES control/process_control_mailbox_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control
+    TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_local_control_wake_test
+    SOURCES control/local_control_wake_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control
+    TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_prepared_control_future_test
+    SOURCES control/prepared_control_future_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control
+    TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_adjacent_control_handoff_test
+    SOURCES control/adjacent_control_handoff_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control
+    TIMEOUT 30)
 
-add_executable(glimmer_control_owner_pumped_control_gate_test control/owner_pumped_control_gate_test.cc)
-target_include_directories(glimmer_control_owner_pumped_control_gate_test PRIVATE "${PROJECT_SOURCE_DIR}/src/control")
-target_link_libraries(glimmer_control_owner_pumped_control_gate_test PRIVATE Glimmer::control)
-glimmer_enable_clang_tidy(glimmer_control_owner_pumped_control_gate_test)
-add_test(NAME glimmer_control_owner_pumped_control_gate_test COMMAND glimmer_control_owner_pumped_control_gate_test)
-set_tests_properties(glimmer_control_owner_pumped_control_gate_test PROPERTIES TIMEOUT 30)
+glimmer_add_test_program(glimmer_control_owner_pumped_control_gate_test
+    SOURCES control/owner_pumped_control_gate_test.cc
+    INCLUDES "${PROJECT_SOURCE_DIR}/src/control"
+    LIBRARIES Glimmer::control
+    TIMEOUT 30)
 add_test(NAME glimmer_control_cooperative_shared_memory_process_test
     COMMAND glimmer_control_cooperative_remote_process_test
         $<TARGET_FILE:glimmer_task_execution_service>)
@@ -988,13 +710,9 @@ add_test(NAME glimmer_control_unix_socket_client_test
     COMMAND glimmer_control_unix_socket_client_test)
 set_tests_properties(glimmer_control_unix_socket_client_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 15)
 
-add_executable(glimmer_control_service_process_test control/service_process_test.cc)
-target_link_libraries(glimmer_control_service_process_test PRIVATE Glimmer::project_options)
-
-glimmer_enable_clang_tidy(glimmer_control_service_process_test)
-
-add_test(NAME glimmer_control_service_process_test
-    COMMAND glimmer_control_service_process_test)
+glimmer_add_test_program(glimmer_control_service_process_test
+    SOURCES control/service_process_test.cc
+    LIBRARIES Glimmer::project_options)
 set_tests_properties(glimmer_control_service_process_test PROPERTIES
     SKIP_RETURN_CODE 77
 )
@@ -1018,14 +736,6 @@ if(GLIMMER_ENABLE_CUDA_GPU_TESTS AND GLIMMER_BUILD_CUDA_BACKEND AND GLIMMER_BUIL
     )
 endif()
 
-add_executable(glimmer_control_task_protocol_test control/task_protocol_test.cc)
-
-target_link_libraries(glimmer_control_task_protocol_test
-    PRIVATE
-        Glimmer::control
-)
-
-glimmer_enable_clang_tidy(glimmer_control_task_protocol_test)
-
-add_test(NAME glimmer_control_task_protocol_test
-    COMMAND glimmer_control_task_protocol_test)
+glimmer_add_test_program(glimmer_control_task_protocol_test
+    SOURCES control/task_protocol_test.cc
+    LIBRARIES Glimmer::control)

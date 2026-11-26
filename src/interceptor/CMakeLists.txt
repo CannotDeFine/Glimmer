@@ -128,78 +128,47 @@ if(GLIMMER_ENABLE_SANITIZERS)
 endif()
 
 if(BUILD_TESTING)
-    add_executable(glimmer_persistent_sgemm_test
-        internal/persistent_sgemm.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/persistent_sgemm_test.cc")
-    target_include_directories(glimmer_persistent_sgemm_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(glimmer_persistent_sgemm_test PRIVATE Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_persistent_sgemm_test)
-    add_test(NAME glimmer_persistent_sgemm_test COMMAND glimmer_persistent_sgemm_test)
-    add_executable(glimmer_cuda_native_execution_epoch_test
-        internal/native_execution_epoch.cc
-        internal/cuda_native_execution_epoch.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_native_execution_epoch_test.cc")
-    target_include_directories(glimmer_cuda_native_execution_epoch_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_native_execution_epoch_test PRIVATE
-        Glimmer::control Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_cuda_native_execution_epoch_test)
-    add_test(NAME glimmer_cuda_native_execution_epoch_test COMMAND glimmer_cuda_native_execution_epoch_test)
-    set_tests_properties(glimmer_cuda_native_execution_epoch_test PROPERTIES TIMEOUT 30)
-    add_executable(glimmer_cuda_native_graph_registry_test
-        internal/cuda_native_graph_effects.cc
-        internal/cuda_native_graph_registry.cc
-        internal/cuda_event_projection_registry.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_native_graph_registry_test.cc")
-    target_include_directories(glimmer_cuda_native_graph_registry_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_native_graph_registry_test PRIVATE
-        Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_cuda_native_graph_registry_test)
-    add_test(NAME glimmer_cuda_native_graph_registry_test
-        COMMAND glimmer_cuda_native_graph_registry_test)
-    set_tests_properties(glimmer_cuda_native_graph_registry_test PROPERTIES TIMEOUT 20)
-    add_executable(glimmer_cuda_deferred_event_binding_test
-        internal/cuda_deferred_event_binding.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_deferred_event_binding_test.cc")
-    target_include_directories(glimmer_cuda_deferred_event_binding_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_deferred_event_binding_test PRIVATE
-        Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_cuda_deferred_event_binding_test)
-    add_test(NAME glimmer_cuda_deferred_event_binding_test
-        COMMAND glimmer_cuda_deferred_event_binding_test)
-    set_tests_properties(glimmer_cuda_deferred_event_binding_test PROPERTIES TIMEOUT 20)
-    add_executable(glimmer_cuda_native_graph_effects_test
-        internal/cuda_native_graph_effects.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_native_graph_effects_test.cc")
-    target_include_directories(glimmer_cuda_native_graph_effects_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_native_graph_effects_test PRIVATE
-        Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_cuda_native_graph_effects_test)
-    add_test(NAME glimmer_cuda_native_graph_effects_test
-        COMMAND glimmer_cuda_native_graph_effects_test)
-    set_tests_properties(glimmer_cuda_native_graph_effects_test PROPERTIES TIMEOUT 20)
-    add_executable(glimmer_cuda_event_projection_registry_test
-        internal/cuda_event_projection_registry.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_event_projection_registry_test.cc")
-    target_include_directories(glimmer_cuda_event_projection_registry_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_event_projection_registry_test PRIVATE
-        Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_cuda_event_projection_registry_test)
-    add_test(NAME glimmer_cuda_event_projection_registry_test
-        COMMAND glimmer_cuda_event_projection_registry_test)
-    set_tests_properties(glimmer_cuda_event_projection_registry_test PROPERTIES TIMEOUT 20)
-    add_executable(glimmer_cuda_copy_range_test
-        internal/cuda_copy_range.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_copy_range_test.cc")
-    target_include_directories(glimmer_cuda_copy_range_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_copy_range_test PRIVATE Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_cuda_copy_range_test)
-    add_test(NAME glimmer_cuda_copy_range_test COMMAND glimmer_cuda_copy_range_test)
+    glimmer_add_test_program(glimmer_persistent_sgemm_test
+        SOURCES internal/persistent_sgemm.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/persistent_sgemm_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}"
+        LIBRARIES Glimmer::project_options)
+    glimmer_add_test_program(glimmer_cuda_native_execution_epoch_test
+        SOURCES internal/native_execution_epoch.cc internal/cuda_native_execution_epoch.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_native_execution_epoch_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::control Glimmer::project_options Threads::Threads
+        TIMEOUT 30)
+    glimmer_add_test_program(glimmer_cuda_native_graph_registry_test
+        SOURCES internal/cuda_native_graph_effects.cc internal/cuda_native_graph_registry.cc
+            internal/cuda_event_projection_registry.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_native_graph_registry_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::project_options Threads::Threads
+        TIMEOUT 20)
+    glimmer_add_test_program(glimmer_cuda_deferred_event_binding_test
+        SOURCES internal/cuda_deferred_event_binding.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_deferred_event_binding_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::project_options Threads::Threads
+        TIMEOUT 20)
+    glimmer_add_test_program(glimmer_cuda_native_graph_effects_test
+        SOURCES internal/cuda_native_graph_effects.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_native_graph_effects_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::project_options Threads::Threads
+        TIMEOUT 20)
+    glimmer_add_test_program(glimmer_cuda_event_projection_registry_test
+        SOURCES internal/cuda_event_projection_registry.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_event_projection_registry_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::project_options Threads::Threads
+        TIMEOUT 20)
+    glimmer_add_test_program(glimmer_cuda_copy_range_test
+        SOURCES internal/cuda_copy_range.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_copy_range_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::project_options)
     # This ordinary application must not acquire an ASan preinit_array from
     # project_options: the injected library must survive cold sanitizer startup.
     add_executable(glimmer_cuda_loader_bootstrap_test
@@ -335,158 +304,89 @@ if(BUILD_TESTING)
             endforeach()
         endif()
     endif()
-    add_executable(glimmer_cuda_paused_native_executor_test
-        internal/cuda_paused_native_executor.cc
-        internal/diagnostics.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_paused_native_executor_test.cc")
-    target_include_directories(glimmer_cuda_paused_native_executor_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_paused_native_executor_test PRIVATE
-        Glimmer::control Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_cuda_paused_native_executor_test)
-    add_test(NAME glimmer_cuda_paused_native_executor_test COMMAND glimmer_cuda_paused_native_executor_test)
-    set_tests_properties(glimmer_cuda_paused_native_executor_test PROPERTIES TIMEOUT 20)
-    add_executable(glimmer_cuda_capture_origin_registry_test
-        internal/cuda_capture_origin_registry.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_capture_origin_registry_test.cc")
-    target_include_directories(glimmer_cuda_capture_origin_registry_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_capture_origin_registry_test PRIVATE
-        Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_cuda_capture_origin_registry_test)
-    add_test(NAME glimmer_cuda_capture_origin_registry_test
-        COMMAND glimmer_cuda_capture_origin_registry_test)
-    set_tests_properties(glimmer_cuda_capture_origin_registry_test PROPERTIES TIMEOUT 20)
-    add_executable(glimmer_cuda_cooperative_frontend_test
-        internal/cuda_cooperative_frontend.cc
-        internal/cuda_native_execution_epoch.cc
-        internal/native_execution_epoch.cc
-        internal/cuda_binary_slice.cc
-        internal/native_execution_heartbeat.cc
-        internal/cuda_process_native_session.cc
-        internal/cuda_event_projection_registry.cc
-        internal/cuda_cooperative_pool.cc
-        internal/cuda_admission_coordinator.cc
-        internal/cuda_queue_worker.cc
-        internal/cuda_operation_queue.cc
-        internal/operation_order.cc
-        internal/owned_kernel_arguments.cc
-        internal/diagnostics.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_cooperative_frontend_test.cc")
-    target_include_directories(glimmer_cuda_cooperative_frontend_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_cooperative_frontend_test PRIVATE
-        Glimmer::control Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_cuda_cooperative_frontend_test)
-    add_test(NAME glimmer_cuda_cooperative_frontend_test COMMAND glimmer_cuda_cooperative_frontend_test)
-    set_tests_properties(glimmer_cuda_cooperative_frontend_test PROPERTIES TIMEOUT 20)
-    add_executable(glimmer_cuda_cooperative_pool_test
-        internal/cuda_cooperative_pool.cc
-        internal/owned_kernel_arguments.cc
-        internal/diagnostics.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_cooperative_pool_test.cc")
-    target_include_directories(glimmer_cuda_cooperative_pool_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_cooperative_pool_test PRIVATE Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_cuda_cooperative_pool_test)
-    add_test(NAME glimmer_cuda_cooperative_pool_test COMMAND glimmer_cuda_cooperative_pool_test)
-    add_executable(glimmer_cuda_binary_slice_test
-        internal/cuda_binary_slice.cc
-        internal/cuda_operation_queue.cc
-        internal/operation_order.cc
-        internal/owned_kernel_arguments.cc
-        internal/diagnostics.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_binary_slice_test.cc")
-    target_include_directories(glimmer_cuda_binary_slice_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_binary_slice_test PRIVATE
-        Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_cuda_binary_slice_test)
-    add_test(NAME glimmer_cuda_binary_slice_test COMMAND glimmer_cuda_binary_slice_test)
-    set_tests_properties(glimmer_cuda_binary_slice_test PROPERTIES TIMEOUT 20)
-    add_executable(glimmer_cuda_gemm_slice_test
-        internal/cuda_binary_slice.cc
-        internal/cuda_gemm_allocation.cc
-        internal/cuda_copy_range.cc
-        internal/allocation_registry.cc
-        internal/cuda_operation_queue.cc
-        internal/operation_order.cc
-        internal/owned_kernel_arguments.cc
-        internal/diagnostics.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_gemm_slice_test.cc")
-    target_include_directories(glimmer_cuda_gemm_slice_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_gemm_slice_test PRIVATE
-        Glimmer::core Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_cuda_gemm_slice_test)
-    add_test(NAME glimmer_cuda_gemm_slice_test COMMAND glimmer_cuda_gemm_slice_test)
-    set_tests_properties(glimmer_cuda_gemm_slice_test PROPERTIES TIMEOUT 20)
-    add_executable(glimmer_qualified_cubin_test
-        internal/qualified_cubin.cc
-        internal/qualified_cubin_source.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/qualified_cubin_test.cc")
-    target_include_directories(glimmer_qualified_cubin_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(glimmer_qualified_cubin_test PRIVATE Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_qualified_cubin_test)
-    add_test(NAME glimmer_qualified_cubin_test COMMAND glimmer_qualified_cubin_test)
-    set_tests_properties(glimmer_qualified_cubin_test PROPERTIES TIMEOUT 120)
-    add_executable(glimmer_qualified_gemm_test
-        internal/qualified_cubin.cc
-        internal/qualified_cubin_source.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/qualified_gemm_test.cc")
-    target_include_directories(glimmer_qualified_gemm_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(glimmer_qualified_gemm_test PRIVATE Glimmer::project_options)
-    glimmer_enable_clang_tidy(glimmer_qualified_gemm_test)
-    add_test(NAME glimmer_qualified_gemm_test COMMAND glimmer_qualified_gemm_test)
-    set_tests_properties(glimmer_qualified_gemm_test PROPERTIES TIMEOUT 120)
-    add_executable(glimmer_cuda_queue_worker_test
-        internal/cuda_queue_worker.cc
-        internal/cuda_operation_queue.cc
-        internal/operation_order.cc
-        internal/owned_kernel_arguments.cc
-        internal/diagnostics.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_queue_worker_test.cc")
-    target_include_directories(glimmer_cuda_queue_worker_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_queue_worker_test PRIVATE
-        Glimmer::control Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_cuda_queue_worker_test)
-    add_test(NAME glimmer_cuda_queue_worker_test COMMAND glimmer_cuda_queue_worker_test)
-    set_tests_properties(glimmer_cuda_queue_worker_test PROPERTIES TIMEOUT 20)
-    add_executable(glimmer_cuda_operation_queue_test
-        internal/cuda_admission_coordinator.cc
-        internal/cuda_operation_queue.cc
-        internal/operation_order.cc
-        internal/owned_kernel_arguments.cc
-        internal/diagnostics.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_operation_queue_test.cc")
-    target_include_directories(glimmer_cuda_operation_queue_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_operation_queue_test PRIVATE
-        Glimmer::control Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_cuda_operation_queue_test)
-    add_test(NAME glimmer_cuda_operation_queue_test COMMAND glimmer_cuda_operation_queue_test)
-    set_tests_properties(glimmer_cuda_operation_queue_test PROPERTIES TIMEOUT 20)
-    add_executable(glimmer_cuda_owner_control_actor_test
-        internal/cuda_admission_coordinator.cc
-        internal/cuda_native_execution_epoch.cc
-        internal/native_execution_epoch.cc
-        internal/cuda_queue_worker.cc
-        internal/cuda_paused_native_executor.cc
-        internal/native_execution_heartbeat.cc
-        internal/cuda_operation_queue.cc
-        internal/operation_order.cc
-        internal/owned_kernel_arguments.cc
-        internal/diagnostics.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_owner_control_actor_test.cc")
-    target_include_directories(glimmer_cuda_owner_control_actor_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/src/control"
-        "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_owner_control_actor_test PRIVATE
-        Glimmer::control Glimmer::project_options Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_cuda_owner_control_actor_test)
-    add_test(NAME glimmer_cuda_owner_control_actor_test COMMAND glimmer_cuda_owner_control_actor_test)
-    set_tests_properties(glimmer_cuda_owner_control_actor_test PROPERTIES TIMEOUT 30)
+    glimmer_add_test_program(glimmer_cuda_paused_native_executor_test
+        SOURCES internal/cuda_paused_native_executor.cc internal/diagnostics.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_paused_native_executor_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::control Glimmer::project_options Threads::Threads
+        TIMEOUT 20)
+    glimmer_add_test_program(glimmer_cuda_capture_origin_registry_test
+        SOURCES internal/cuda_capture_origin_registry.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_capture_origin_registry_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::project_options Threads::Threads
+        TIMEOUT 20)
+    glimmer_add_test_program(glimmer_cuda_cooperative_frontend_test
+        SOURCES internal/cuda_cooperative_frontend.cc internal/cuda_native_execution_epoch.cc
+            internal/native_execution_epoch.cc internal/cuda_binary_slice.cc
+            internal/native_execution_heartbeat.cc internal/cuda_process_native_session.cc
+            internal/cuda_event_projection_registry.cc internal/cuda_cooperative_pool.cc
+            internal/cuda_admission_coordinator.cc internal/cuda_queue_worker.cc
+            internal/cuda_operation_queue.cc internal/operation_order.cc
+            internal/owned_kernel_arguments.cc internal/diagnostics.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_cooperative_frontend_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::control Glimmer::project_options Threads::Threads
+        TIMEOUT 20)
+    glimmer_add_test_program(glimmer_cuda_cooperative_pool_test
+        SOURCES internal/cuda_cooperative_pool.cc internal/owned_kernel_arguments.cc
+            internal/diagnostics.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_cooperative_pool_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::project_options)
+    glimmer_add_test_program(glimmer_cuda_binary_slice_test
+        SOURCES internal/cuda_binary_slice.cc internal/cuda_operation_queue.cc
+            internal/operation_order.cc internal/owned_kernel_arguments.cc internal/diagnostics.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_binary_slice_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::project_options Threads::Threads
+        TIMEOUT 20)
+    glimmer_add_test_program(glimmer_cuda_gemm_slice_test
+        SOURCES internal/cuda_binary_slice.cc internal/cuda_gemm_allocation.cc
+            internal/cuda_copy_range.cc internal/allocation_registry.cc
+            internal/cuda_operation_queue.cc internal/operation_order.cc
+            internal/owned_kernel_arguments.cc internal/diagnostics.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_gemm_slice_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::core Glimmer::project_options Threads::Threads
+        TIMEOUT 20)
+    glimmer_add_test_program(glimmer_qualified_cubin_test
+        SOURCES internal/qualified_cubin.cc internal/qualified_cubin_source.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/qualified_cubin_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}"
+        LIBRARIES Glimmer::project_options
+        TIMEOUT 120)
+    glimmer_add_test_program(glimmer_qualified_gemm_test
+        SOURCES internal/qualified_cubin.cc internal/qualified_cubin_source.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/qualified_gemm_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}"
+        LIBRARIES Glimmer::project_options
+        TIMEOUT 120)
+    glimmer_add_test_program(glimmer_cuda_queue_worker_test
+        SOURCES internal/cuda_queue_worker.cc internal/cuda_operation_queue.cc
+            internal/operation_order.cc internal/owned_kernel_arguments.cc internal/diagnostics.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_queue_worker_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::control Glimmer::project_options Threads::Threads
+        TIMEOUT 20)
+    glimmer_add_test_program(glimmer_cuda_operation_queue_test
+        SOURCES internal/cuda_admission_coordinator.cc internal/cuda_operation_queue.cc
+            internal/operation_order.cc internal/owned_kernel_arguments.cc internal/diagnostics.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_operation_queue_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::control Glimmer::project_options Threads::Threads
+        TIMEOUT 20)
+    glimmer_add_test_program(glimmer_cuda_owner_control_actor_test
+        SOURCES internal/cuda_admission_coordinator.cc internal/cuda_native_execution_epoch.cc
+            internal/native_execution_epoch.cc internal/cuda_queue_worker.cc
+            internal/cuda_paused_native_executor.cc internal/native_execution_heartbeat.cc
+            internal/cuda_operation_queue.cc internal/operation_order.cc
+            internal/owned_kernel_arguments.cc internal/diagnostics.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_owner_control_actor_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/src/control"
+            "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::control Glimmer::project_options Threads::Threads
+        TIMEOUT 30)
     add_executable(glimmer_cuda_persistent_kernel_test
         driver_dispatch.cc
         internal/qualified_cubin.cc
@@ -506,87 +406,30 @@ if(BUILD_TESTING)
     add_test(NAME glimmer_cuda_persistent_kernel_test COMMAND glimmer_cuda_persistent_kernel_test
         $<TARGET_FILE:glimmer_ptx_dump_fixture>)
 
-    add_executable(glimmer_cuda_launch_completion_tracker_test
-        driver_dispatch.cc
-        launch_completion_tracker.cc
-        internal/diagnostics.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/launch_completion_tracker_test.cc"
-    )
-    target_include_directories(glimmer_cuda_launch_completion_tracker_test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/interceptor" "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_launch_completion_tracker_test PRIVATE
-        Glimmer::control Glimmer::project_options "${CMAKE_DL_LIBS}" Threads::Threads)
-    glimmer_enable_clang_tidy(glimmer_cuda_launch_completion_tracker_test)
-    add_test(NAME glimmer_cuda_launch_completion_tracker_test
-        COMMAND glimmer_cuda_launch_completion_tracker_test)
-    set_tests_properties(glimmer_cuda_launch_completion_tracker_test PROPERTIES TIMEOUT 20)
+    glimmer_add_test_program(glimmer_cuda_launch_completion_tracker_test
+        SOURCES driver_dispatch.cc launch_completion_tracker.cc internal/diagnostics.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/launch_completion_tracker_test.cc"
+        INCLUDES "${PROJECT_SOURCE_DIR}/src/interceptor" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::control Glimmer::project_options "${CMAKE_DL_LIBS}" Threads::Threads
+        TIMEOUT 20)
 
-    add_executable(glimmer_cuda_interceptor_dlsym_test
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/dlsym_interceptor_test.cc"
-    )
-
-    target_link_libraries(glimmer_cuda_interceptor_dlsym_test
-        PRIVATE
-            Glimmer::project_options
-            "${CMAKE_DL_LIBS}"
-    )
-
-    glimmer_enable_clang_tidy(glimmer_cuda_interceptor_dlsym_test)
-
-    add_test(NAME glimmer_cuda_interceptor_dlsym_test
-        COMMAND glimmer_cuda_interceptor_dlsym_test
-    )
+    glimmer_add_test_program(glimmer_cuda_interceptor_dlsym_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/dlsym_interceptor_test.cc"
+        LIBRARIES Glimmer::project_options "${CMAKE_DL_LIBS}")
     set_tests_properties(glimmer_cuda_interceptor_dlsym_test PROPERTIES
         ENVIRONMENT "LD_PRELOAD=${glimmer_bootstrap_preload}"
     )
 
-    add_executable(glimmer_cuda_interceptor_allocation_registry_test
-        internal/allocation_registry.cc
-        internal/diagnostics.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/allocation_registry_test.cc"
-    )
+    glimmer_add_test_program(glimmer_cuda_interceptor_allocation_registry_test
+        SOURCES internal/allocation_registry.cc internal/diagnostics.cc
+            "${PROJECT_SOURCE_DIR}/tests/interceptor/allocation_registry_test.cc"
+        INCLUDES "${PROJECT_SOURCE_DIR}/src/interceptor" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::control Glimmer::project_options Threads::Threads)
 
-    target_include_directories(glimmer_cuda_interceptor_allocation_registry_test
-        PRIVATE
-            "${PROJECT_SOURCE_DIR}/src/interceptor"
-            "${CUDAToolkit_INCLUDE_DIRS}"
-    )
-
-    target_link_libraries(glimmer_cuda_interceptor_allocation_registry_test
-        PRIVATE
-            Glimmer::control
-            Glimmer::project_options
-            Threads::Threads
-    )
-
-    glimmer_enable_clang_tidy(glimmer_cuda_interceptor_allocation_registry_test)
-
-    add_test(NAME glimmer_cuda_interceptor_allocation_registry_test
-        COMMAND glimmer_cuda_interceptor_allocation_registry_test
-    )
-
-    add_executable(glimmer_cuda_interceptor_dispatch_test
-        driver_dispatch.cc
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/driver_dispatch_test.cc"
-    )
-
-    target_include_directories(glimmer_cuda_interceptor_dispatch_test
-        PRIVATE
-            "${PROJECT_SOURCE_DIR}/src/interceptor"
-            "${CUDAToolkit_INCLUDE_DIRS}"
-    )
-
-    target_link_libraries(glimmer_cuda_interceptor_dispatch_test
-        PRIVATE
-            Glimmer::project_options
-            "${CMAKE_DL_LIBS}"
-    )
-
-    glimmer_enable_clang_tidy(glimmer_cuda_interceptor_dispatch_test)
-
-    add_test(NAME glimmer_cuda_interceptor_dispatch_test
-        COMMAND glimmer_cuda_interceptor_dispatch_test
-    )
+    glimmer_add_test_program(glimmer_cuda_interceptor_dispatch_test
+        SOURCES driver_dispatch.cc "${PROJECT_SOURCE_DIR}/tests/interceptor/driver_dispatch_test.cc"
+        INCLUDES "${PROJECT_SOURCE_DIR}/src/interceptor" "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES Glimmer::project_options "${CMAKE_DL_LIBS}")
 
     add_library(glimmer_fake_cuda_driver SHARED
         "${PROJECT_SOURCE_DIR}/tests/interceptor/fake_cuda_driver.cc"
@@ -647,16 +490,11 @@ if(BUILD_TESTING)
     else()
         message(WARNING "Cold graph ABI sanitizer test unavailable: shared ASan runtime not found")
     endif()
-    add_executable(glimmer_cuda_primary_release_routing_test
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/primary_release_routing_test.cc")
-    target_include_directories(glimmer_cuda_primary_release_routing_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include")
-    target_link_libraries(glimmer_cuda_primary_release_routing_test PRIVATE
-        glimmer_cuda_interceptor Glimmer::project_options CUDA::cuda_driver)
-    glimmer_enable_clang_tidy(glimmer_cuda_primary_release_routing_test)
-    add_test(NAME glimmer_cuda_primary_release_routing_test
-        COMMAND glimmer_cuda_primary_release_routing_test)
-    set_tests_properties(glimmer_cuda_primary_release_routing_test PROPERTIES TIMEOUT 20)
+    glimmer_add_test_program(glimmer_cuda_primary_release_routing_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/primary_release_routing_test.cc"
+        INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include"
+        LIBRARIES glimmer_cuda_interceptor Glimmer::project_options CUDA::cuda_driver
+        TIMEOUT 20)
     add_executable(glimmer_cuda_driver_copy_routing_test
         "${PROJECT_SOURCE_DIR}/tests/interceptor/driver_copy_routing_test.cc")
     target_include_directories(glimmer_cuda_driver_copy_routing_test PRIVATE "${CUDAToolkit_INCLUDE_DIRS}")
@@ -705,13 +543,10 @@ if(BUILD_TESTING)
             TIMEOUT 20)
     endforeach()
 
-    add_executable(glimmer_cuda_persistent_preload_test
-        "${PROJECT_SOURCE_DIR}/tests/interceptor/persistent_preload_test.cc")
-    target_include_directories(glimmer_cuda_persistent_preload_test PRIVATE "${CUDAToolkit_INCLUDE_DIRS}")
-    target_link_libraries(glimmer_cuda_persistent_preload_test PRIVATE
-        glimmer_fake_cuda_driver Glimmer::project_options "${CMAKE_DL_LIBS}")
-    glimmer_enable_clang_tidy(glimmer_cuda_persistent_preload_test)
-    add_test(NAME glimmer_cuda_persistent_preload_test COMMAND glimmer_cuda_persistent_preload_test)
+    glimmer_add_test_program(glimmer_cuda_persistent_preload_test
+        SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/persistent_preload_test.cc"
+        INCLUDES "${CUDAToolkit_INCLUDE_DIRS}"
+        LIBRARIES glimmer_fake_cuda_driver Glimmer::project_options "${CMAKE_DL_LIBS}")
     set_tests_properties(glimmer_cuda_persistent_preload_test PROPERTIES
         ENVIRONMENT "GLIMMER_PERSISTENT_WORKER_BLOCKS=3;LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:glimmer_fake_cuda_driver>"
         TIMEOUT 20)
@@ -1330,18 +1165,13 @@ if(BUILD_TESTING)
         message(STATUS "Legacy Runtime graph hardware ABI test unavailable: CUDA 11 shared Runtime not installed")
     endif()
     if(GLIMMER_ENABLE_CUDA_GPU_TESTS)
-        add_executable(glimmer_persistent_sgemm_gpu_test
-            internal/persistent_sgemm.cc
-            internal/cuda_cooperative_pool.cc
-            internal/owned_kernel_arguments.cc
-            internal/diagnostics.cc
-            "${PROJECT_SOURCE_DIR}/tests/interceptor/persistent_sgemm_gpu_test.cc")
-        target_include_directories(glimmer_persistent_sgemm_gpu_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-        target_link_libraries(glimmer_persistent_sgemm_gpu_test PRIVATE
-            Glimmer::project_options CUDA::cuda_driver CUDA::cublas Threads::Threads)
-        glimmer_enable_clang_tidy(glimmer_persistent_sgemm_gpu_test)
-        add_test(NAME glimmer_persistent_sgemm_gpu_test COMMAND glimmer_persistent_sgemm_gpu_test)
-        set_tests_properties(glimmer_persistent_sgemm_gpu_test PROPERTIES TIMEOUT 120)
+        glimmer_add_test_program(glimmer_persistent_sgemm_gpu_test
+            SOURCES internal/persistent_sgemm.cc internal/cuda_cooperative_pool.cc
+                internal/owned_kernel_arguments.cc internal/diagnostics.cc
+                "${PROJECT_SOURCE_DIR}/tests/interceptor/persistent_sgemm_gpu_test.cc"
+            INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}"
+            LIBRARIES Glimmer::project_options CUDA::cuda_driver CUDA::cublas Threads::Threads
+            TIMEOUT 120)
         add_executable(glimmer_persistent_sgemm_public_gpu_test
             "${PROJECT_SOURCE_DIR}/tests/interceptor/persistent_sgemm_public_gpu_test.cc")
         target_link_libraries(glimmer_persistent_sgemm_public_gpu_test PRIVATE
@@ -1642,15 +1472,10 @@ if(BUILD_TESTING)
     glimmer_enable_clang_tidy(glimmer_cuda_interceptor_runtime_gpu_test)
 
     if(GLIMMER_ENABLE_CUDA_GPU_TESTS)
-        add_executable(glimmer_cuda_cooperative_accounting_gpu_test
-            "${PROJECT_SOURCE_DIR}/tests/interceptor/cooperative_accounting_gpu_test.cc")
-        target_include_directories(glimmer_cuda_cooperative_accounting_gpu_test PRIVATE
-            "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include")
-        target_link_libraries(glimmer_cuda_cooperative_accounting_gpu_test PRIVATE
-            glimmer_cuda_interceptor CUDA::cuda_driver Glimmer::project_options)
-        glimmer_enable_clang_tidy(glimmer_cuda_cooperative_accounting_gpu_test)
-        add_test(NAME glimmer_cuda_cooperative_accounting_gpu_test
-            COMMAND glimmer_cuda_cooperative_accounting_gpu_test)
+        glimmer_add_test_program(glimmer_cuda_cooperative_accounting_gpu_test
+            SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/cooperative_accounting_gpu_test.cc"
+            INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include"
+            LIBRARIES glimmer_cuda_interceptor CUDA::cuda_driver Glimmer::project_options)
         set_tests_properties(glimmer_cuda_cooperative_accounting_gpu_test PROPERTIES
             ENVIRONMENT "GLIMMER_MEMORY_LIMIT_BYTES=4096" TIMEOUT 30)
         add_executable(glimmer_cuda_operation_queue_gpu_test
@@ -1676,42 +1501,29 @@ if(BUILD_TESTING)
 
             internal/diagnostics.cc
             "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_operation_queue_gpu_test.cc")
-        add_executable(glimmer_cuda_native_execution_epoch_gpu_test
-            internal/native_execution_epoch.cc
-            internal/cuda_native_execution_epoch.cc
-            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_native_execution_epoch_gpu_test.cc")
-        target_include_directories(glimmer_cuda_native_execution_epoch_gpu_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-        target_link_libraries(glimmer_cuda_native_execution_epoch_gpu_test PRIVATE
-            Glimmer::control Glimmer::project_options CUDA::cuda_driver Threads::Threads)
-        glimmer_enable_clang_tidy(glimmer_cuda_native_execution_epoch_gpu_test)
-        add_test(NAME glimmer_cuda_native_execution_epoch_gpu_test COMMAND glimmer_cuda_native_execution_epoch_gpu_test)
-        set_tests_properties(glimmer_cuda_native_execution_epoch_gpu_test PROPERTIES TIMEOUT 30)
+        glimmer_add_test_program(glimmer_cuda_native_execution_epoch_gpu_test
+            SOURCES internal/native_execution_epoch.cc internal/cuda_native_execution_epoch.cc
+                "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_native_execution_epoch_gpu_test.cc"
+            INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}"
+            LIBRARIES Glimmer::control Glimmer::project_options CUDA::cuda_driver Threads::Threads
+            TIMEOUT 30)
         add_test(NAME glimmer_cuda_native_epoch_defaults_gpu_test
             COMMAND glimmer_cuda_native_execution_epoch_gpu_test --default-streams)
         set_tests_properties(glimmer_cuda_native_epoch_defaults_gpu_test PROPERTIES TIMEOUT 30)
         add_test(NAME glimmer_cuda_native_epoch_recovery_gpu_test
             COMMAND glimmer_cuda_native_execution_epoch_gpu_test --recovery)
         set_tests_properties(glimmer_cuda_native_epoch_recovery_gpu_test PROPERTIES TIMEOUT 30)
-        add_executable(glimmer_cuda_binary_slice_gpu_test
-            driver_dispatch.cc
-            internal/persistent_kernel.cc
-            internal/persistent_sgemm.cc
-            internal/embedded_ptx.cc
-
-            internal/qualified_cubin_source.cc
-            internal/cuda_binary_slice.cc
-            internal/qualified_cubin.cc
-            internal/cuda_operation_queue.cc
-            internal/operation_order.cc
-            internal/owned_kernel_arguments.cc
-            internal/diagnostics.cc
-            "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_binary_slice_gpu_test.cc")
-        target_include_directories(glimmer_cuda_binary_slice_gpu_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-        target_link_libraries(glimmer_cuda_binary_slice_gpu_test PRIVATE Glimmer::transform
-            Glimmer::project_options CUDA::cuda_driver Threads::Threads "${CMAKE_DL_LIBS}")
-        glimmer_enable_clang_tidy(glimmer_cuda_binary_slice_gpu_test)
-        add_test(NAME glimmer_cuda_binary_slice_gpu_test COMMAND glimmer_cuda_binary_slice_gpu_test)
-        set_tests_properties(glimmer_cuda_binary_slice_gpu_test PROPERTIES TIMEOUT 30)
+        glimmer_add_test_program(glimmer_cuda_binary_slice_gpu_test
+            SOURCES driver_dispatch.cc internal/persistent_kernel.cc internal/persistent_sgemm.cc
+                internal/embedded_ptx.cc internal/qualified_cubin_source.cc
+                internal/cuda_binary_slice.cc internal/qualified_cubin.cc
+                internal/cuda_operation_queue.cc internal/operation_order.cc
+                internal/owned_kernel_arguments.cc internal/diagnostics.cc
+                "${PROJECT_SOURCE_DIR}/tests/interceptor/cuda_binary_slice_gpu_test.cc"
+            INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}"
+            LIBRARIES Glimmer::transform Glimmer::project_options CUDA::cuda_driver Threads::Threads
+                "${CMAKE_DL_LIBS}"
+            TIMEOUT 30)
         add_executable(glimmer_cuda_gemm_slice_gpu_test
             internal/cuda_gemm_allocation.cc
             internal/cuda_copy_range.cc
@@ -1753,15 +1565,12 @@ if(BUILD_TESTING)
         add_test(NAME glimmer_cuda_native_epoch_default_frontend_gpu_test
             COMMAND glimmer_cuda_operation_queue_gpu_test --default-epochs)
         set_tests_properties(glimmer_cuda_native_epoch_default_frontend_gpu_test PROPERTIES TIMEOUT 60)
-        add_executable(glimmer_cuda_driver_graph_registration_gpu_test
-            "${PROJECT_SOURCE_DIR}/tests/interceptor/driver_graph_registration_gpu_test.cc")
-        target_include_directories(glimmer_cuda_driver_graph_registration_gpu_test PRIVATE
-            "${PROJECT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}" "${CUDAToolkit_INCLUDE_DIRS}")
-        target_link_libraries(glimmer_cuda_driver_graph_registration_gpu_test PRIVATE
-            glimmer_cuda_interceptor CUDA::cuda_driver Glimmer::project_options "${CMAKE_DL_LIBS}")
-        glimmer_enable_clang_tidy(glimmer_cuda_driver_graph_registration_gpu_test)
-        add_test(NAME glimmer_cuda_driver_graph_registration_gpu_test
-            COMMAND glimmer_cuda_driver_graph_registration_gpu_test)
+        glimmer_add_test_program(glimmer_cuda_driver_graph_registration_gpu_test
+            SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/driver_graph_registration_gpu_test.cc"
+            INCLUDES "${PROJECT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}"
+                "${CUDAToolkit_INCLUDE_DIRS}"
+            LIBRARIES glimmer_cuda_interceptor CUDA::cuda_driver Glimmer::project_options
+                "${CMAKE_DL_LIBS}")
         set_tests_properties(glimmer_cuda_driver_graph_registration_gpu_test PROPERTIES
             ENVIRONMENT "GLIMMER_COOPERATIVE_DRIVER_PREVIEW=1;GLIMMER_SCHEDULER_MODE=enforce;GLIMMER_SCHEDULER_POLICY=priority;GLIMMER_MEMORY_LIMIT_BYTES=8388608"
             TIMEOUT 60)
@@ -1779,18 +1588,12 @@ if(BUILD_TESTING)
                     ENVIRONMENT "GLIMMER_SCHEDULER_MODE=${event_mode};LD_PRELOAD=$<TARGET_FILE:glimmer_cuda_interceptor>")
             endif()
         endforeach()
-        add_executable(glimmer_cuda_cooperative_kernel_gpu_test
-            "${PROJECT_SOURCE_DIR}/tests/interceptor/cooperative_kernel_gpu_test.cc"
-            internal/owned_kernel_arguments.cc
-            )
-        target_include_directories(glimmer_cuda_cooperative_kernel_gpu_test PRIVATE
-            "${CMAKE_CURRENT_SOURCE_DIR}")
-        target_link_libraries(glimmer_cuda_cooperative_kernel_gpu_test PRIVATE Glimmer::transform
-            Glimmer::project_options Glimmer::core CUDA::cuda_driver)
-        glimmer_enable_clang_tidy(glimmer_cuda_cooperative_kernel_gpu_test)
-        add_test(NAME glimmer_cuda_cooperative_kernel_gpu_test
-            COMMAND glimmer_cuda_cooperative_kernel_gpu_test)
-        set_tests_properties(glimmer_cuda_cooperative_kernel_gpu_test PROPERTIES TIMEOUT 60)
+        glimmer_add_test_program(glimmer_cuda_cooperative_kernel_gpu_test
+            SOURCES "${PROJECT_SOURCE_DIR}/tests/interceptor/cooperative_kernel_gpu_test.cc"
+                internal/owned_kernel_arguments.cc
+            INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}"
+            LIBRARIES Glimmer::transform Glimmer::project_options Glimmer::core CUDA::cuda_driver
+            TIMEOUT 60)
 
         add_executable(glimmer_cuda_cooperative_remote_gpu_test
             "${PROJECT_SOURCE_DIR}/tests/control/cooperative_remote_process_test.cc"
