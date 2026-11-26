@@ -27,3 +27,4 @@
 - [Dependency management](DEPENDENCY_MANAGEMENT.md) — Reproducible dependency and SDK integration.
 - [Git guidelines](GIT_GUIDELINES.md) — Logical changes and commit conventions.
 - [Storage layout](STORAGE_LAYOUT.md) — Build reuse and generated-artifact retention.
+- [Scripts](../scripts/README.md) — Development tools and experiment collectors.
