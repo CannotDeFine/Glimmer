@@ -66,7 +66,11 @@ add_library(glimmer_cuda_interceptor SHARED
     nvml_dispatch.cc
     internal/nvml_dispatch.h
     driver_api_interceptor.cc
+    driver_api_launch.cc
+    driver_api_memory.cc
+    driver_api_runtime_memory.cc
     internal/driver_api_interceptor.h
+    internal/driver_api_interceptor_state.h
     driver_api_wrappers.cc
     blas_api_interceptor.cc
     driver_copy_wrappers.cc
