@@ -76,6 +76,14 @@ translation unit. The session implementation is now split into
 `internal/cuda_execution_session_state.h`; update their object selection and
 link-map checks before reusing them.
 
+`run_bert_delivery_boundary.py`, `run_bert_frontend_compiler.py` and
+`run_bert_frontend_lifecycle.py` likewise treat
+`src/interceptor/execution/driver_frontend.cc` as the only execution frontend
+translation unit. The frontend is now split into `driver_frontend.cc`,
+`driver_frontend_runtime.cc`, `driver_frontend_blas.cc`,
+`driver_frontend_nccl.cc` and `driver_frontend_dnn.cc` with private state in
+`driver_frontend_state.h`.
+
 ## Entry points without tests
 
 These are run by hand and have no CTest coverage: `bert_direct_cpu.py`,

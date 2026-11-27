@@ -11,7 +11,10 @@ function(glimmer_add_dnn_fixture_test)
         --unset=LD_LIBRARY_PATH "$<TARGET_FILE:${_dnn_application}>" ${_dnn_test_COMMAND})
 endfunction()
 
-add_library(glimmer_execution_interceptor SHARED driver_frontend.cc driver_lookup.cc)
+set(GLIMMER_EXECUTION_FRONTEND_SOURCES
+    driver_frontend.cc driver_frontend_runtime.cc driver_frontend_blas.cc
+    driver_frontend_nccl.cc driver_frontend_dnn.cc driver_lookup.cc)
+add_library(glimmer_execution_interceptor SHARED ${GLIMMER_EXECUTION_FRONTEND_SOURCES})
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$" AND CMAKE_SIZEOF_VOID_P EQUAL 8)
     enable_language(ASM)
     target_sources(glimmer_execution_interceptor PRIVATE ../dlsym_entry_x86_64.S)
@@ -102,7 +105,7 @@ if(BUILD_TESTING)
         endif()
         # This independently enabled DSO keeps the isolated socket fixture usable
         # even when production NCCL activation is disabled.
-        add_library(glimmer_execution_nccl_test_interceptor SHARED driver_frontend.cc driver_lookup.cc)
+        add_library(glimmer_execution_nccl_test_interceptor SHARED ${GLIMMER_EXECUTION_FRONTEND_SOURCES})
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$" AND CMAKE_SIZEOF_VOID_P EQUAL 8)
             target_sources(glimmer_execution_nccl_test_interceptor PRIVATE ../dlsym_entry_x86_64.S)
         endif()
@@ -2017,7 +2020,7 @@ if(BUILD_TESTING AND TARGET Glimmer::cudnn_headers)
         DEPENDS ${_dnn_test_providers} "${PROJECT_SOURCE_DIR}/cmake/CudnnProfileProviders.cmake"
         VERBATIM)
     add_library(glimmer_execution_dnn_test_interceptor SHARED
-        driver_frontend.cc driver_lookup.cc "${_dnn_test_identity_header}")
+        ${GLIMMER_EXECUTION_FRONTEND_SOURCES} "${_dnn_test_identity_header}")
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$" AND CMAKE_SIZEOF_VOID_P EQUAL 8)
         target_sources(glimmer_execution_dnn_test_interceptor PRIVATE ../dlsym_entry_x86_64.S)
     endif()

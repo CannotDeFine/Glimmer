@@ -20,7 +20,8 @@ struct GraphPreparationScope {
     GraphPreparationScope& operator=(const GraphPreparationScope&) = delete;
 };
 
-bool graph_quarantine_receipt(ExecutionOpcode operation, const ExecutionWireReply& reply) noexcept {
+inline bool graph_quarantine_receipt(ExecutionOpcode operation,
+                                     const ExecutionWireReply& reply) noexcept {
     if ((operation != ExecutionOpcode::kGraphControl &&
          operation != ExecutionOpcode::kGraphLaunch) ||
         reply.disposition != ExecutionWireDisposition::kRejected || reply.status ||
@@ -39,7 +40,8 @@ bool graph_quarantine_receipt(ExecutionOpcode operation, const ExecutionWireRepl
            (!observation.output_written && !observation.capture_status);
 }
 
-bool graph_capture_owner(const State& shared, const Entry* context, const Entry* stream) noexcept {
+inline bool graph_capture_owner(const State& shared, const Entry* context,
+                                const Entry* stream) noexcept {
     if (!shared.graph_capture) return false;
     const auto& capture = *shared.graph_capture;
     return capture.context == context && context && context->is_alive &&
@@ -48,7 +50,7 @@ bool graph_capture_owner(const State& shared, const Entry* context, const Entry*
            capture.status == cudaStreamCaptureStatusActive && (!stream || capture.stream == stream);
 }
 
-bool acquire_graph_caller(State& shared) noexcept {
+inline bool acquire_graph_caller(State& shared) noexcept {
     if (graph_caller) return true;
     if (!shared.next_graph_caller) return false;
     graph_caller = shared.next_graph_caller;
@@ -56,8 +58,8 @@ bool acquire_graph_caller(State& shared) noexcept {
     return true;
 }
 
-GraphReply call_graph(State& shared, Exclusion& exclusion, Entry& context,
-                      const ExecutionGraphRequest& request) {
+inline GraphReply call_graph(State& shared, Exclusion& exclusion, Entry& context,
+                             const ExecutionGraphRequest& request) {
     ExecutionPayloadWriter payload;
     if (!write_execution_graph_request(payload, request)) return {CUDA_ERROR_OUT_OF_MEMORY};
     if (context.active_calls >= kMaxHandles - 1 || context.active_mutations >= kMaxHandles - 1)
@@ -116,7 +118,7 @@ GraphReply call_graph(State& shared, Exclusion& exclusion, Entry& context,
     return result;
 }
 
-CUresult reject_graph_capture(State& shared, Exclusion& exclusion) {
+inline CUresult reject_graph_capture(State& shared, Exclusion& exclusion) {
     if (!shared.graph_capture) return CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED;
     auto& capture = *shared.graph_capture;
     if (capture.context->is_uncertain) return CUDA_ERROR_UNKNOWN;
@@ -141,9 +143,9 @@ CUresult reject_graph_capture(State& shared, Exclusion& exclusion) {
                : reply.status;
 }
 
-std::optional<ExecutionWireReply> graph_rpc_gate(State& shared, Exclusion& exclusion,
-                                                 Entry& context, ExecutionOpcode operation,
-                                                 bool is_observation) {
+inline std::optional<ExecutionWireReply> graph_rpc_gate(State& shared, Exclusion& exclusion,
+                                                        Entry& context, ExecutionOpcode operation,
+                                                        bool is_observation) {
     if (!shared.graph_capture || operation == ExecutionOpcode::kGraphControl) return std::nullopt;
     // Begin drains all prior physical work. These exact background operations
     // only retire already owned CPU frontier metadata; they issue no new work.
@@ -162,8 +164,9 @@ std::optional<ExecutionWireReply> graph_rpc_gate(State& shared, Exclusion& exclu
     return local_failure(reject_graph_capture(shared, exclusion));
 }
 
-CUresult capture_graph_command(State& shared, Exclusion& exclusion, Entry& context, Entry* stream,
-                               ExecutionGraphAction action, std::span<const std::byte> payload) {
+inline CUresult capture_graph_command(State& shared, Exclusion& exclusion, Entry& context,
+                                      Entry* stream, ExecutionGraphAction action,
+                                      std::span<const std::byte> payload) {
     if (!stream || !graph_capture_owner(shared, &context, stream))
         return reject_graph_capture(shared, exclusion);
     const ExecutionGraphRequest request{
@@ -185,21 +188,22 @@ CUresult capture_graph_command(State& shared, Exclusion& exclusion, Entry& conte
     return reply.original ? static_cast<CUresult>(*reply.original) : CUDA_SUCCESS;
 }
 
-cudaError_t graph_runtime_result(CUresult proof, std::optional<std::int32_t> original) noexcept {
+inline cudaError_t graph_runtime_result(CUresult proof,
+                                        std::optional<std::int32_t> original) noexcept {
     if (proof != CUDA_SUCCESS || !original) return runtime_result(proof);
     const auto result = static_cast<cudaError_t>(*original);
     if (result != cudaSuccess) runtime_last_error = result;
     return result;
 }
 
-bool graph_output_seed(void* output, ExecutionGraphRequest& request) noexcept {
+inline bool graph_output_seed(void* output, ExecutionGraphRequest& request) noexcept {
     request.has_output = output != nullptr;
     return !output || (writable_host_range(output, sizeof(request.output_seed)) &&
                        self_copy(&request.output_seed, output, sizeof(request.output_seed), false));
 }
 
-CUresult graph_begin(State& shared, Exclusion& exclusion, cudaStream_t handle,
-                     cudaStreamCaptureMode mode, std::optional<std::int32_t>& original) {
+inline CUresult graph_begin(State& shared, Exclusion& exclusion, cudaStream_t handle,
+                            cudaStreamCaptureMode mode, std::optional<std::int32_t>& original) {
     if (mode < cudaStreamCaptureModeGlobal || mode > cudaStreamCaptureModeRelaxed)
         return CUDA_ERROR_INVALID_VALUE;
     if (shared.graph_capture) return reject_graph_capture(shared, exclusion);
@@ -243,8 +247,8 @@ CUresult graph_begin(State& shared, Exclusion& exclusion, cudaStream_t handle,
     return reply.status;
 }
 
-CUresult publish_graph_object(State& shared, Entry& context, Entry& object, void* output,
-                              const GraphReply& reply) {
+inline CUresult publish_graph_object(State& shared, Entry& context, Entry& object, void* output,
+                                     const GraphReply& reply) {
     if (!reply.observation.output_written) return reply.status;
     std::uint64_t value{};
     if (reply.id) {
@@ -269,8 +273,8 @@ CUresult publish_graph_object(State& shared, Entry& context, Entry& object, void
     return reply.status;
 }
 
-CUresult graph_end(State& shared, Exclusion& exclusion, cudaStream_t handle, cudaGraph_t* output,
-                   std::optional<std::int32_t>& original) {
+inline CUresult graph_end(State& shared, Exclusion& exclusion, cudaStream_t handle,
+                          cudaGraph_t* output, std::optional<std::int32_t>& original) {
     auto* context = shared.context();
     if (!context) return CUDA_ERROR_INVALID_CONTEXT;
     Entry* stream{};
@@ -306,9 +310,9 @@ CUresult graph_end(State& shared, Exclusion& exclusion, cudaStream_t handle, cud
     return publish_graph_object(shared, *context, *graph, output, reply);
 }
 
-CUresult graph_capture_status(State& shared, Exclusion& exclusion, cudaStream_t handle,
-                              cudaStreamCaptureStatus* output,
-                              std::optional<std::int32_t>& original) {
+inline CUresult graph_capture_status(State& shared, Exclusion& exclusion, cudaStream_t handle,
+                                     cudaStreamCaptureStatus* output,
+                                     std::optional<std::int32_t>& original) {
     if (!writable(output)) return CUDA_ERROR_INVALID_VALUE;
     Entry* stream{};
     const auto resolved = resolve_owned_stream(shared, exclusion, handle, stream);
@@ -336,9 +340,9 @@ CUresult graph_capture_status(State& shared, Exclusion& exclusion, cudaStream_t 
     return publish(output, shared.graph_capture->status) ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
 }
 
-CUresult graph_instantiate(State& shared, Exclusion& exclusion, cudaGraphExec_t* output,
-                           cudaGraph_t handle, unsigned long long flags,
-                           std::optional<std::int32_t>& original) {
+inline CUresult graph_instantiate(State& shared, Exclusion& exclusion, cudaGraphExec_t* output,
+                                  cudaGraph_t handle, unsigned long long flags,
+                                  std::optional<std::int32_t>& original) {
     if (shared.graph_capture) return reject_graph_capture(shared, exclusion);
     auto* context = shared.context();
     auto* graph = shared.find(handle, Kind::kGraph);
@@ -357,8 +361,8 @@ CUresult graph_instantiate(State& shared, Exclusion& exclusion, cudaGraphExec_t*
     return publish_graph_object(shared, *context, *executable, output, reply);
 }
 
-CUresult graph_destroy(State& shared, Exclusion& exclusion, const void* handle, Kind kind,
-                       std::optional<std::int32_t>& original) {
+inline CUresult graph_destroy(State& shared, Exclusion& exclusion, const void* handle, Kind kind,
+                              std::optional<std::int32_t>& original) {
     if (shared.graph_capture) return reject_graph_capture(shared, exclusion);
     auto* context = shared.context();
     auto* graph = shared.find(handle, kind);
@@ -383,7 +387,8 @@ CUresult graph_destroy(State& shared, Exclusion& exclusion, const void* handle, 
     return reply.status;
 }
 
-CUresult graph_launch(State& shared, Exclusion& exclusion, CUgraphExec handle, CUstream target) {
+inline CUresult graph_launch(State& shared, Exclusion& exclusion, CUgraphExec handle,
+                             CUstream target) {
     if (shared.graph_capture) return reject_graph_capture(shared, exclusion);
     if (!context_stack.empty() && context_stack.back()->is_uncertain) return CUDA_ERROR_UNKNOWN;
     auto* context = shared.context();

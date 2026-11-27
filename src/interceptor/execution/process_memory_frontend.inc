@@ -7,7 +7,7 @@ struct ProcessMemoryReply {
     bool output_written{};
 };
 
-CUresult open_process_memory(State& shared, Exclusion& exclusion) {
+inline CUresult open_process_memory(State& shared, Exclusion& exclusion) {
     if (!shared.config) return CUDA_ERROR_NOT_INITIALIZED;
     if (!shared.process_memory_context) {
         auto* entry = shared.allocate_entry(Kind::kProcessMemoryContext, nullptr);
@@ -19,11 +19,11 @@ CUresult open_process_memory(State& shared, Exclusion& exclusion) {
     return shared.open_context(exclusion, *shared.process_memory_context, 0);
 }
 
-void quarantine_process_memory(State& shared) noexcept {
+inline void quarantine_process_memory(State& shared) noexcept {
     if (shared.process_memory_context) shared.process_memory_context->is_uncertain = true;
 }
 
-bool process_memory_output(void* output, ExecutionProcessMemoryRequest& request) noexcept {
+inline bool process_memory_output(void* output, ExecutionProcessMemoryRequest& request) noexcept {
     request.has_output = output != nullptr;
     request.output_seed = 0;
     // Seeded native observation preserves partial and equal-value writes. This
@@ -32,8 +32,8 @@ bool process_memory_output(void* output, ExecutionProcessMemoryRequest& request)
                        self_copy(&request.output_seed, output, sizeof(request.output_seed), false));
 }
 
-ProcessMemoryReply call_process_memory(State& shared, Exclusion& exclusion, Entry& target,
-                                       const ExecutionProcessMemoryRequest& request) {
+inline ProcessMemoryReply call_process_memory(State& shared, Exclusion& exclusion, Entry& target,
+                                              const ExecutionProcessMemoryRequest& request) {
     auto& carrier = *shared.process_memory_context;
     if (carrier.is_uncertain || target.is_uncertain) return {};
     if (carrier.active_calls >= kMaxHandles - 2 || carrier.active_mutations >= kMaxHandles - 2)
@@ -88,7 +88,7 @@ ProcessMemoryReply call_process_memory(State& shared, Exclusion& exclusion, Entr
             observation.output_written};
 }
 
-CUresult process_pool_id(State& shared, CUmemoryPool handle, std::uint64_t& id) noexcept {
+inline CUresult process_pool_id(State& shared, CUmemoryPool handle, std::uint64_t& id) noexcept {
     id = 0;
     if (!handle) return CUDA_SUCCESS;
     auto* entry = shared.find(handle, Kind::kMemoryPool);
@@ -100,8 +100,8 @@ CUresult process_pool_id(State& shared, CUmemoryPool handle, std::uint64_t& id) 
     return CUDA_SUCCESS;
 }
 
-CUresult query_process_pool(State& shared, Exclusion& exclusion, CUmemoryPool* output,
-                            CUdevice device, ExecutionProcessMemoryOperation operation) {
+inline CUresult query_process_pool(State& shared, Exclusion& exclusion, CUmemoryPool* output,
+                                   CUdevice device, ExecutionProcessMemoryOperation operation) {
     ExecutionProcessMemoryRequest request;
     request.operation = operation;
     request.device = device;
@@ -171,7 +171,8 @@ CUresult query_process_pool(State& shared, Exclusion& exclusion, CUmemoryPool* o
                                         : reply.status;
 }
 
-CUresult set_process_pool(State& shared, Exclusion& exclusion, CUdevice device, CUmemoryPool pool) {
+inline CUresult set_process_pool(State& shared, Exclusion& exclusion, CUdevice device,
+                                 CUmemoryPool pool) {
     const auto initialized = ensure_driver_initialization(shared, exclusion);
     if (initialized != CUDA_SUCCESS) return initialized;
     const auto opened = open_process_memory(shared, exclusion);
@@ -184,9 +185,9 @@ CUresult set_process_pool(State& shared, Exclusion& exclusion, CUdevice device, 
     return call_process_memory(shared, exclusion, *shared.process_memory_context, request).status;
 }
 
-CUresult allocate_process_memory(State& shared, Exclusion& exclusion, CUdeviceptr* output,
-                                 std::size_t bytes, CUmemoryPool pool, CUstream handle,
-                                 bool from_pool) {
+inline CUresult allocate_process_memory(State& shared, Exclusion& exclusion, CUdeviceptr* output,
+                                        std::size_t bytes, CUmemoryPool pool, CUstream handle,
+                                        bool from_pool) {
     ExecutionProcessMemoryRequest request;
     request.operation = from_pool ? ExecutionProcessMemoryOperation::kAllocateFromPoolAsync
                                   : ExecutionProcessMemoryOperation::kAllocateAsync;
@@ -274,7 +275,7 @@ CUresult allocate_process_memory(State& shared, Exclusion& exclusion, CUdevicept
                                         : reply.status;
 }
 
-CUresult release_process_memory(State& shared, Exclusion& exclusion, Entry& allocation) {
+inline CUresult release_process_memory(State& shared, Exclusion& exclusion, Entry& allocation) {
     auto* context = shared.context();
     if (!context) return CUDA_ERROR_INVALID_CONTEXT;
     if (allocation.kind != Kind::kProcessAllocation || !allocation.is_alive ||
